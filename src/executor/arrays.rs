@@ -541,6 +541,21 @@ pub(super) fn pathname_expand_array_token(token: &str) -> Option<Vec<String>> {
     Some(matches)
 }
 
+/// Restores the lexer carrier bytes (\x14 backslash, \x17 single quote,
+/// \x18 double quote, \x1f `$`, \x1a backtick, ANSI-C quote markers) that
+/// survive into raw assignment tokens, after operator-level quote removal
+/// has consumed the structural quotes (niubash #103 follow-up).
+fn restore_quote_carriers(value: &str) -> String {
+    value
+        .replace('\x1f', "$")
+        .replace('\x1a', "`")
+        .replace('\x14', "\\")
+        .replace('\x17', "'")
+        .replace('\x18', "\"")
+        .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
+        .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
+}
+
 pub(super) fn append_array_value(
     current: &str,
     value: &str,
@@ -632,6 +647,18 @@ pub(super) fn append_array_value(
         // a2=(-iname 'abc -iname 'def) stores (-iname, "abc -iname def")).
         let split_needed = token_has_unquoted_whitespace(&token);
         let partially_quoted = !quoted_token && (token.contains('\'') || token.contains('"'));
+        // GNU order (niubash #103 follow-up): quote removal on the raw
+        // token, then restore the lexer carrier bytes, then unquote the
+        // storage escaping. Unquoting first collapsed `x=(q\"q)` to `qq`
+        // and left raw 0x18 carrier bytes in stored elements.
+        let token = if partially_quoted
+            && !(token.starts_with("$'") && token.ends_with('\''))
+            && !token.starts_with('\x1d')
+        {
+            restore_quote_carriers(&remove_shell_quotes(&token))
+        } else {
+            token
+        };
         let token = unquote_storage_value(&token);
         if let Some(expanded_array) = token.strip_prefix('\x1d') {
             for value in field_split_values_with_ifs(expanded_array, ifs) {
@@ -654,13 +681,6 @@ pub(super) fn append_array_value(
             }
             continue;
         }
-        let token = if partially_quoted {
-            // A quote pair inside the token (not wrapping it) is still an
-            // OPERATOR pair: `'a b'c` stores `a bc`, with the quotes gone.
-            remove_shell_quotes(&token)
-        } else {
-            token
-        };
         if scalar_append && !entries.is_empty() {
             let current = entries.get(&0).cloned().unwrap_or_default();
             let appended = if integer {

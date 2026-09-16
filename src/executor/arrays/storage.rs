@@ -142,7 +142,7 @@ pub(in crate::executor) fn quote_array_value(value: &str) -> String {
         "\"{}\"",
         value
             .replace('\\', "\\\\")
-            .replace('"', "\\\\\"")
+            .replace('"', "\\\"")
             .replace('$', "\\$")
             .replace('\u{60}', "\\`")
     )
@@ -184,7 +184,7 @@ pub(in crate::executor) fn quote_assoc_display_key(key: &str) -> String {
         return format!(
             "\"{}\"",
             key.replace('\\', "\\\\")
-                .replace('"', "\\\\\"")
+                .replace('"', "\\\"")
                 .replace('$', "\\$")
                 .replace('\u{60}', "\\`")
         );
