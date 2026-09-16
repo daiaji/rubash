@@ -49,6 +49,17 @@ GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
 | **compound-array quoting** | intl 1194→1192 fails | Escaped `\"`/`\'`/`\\`/`` \` `` preserved through compound RHS; `quote_array_value` double-escape fix; data/syntax quote distinction in unquoted assignment RHS (`EChar=${Array[0x0022]}`) |
 | **signals** | BSD table → Linux table | USR1=10, CHLD=17, RTMIN=34, matching GNU 5.3.0 WSL contract |
 
+### Fixed today (Sep 16, 2026 — PR #111 + local batch landed on master)
+
+| Area | Before → After | What changed |
+|------|----------------|-------------|
+| **CRLF scripts (niubash #106)** | v1.1.2 regression → fixed | `\r\n` is stripped as a line terminator at lexer line-split time (main loop + heredoc bodies, so `<<EOF` delimiters match again); a lone `\r` not followed by `\n` is still ordinary word text, keeping the GNU-fidelity case intact |
+| **`-c` option parsing (niubash #107)** | broken → GNU-conformant | `-c` takes the *first non-option argument* as the command string; `bash -c -l 'script'` works and unblocks AI-agent/invoker tooling; bare `bash -c` keeps GNU's usage error (rc 2) |
+| **`type` output capture (niubash #108)** | leaked → captured | `$(type -t ls)` now returns `file` instead of printing to the process stdout and assigning an empty string |
+| **nameref** | 558 → 226 diff lines (run-83 check) | Indirect expansion, unset propagation and scoping fixes from the local batch |
+| **history** | 323 → 250 diff lines (run-83 check) | Nested same-shell script output ordering and IFS isolation fixes from the local batch |
+| **trap EXIT in `$( )` / `printf` exit path** | debug leftovers stripped | WIP `[DEBUG]` eprintln instrumentation removed before landing |
+
 ### What Rubash can already run
 
 - **bashdb** — core debugger loop (list, step, next, where, continue, quit) works under rubash

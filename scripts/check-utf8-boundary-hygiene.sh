@@ -44,7 +44,7 @@ src/executor/arithmetic/lvalue.rs::(is_shell_name_char\(ch as char\)|peek\(\)\? 
 src/executor/arithmetic/mod.rs::(pair\[[0-9]+\] as char|as_bytes\(\)\[\*index\] as char|\(c as char\))
 src/executor/arrays/storage.rs::(out\.push\(byte as char\)|b'0' \+ .*as char)
 src/executor/command_substitution_pipelines.rs::as_bytes\(\)\[[0-9]+\] as char
-src/executor/execution_misc.rs::as_bytes\(\)\[0\] as char
+src/executor/execution_misc.rs::(as_bytes\(\)\[0\] as char|out\.push\(byte as char\)|b'0' \+ .*as char)
 src/executor/init.rs::bytes\[0\] as char
 src/executor/parameter_core.rs::bytes\[index\] as char
 src/executor/path.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char

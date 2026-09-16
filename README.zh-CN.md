@@ -48,6 +48,17 @@ GNU Bash 5.3.0 测试套件 — 83 个文件，true-baseline 实测
 | **array/assoc** | 444+358 → 148+187 | 复合赋值引号分组、`"$@"`/`$0` 展开、算术下标副作用（`count++`） |
 | **信号表** | BSD 表 → Linux 表 | USR1=10、CHLD=17、RTMIN=34，与 GNU 5.3.0 WSL 契约一致 |
 
+### 本轮修复（2026-09-16 — PR #111 + 本地批次合入 master）
+
+| 领域 | 修复前 → 修复后 | 改了什么 |
+|------|----------------|---------|
+| **CRLF 脚本（niubash #106）** | v1.1.2 回归 → 已修 | 词法器行切分时把 `\r\n` 作为整体行终止符剥掉（主循环 + heredoc body，`<<EOF` 分隔符恢复匹配）；孤立 `\r`（后不跟 `\n`）仍保留为词文本，GNU 保真场景不丢 |
+| **`-c` 选项解析（niubash #107）** | 损坏 → GNU 一致 | `-c` 取「第一个非选项参数」作为命令串；`bash -c -l 'script'` 可用，AI agent/调用方不再被挡；裸 `bash -c` 保持 GNU 用法报错（rc 2） |
+| **`type` 输出捕获（niubash #108）** | 泄漏 → 捕获 | `$(type -t ls)` 现在正确返回 `file`，不再打到进程 stdout 并赋空串 |
+| **nameref** | 558 → 226 diff 行（run-83 check） | 间接展开、unset 传播、作用域修复（本地批次） |
+| **history** | 323 → 250 diff 行（run-83 check） | 同 shell 嵌套脚本输出顺序、IFS 隔离修复（本地批次） |
+| **`$( )`/`printf` 退出路径的 trap** | 调试残留清除 | 合入前剥掉 WIP 遗留的 `[DEBUG]` eprintln 插桩 |
+
 ### Rubash 已经能跑什么
 
 - **bashdb** — 核心调试闭环（list、step、next、where、continue、quit）在 rubash 下工作
