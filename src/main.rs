@@ -157,6 +157,11 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
     }
     let mut init_file: Option<String> = long_state.init_file.take();
     let pretty_print = long_state.pretty_print;
+    // niubash #107 / GNU shell.c: `-c` does not bind the NEXT argv — commands
+    // are read from the FIRST NON-OPTION argument. Options between `-c` and
+    // the command string (`bash -c -l 'echo hi'`) keep being parsed as
+    // options below, so remember that a command string is still owed.
+    let mut pending_command = false;
     while index < args.len() {
         match args[index].as_str() {
             "-o" | "+o" => {
@@ -236,29 +241,13 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 }
             }
             "-c" => {
-                if let Some(command) = args.get(index + 1) {
-                    executor.set_env("BASH_EXECUTION_STRING", command);
-                    if let Some(command_name) = args.get(index + 2) {
-                        executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
-                        executor.set_env("BASH_ARGV0", command_name);
-                        executor.set_positional_params(args[index + 3..].to_vec());
-                    } else {
-                        // GNU error.c get_name_for_error: `bash -c` without
-                        // explicit $0 reports as "bash: -c: line N:" (the
-                        // baseline sed normalizes /usr/local/bin/bash to bash).
-                        // Use the canonical shell name so `sed 's|^.*/||'`
-                        // matches the GNU baseline.
-                        executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
-                    }
-                    executor.set_env("__RUBASH_IS_C", "1");
-                    return run_command_string_with_init(executor, command, init_file.as_deref());
-                }
-                // GNU shell.c:519-528: a pending -c with no following argv
-                // reports through report_error and exits EX_BADUSAGE. The
-                // error prolog (error.c get_name_for_error) has no $0 yet at
-                // option-parse time, so the canonical shell name is used.
-                eprintln!("bash: -c: option requires an argument");
-                return 2;
+                // niubash #107 / GNU shell.c:857-889: keep parsing options —
+                // the first non-option argument encountered later in this
+                // loop becomes the command string (`script` arm). A `-c`
+                // with no remaining arguments at all keeps GNU's usage
+                // error, checked after the loop (shell.c:519-528).
+                pending_command = true;
+                index += 1;
             }
             "-s" => {
                 executor.set_positional_params(args[index + 1..].to_vec());
@@ -273,16 +262,11 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 index += 1;
             }
             script => {
-                if pretty_print {
-                    // GNU shell.c:830-831: --pretty-print replaces execution
-                    // with pretty_print_loop over the input file
-                    // (eval.c:215-253).
-                    return run_pretty_print(executor, script);
-                }
-                // GNU shell.c:966-971 (parse_shell_options default case +
-                // change_flag): a short-option character outside the set -o
-                // flag table is a usage error: "%c%c: invalid option" (with
-                // the leading +/- sign), the usage block on stderr, exit 2.
+                // niubash #107: GNU parses options until the first
+                // non-option argument; with a pending `-c`, that argument is
+                // the command string and the rest of argv becomes $0, $1, ...
+                // (shell.c:523-528). Option-looking arguments still get the
+                // GNU invalid-option check first (`bash -c -Z ...`).
                 if script.starts_with('-') || script.starts_with('+') {
                     let sign = &script[..1];
                     let invalid = script[1..].chars().find(|ch| {
@@ -295,6 +279,29 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                         return 2;
                     }
                 }
+                if pending_command {
+                    executor.set_env("BASH_EXECUTION_STRING", script);
+                    if let Some(command_name) = args.get(index + 1) {
+                        executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
+                        executor.set_env("BASH_ARGV0", command_name);
+                        executor.set_positional_params(args[index + 2..].to_vec());
+                    } else {
+                        // GNU error.c get_name_for_error: `bash -c` without
+                        // explicit $0 reports as "bash: -c: line N:" (the
+                        // baseline sed normalizes /usr/local/bin/bash to bash).
+                        // Use the canonical shell name so `sed 's|^.*/||'`
+                        // matches the GNU baseline.
+                        executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
+                    }
+                    executor.set_env("__RUBASH_IS_C", "1");
+                    return run_command_string_with_init(executor, script, init_file.as_deref());
+                }
+                if pretty_print {
+                    // GNU shell.c:830-831: --pretty-print replaces execution
+                    // with pretty_print_loop over the input file
+                    // (eval.c:215-253).
+                    return run_pretty_print(executor, script);
+                }
                 return run_script_file_with_init(
                     executor,
                     script,
@@ -303,6 +310,14 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 );
             }
         }
+    }
+
+    if pending_command {
+        // GNU shell.c:519-528: a pending -c with no following argv reports
+        // through report_error and exits EX_BADUSAGE. Empirical GNU 5.3.0:
+        // `bash -c` -> "bash: -c: option requires an argument", exit 2.
+        eprintln!("bash: -c: option requires an argument");
+        return 2;
     }
 
     run_no_script_with_init(executor, init_file.as_deref())

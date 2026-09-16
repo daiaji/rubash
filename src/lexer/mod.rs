@@ -186,7 +186,14 @@ fn tokenize_with_heredocs(
     let mut comsub_heredocs: Vec<ComsubHeredocHeader> = Vec::new();
     let mut header_scan_from = 0usize;
 
-    while let Some(line) = lines.next() {
+    while let Some(raw_line) = lines.next() {
+        // niubash #106: a '\r' immediately before the '\n' belongs to the
+        // CRLF line terminator, not to the last word — a Windows-native
+        // shell must accept CRLF scripts (v1.1.1 did; the shipped
+        // oh-my-niu bundle is 100% CRLF). The GNU-fidelity rule this loop
+        // documents above still applies to a '\r' NOT followed by '\n':
+        // `set ""<CR>` with a bare carriage return keeps $1 = "\r".
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         // str::lines() drops the trailing empty string that split('\n')
         // produces when the input ends with '\n'. Replicate that here.
         if line.is_empty() && lines.peek().is_none() {
@@ -374,7 +381,14 @@ fn tokenize_with_heredocs(
                 if body_line.is_empty() && lines.peek().is_none() {
                     break;
                 }
-                let body_line = body_line.to_string();
+                // niubash #106: heredoc bodies share the main loop's CRLF
+                // rule — a trailing '\r' is the line terminator, so CRLF
+                // scripts can match their own delimiters and bodies stay
+                // clean. Bare '\r' (no following '\n') is preserved.
+                let body_line = body_line
+                    .strip_suffix('\r')
+                    .unwrap_or(body_line)
+                    .to_string();
                 position += body_line.len() + 1;
                 line_number += 1;
                 let mut raw_line = body_line.to_string();
