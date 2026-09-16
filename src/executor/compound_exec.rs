@@ -574,7 +574,9 @@ impl Executor {
         // inherited traps at entry, so a pending EXIT here can only have
         // been registered by the body itself; a trap action that calls
         // exit N replaces the subshell status (bash exit_shell semantics).
-        let status = match self.run_exit_trap_for_status(status) {
+        let status = match self
+            .run_exit_trap_for_status_with_output_redirects(status, Some(&stdio_redirect_cmd))
+        {
             Ok(trap_status) => trap_status,
             Err(error) => {
                 self.restore_shell_env(saved_env);

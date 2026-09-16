@@ -470,12 +470,18 @@ impl Executor {
 
         if words.first().map(String::as_str) == Some("type")
             && words.get(1).map(String::as_str) == Some("-t")
-            && words.get(2).map(String::as_str) == Some("test")
+            && words.len() >= 3
         {
-            if crate::builtins::enable::is_disabled(&self.env_vars, "test") {
-                return String::new();
+            let mut subshell = self.command_substitution_executor();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Ok(status) = subshell.execute_type_with_io(&words[1..], &mut stdout, &mut stderr)
+            {
+                self.last_command_substitution_status.set(Some(status));
+                return String::from_utf8_lossy(&stdout)
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string();
             }
-            return "builtin".to_string();
         }
 
         if words.first().map(String::as_str) == Some("kill")

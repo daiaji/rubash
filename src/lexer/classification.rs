@@ -44,7 +44,7 @@ pub(super) fn is_brace_expansion(word: &str) -> bool {
 }
 
 pub(super) fn is_word_delimiter(ch: char) -> bool {
-    " \t\n|&;<>(){}".contains(ch)
+    " \t\r\n|&;<>(){}".contains(ch)
 }
 
 pub(super) fn assignment_value_is_quoted(raw: &str) -> bool {

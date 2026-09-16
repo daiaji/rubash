@@ -74,6 +74,14 @@ impl<'a> Lexer<'a> {
         let c = self.advance()?;
 
         match c {
+            '\r' => {
+                if self.peek() == Some('\n') {
+                    self.advance();
+                }
+                let mut token = Token::new(TokenKind::Semicolon, ";", start);
+                token.line_break = true;
+                Some(token)
+            }
             '\n' => {
                 let mut token = Token::new(TokenKind::Semicolon, ";", start);
                 token.line_break = true;

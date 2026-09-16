@@ -2767,6 +2767,57 @@ fn script_file_uses_script_name_and_positional_arguments() {
 }
 
 #[test]
+fn script_file_accepts_crlf_control_flow() {
+    let script_path = Path::new("target").join("rubash-cli-crlf-control-flow.sh");
+    fs::create_dir_all("target").unwrap();
+    fs::write(
+        &script_path,
+        b"if true; then\r\n  export NIUBASH=1\r\n  printf 'crlf:%s\\n' \"$NIUBASH\"\r\nfi\r\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script_path)
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(script_path);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "crlf:1\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn source_file_accepts_crlf_control_flow() {
+    let script_dir = Path::new("target").join("rubash-cli-crlf-source");
+    let main_path = script_dir.join("main.sh");
+    let lib_path = script_dir.join("lib.niu");
+    fs::create_dir_all(&script_dir).unwrap();
+    fs::write(
+        &lib_path,
+        b"if true; then\r\n  printf 'sourced-crlf\\n'\r\nfi\r\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        format!(". {}\n", lib_path.to_string_lossy().replace('\\', "/")),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(main_path.to_string_lossy().replace('\\', "/"))
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(&main_path);
+    let _ = fs::remove_file(&lib_path);
+    let _ = fs::remove_dir(&script_dir);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "sourced-crlf\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn script_file_accepts_shell_style_drive_path() {
     let script_path = Path::new("target").join("rubash-cli-shell-drive-path.sh");
     fs::create_dir_all("target").unwrap();
@@ -3024,6 +3075,53 @@ fn command_string_sets_c_shell_flag() {
     assert!(String::from_utf8_lossy(&output.stdout)
         .trim_end()
         .contains('c'));
+}
+
+#[test]
+fn c_command_accepts_login_option_after_c_before_command_string() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("-l")
+        .arg("printf '%s\\n' hi")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn c_command_substitution_captures_type_t_output_without_leak() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("A=$(type -t cat); printf 'A=[%s]\\n' \"$A\"")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "A=[file]\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn c_command_subshell_exit_trap_output_honors_redirect() {
+    let output_path = Path::new("target").join("rubash-cli-subtrap-redirect.txt");
+    let _ = fs::remove_file(&output_path);
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(format!(
+            "( trap 'echo T' EXIT; echo body ) > {} 2>&1; cat {}",
+            shell_test_path(&output_path),
+            shell_test_path(&output_path)
+        ))
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(&output_path);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "body\nT\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
 #[test]

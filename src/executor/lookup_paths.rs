@@ -13,8 +13,8 @@ impl Executor {
         if matches!(name, "mv") {
             return Some("/usr/bin/mv".to_string());
         }
-        if matches!(name, "cat") {
-            return Some("/bin/cat".to_string());
+        if matches!(name, "cat" | "ls") {
+            return Some(format!("/bin/{name}"));
         }
         if name == "e"
             && self
@@ -58,8 +58,8 @@ impl Executor {
         if matches!(name, "mv") {
             paths.push("/usr/bin/mv".to_string());
         }
-        if matches!(name, "cat") {
-            paths.push("/bin/cat".to_string());
+        if matches!(name, "cat" | "ls") {
+            paths.push(format!("/bin/{name}"));
         }
         if name == "e"
             && self

@@ -176,6 +176,14 @@ impl Executor {
         &mut self,
         exit_status: i32,
     ) -> Result<i32, ExecuteError> {
+        self.run_exit_trap_for_status_with_output_redirects(exit_status, None)
+    }
+
+    pub(in crate::executor) fn run_exit_trap_for_status_with_output_redirects(
+        &mut self,
+        exit_status: i32,
+        redirect_cmd: Option<&CommandNode>,
+    ) -> Result<i32, ExecuteError> {
         let Some(action) = crate::builtins::trap::take_exit_trap(&mut self.env_vars) else {
             return Ok(exit_status);
         };
@@ -185,7 +193,10 @@ impl Executor {
 
         self.exit_code = exit_status;
         let tokens = crate::lexer::tokenize(&action);
-        let ast = crate::parser::parse(&tokens);
+        let mut ast = crate::parser::parse(&tokens);
+        if let Some(redirect_cmd) = redirect_cmd {
+            self.apply_inherited_command_output_redirects(redirect_cmd, &mut ast)?;
+        }
         let saved_trap_command = self.debug_trap_command.borrow().clone();
         let has_command = self.debug_trap_command.borrow().is_none();
         if has_command {
@@ -608,9 +619,29 @@ impl Executor {
         cmd: &CommandNode,
         ast: &mut Ast,
     ) -> Result<(), ExecuteError> {
+        self.apply_command_output_redirects_inner(cmd, ast, true)
+    }
+
+    pub(crate) fn apply_inherited_command_output_redirects(
+        &mut self,
+        cmd: &CommandNode,
+        ast: &mut Ast,
+    ) -> Result<(), ExecuteError> {
+        self.apply_command_output_redirects_inner(cmd, ast, false)
+    }
+
+    fn apply_command_output_redirects_inner(
+        &mut self,
+        cmd: &CommandNode,
+        ast: &mut Ast,
+        prepare_targets: bool,
+    ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
-            if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
+            if prepare_targets
+                && !is_closed_redirect_target(&target)
+                && redirect_target_fd(&target).is_none()
+            {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
             let append_redirect = Redirect {
@@ -655,7 +686,8 @@ impl Executor {
 
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
-            if !is_closed_redirect_target(&target)
+            if prepare_targets
+                && !is_closed_redirect_target(&target)
                 && redirect_target_fd(&target).is_none()
                 && !is_null_device(&target)
             {

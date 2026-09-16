@@ -90,13 +90,17 @@ impl ShellInvocation {
             let arg = expanded[i].as_str();
             match arg {
                 "-c" => {
+                    i += 1;
+                    while let Some(next) = parse_post_c_option(&expanded, i, &mut out)? {
+                        i = next;
+                    }
                     let command = expanded
-                        .get(i + 1)
+                        .get(i)
                         .ok_or_else(|| "-c: option requires an argument".to_string())?;
                     out.command = Some(command.clone());
-                    if let Some(name) = expanded.get(i + 2) {
+                    if let Some(name) = expanded.get(i + 1) {
                         out.command_name = Some(name.clone());
-                        out.positional_params = expanded[i + 3..].to_vec();
+                        out.positional_params = expanded[i + 2..].to_vec();
                     }
                     return Ok(out);
                 }
@@ -267,6 +271,86 @@ impl ShellInvocation {
     }
 }
 
+fn parse_post_c_option(
+    args: &[String],
+    index: usize,
+    out: &mut ShellInvocation,
+) -> Result<Option<usize>, String> {
+    let Some(arg) = args.get(index).map(String::as_str) else {
+        return Ok(None);
+    };
+    match arg {
+        "--login" | "-l" => {
+            out.login = true;
+            Ok(Some(index + 1))
+        }
+        "--posix" => {
+            out.posix = true;
+            Ok(Some(index + 1))
+        }
+        "--noprofile" => {
+            out.no_profile = true;
+            Ok(Some(index + 1))
+        }
+        "--norc" => {
+            out.no_rc = true;
+            Ok(Some(index + 1))
+        }
+        "--noediting" => {
+            out.no_editing = true;
+            Ok(Some(index + 1))
+        }
+        "--debug" | "--debugger" => {
+            out.debugger = true;
+            Ok(Some(index + 1))
+        }
+        "-o" | "+o" => {
+            let name = args
+                .get(index + 1)
+                .ok_or_else(|| format!("{arg}: option requires an argument"))?;
+            out.shell_flags.push((name.clone(), arg == "-o"));
+            Ok(Some(index + 2))
+        }
+        "-O" | "+O" => {
+            let name = args
+                .get(index + 1)
+                .ok_or_else(|| format!("{arg}: option requires an argument"))?;
+            out.shopt_flags.push((name.clone(), arg == "-O"));
+            Ok(Some(index + 2))
+        }
+        option if option.starts_with('-') || option.starts_with('+') => {
+            let enabled = option.starts_with('-');
+            let flags = &option[1..];
+            if flags.is_empty() || flags.contains('o') || flags.contains('O') {
+                return Ok(None);
+            }
+            for flag in flags.chars() {
+                match flag {
+                    'i' => {
+                        out.interactive = enabled;
+                        continue;
+                    }
+                    'D' => {
+                        out.dump_strings = enabled;
+                        continue;
+                    }
+                    _ => {}
+                }
+                let name = match cli_flag_name(flag) {
+                    Some(name) => name,
+                    None => return Ok(None),
+                };
+                if name == "posix" {
+                    out.posix = enabled;
+                }
+                out.shell_flags.push((name.to_string(), enabled));
+            }
+            Ok(Some(index + 1))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn cli_flag_name(flag: char) -> Option<&'static str> {
     match flag {
         'a' => Some("allexport"),
@@ -325,6 +409,26 @@ mod tests {
         let interactive = ShellInvocation::parse(&["-ilc".into(), "env -0".into()]).unwrap();
         assert_eq!(interactive.command.as_deref(), Some("env -0"));
         assert!(interactive.login && interactive.interactive);
+    }
+
+    #[test]
+    fn parses_compat_options_after_c_before_command_string() {
+        let args = vec![
+            "-c".into(),
+            "-l".into(),
+            "--norc".into(),
+            "-e".into(),
+            "printf ok".into(),
+            "demo".into(),
+            "x".into(),
+        ];
+        let parsed = ShellInvocation::parse(&args).unwrap();
+        assert!(parsed.login);
+        assert!(parsed.no_rc);
+        assert!(parsed.shell_flags.contains(&("errexit".into(), true)));
+        assert_eq!(parsed.command.as_deref(), Some("printf ok"));
+        assert_eq!(parsed.command_name.as_deref(), Some("demo"));
+        assert_eq!(parsed.positional_params, vec!["x"]);
     }
 
     #[test]
