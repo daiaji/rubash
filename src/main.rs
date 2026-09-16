@@ -121,17 +121,29 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 && flags.len() > 1
                 && flags.contains('c')
                 && flags.chars().all(|flag| {
-                    flag == 'c' || cli_shell_flag_name(flag).is_some() || flag == 's' || flag == 'o'
+                    flag == 'c'
+                        || flag == 'l'
+                        || flag == 'i'
+                        || cli_shell_flag_name(flag).is_some()
+                        || flag == 's'
+                        || flag == 'o'
                 })
             {
                 // Bash's getopt consumes the next argv for `-c`, so emit the
                 // boolean flags first and `-c` last (`-ce 'x'` == `-e -c 'x'`).
+                // `-l` (login) and `-i` (interactive) are not shell options:
+                // they have dedicated arms in the option loop below, so they
+                // are emitted as their own flags (`-ilc` == `-i -l -c`).
                 let mut c_count = 0usize;
                 for flag in flags.chars() {
                     if flag == 'c' {
                         c_count += 1;
                     } else if flag == 's' {
                         expanded_args.push("-s".to_string());
+                    } else if flag == 'l' {
+                        expanded_args.push("-l".to_string());
+                    } else if flag == 'i' {
+                        expanded_args.push("-i".to_string());
                     } else {
                         expanded_args.push(format!("-{flag}"));
                     }
