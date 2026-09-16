@@ -79,15 +79,12 @@ impl Executor {
                 Ok(())
             }
             "type" => {
-                if command_has_output_redirects(cmd) {
-                    self.exit_code = self.execute_type_redirected(cmd)?;
-                    return Ok(());
-                }
-                if self.execute_type_with_disabled_builtin_state(&cmd.words[1..])? {
-                    return Ok(());
-                }
-                self.exit_code = self.execute_type(&cmd.words[1..]);
-                Ok(())
+                // niubash #108: always the buffered path — see
+                // command_dispatch_late.rs. Command substitution is not an
+                // explicit redirect, so the old gate leaked `$(type -t ls)`
+                // output to the process stdout.
+                self.exit_code = self.execute_type_redirected(cmd)?;
+                return Ok(());
             }
             "test" => {
                 if crate::builtins::enable::is_disabled(&self.env_vars, "test") {

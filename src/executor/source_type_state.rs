@@ -47,40 +47,6 @@ impl Executor {
         }
     }
 
-    pub(in crate::executor) fn execute_type_with_disabled_builtin_state(
-        &mut self,
-        args: &[String],
-    ) -> Result<bool, ExecuteError> {
-        // TODO(builtins/type.def/builtins.c): `type` should query the real
-        // shell builtin table. This bridges the `enable -n test` state used by
-        // upstream builtins.tests until builtins are centralized.
-        if args.len() == 2
-            && args[0] == "-t"
-            && args[1] == "test"
-            && crate::builtins::enable::is_disabled(&self.env_vars, "test")
-        {
-            if self.command_path("test", false).is_some() {
-                println!("file");
-                self.exit_code = 0;
-            } else {
-                self.exit_code = 1;
-            }
-            return Ok(true);
-        }
-
-        if args.len() == 2
-            && args[0] == "-t"
-            && args[1] == "test"
-            && !crate::builtins::enable::is_disabled(&self.env_vars, "test")
-        {
-            println!("builtin");
-            self.exit_code = 0;
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
     pub(in crate::executor) fn apply_brace_group_redirects(
         &mut self,
         command: &CommandNode,

@@ -224,17 +224,6 @@ impl Executor {
         Ok(false)
     }
 
-    pub(in crate::executor) fn describe_name_all(
-        &self,
-        name: &str,
-        mode: TypeDescribeMode,
-        force_path: bool,
-        skip_functions: bool,
-    ) -> Result<bool, ExecuteError> {
-        let mut stdout = std::io::stdout().lock();
-        self.describe_name_all_with_io(name, mode, force_path, skip_functions, false, &mut stdout)
-    }
-
     pub(in crate::executor) fn describe_name_all_with_io<W>(
         &self,
         name: &str,

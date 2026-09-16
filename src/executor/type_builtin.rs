@@ -110,68 +110,10 @@ impl Executor {
         }
     }
 
-    pub(in crate::executor) fn execute_type(&mut self, args: &[String]) -> i32 {
-        // TODO(builtins/type.def): Port Bash's `describe_command` and `type`
-        // option parser completely. This context-aware implementation covers
-        // upstream type.tests' function/alias/keyword/builtin/hash cases.
-        let mut mode = TypeDescribeMode::Verbose;
-        let mut all = false;
-        let mut force_path = false;
-        let skip_functions = false;
-        let mut functions_only = false;
-        let mut index = 0;
-
-        while let Some(arg) = args.get(index) {
-            if arg == "--" {
-                index += 1;
-                break;
-            }
-            if !arg.starts_with('-') || arg == "-" {
-                break;
-            }
-            let normalized = normalize_type_option(arg);
-            for option in normalized[1..].chars() {
-                match option {
-                    'a' => all = true,
-                    'f' => functions_only = true,
-                    'p' => mode = TypeDescribeMode::PathOnly,
-                    'P' => {
-                        mode = TypeDescribeMode::PathOnly;
-                        force_path = true;
-                    }
-                    't' => mode = TypeDescribeMode::TypeOnly,
-                    other => {
-                        eprintln!("{}type: -{other}: invalid option", self.diagnostic_prefix());
-                        eprintln!("type: usage: type [-afptP] name [name ...]");
-                        return 2;
-                    }
-                }
-            }
-            index += 1;
-        }
-
-        let mut status = 0;
-        for name in &args[index..] {
-            let found = if all {
-                match self.describe_name_all(name, mode, force_path, skip_functions) {
-                    Ok(found) => found,
-                    Err(error) => {
-                        eprintln!("rubash: type: {error}");
-                        false
-                    }
-                }
-            } else {
-                self.describe_name(name, mode, force_path, skip_functions, functions_only)
-            };
-            if !found {
-                status = 1;
-                if mode == TypeDescribeMode::Verbose {
-                    eprintln!("{}type: {name}: not found", self.diagnostic_prefix());
-                }
-            }
-        }
-        status
-    }
+    // niubash #108: the raw-stdout `execute_type` was removed — every `type`
+    // invocation must go through `execute_type_redirected`, whose buffered
+    // output reaches `self.stdout_capture` under command substitution
+    // (`$(type -t ls)`) and honors explicit redirections elsewhere.
 
     pub(in crate::executor) fn execute_type_redirected(
         &mut self,

@@ -122,15 +122,15 @@ impl Executor {
                 Ok(())
             }
             "type" => {
-                if command_has_output_redirects(cmd) {
-                    self.exit_code = self.execute_type_redirected(cmd)?;
-                    Ok(())
-                } else if self.execute_type_with_disabled_builtin_state(&cmd.words[1..])? {
-                    Ok(())
-                } else {
-                    self.exit_code = self.execute_type(&cmd.words[1..]);
-                    Ok(())
-                }
+                // niubash #108: route every invocation through the buffered
+                // path. Command substitution (`$(type -t ls)`) swaps in
+                // `stdout_capture` above this layer and is NOT visible to
+                // `command_has_output_redirects`, so gating on explicit
+                // redirects leaked the description to the process stdout.
+                // `execute_type_with_io` also handles the disabled-builtin
+                // state (`enable -n type`) internally.
+                self.exit_code = self.execute_type_redirected(cmd)?;
+                Ok(())
             }
             "test" => {
                 if crate::builtins::enable::is_disabled(&self.env_vars, "test") {
