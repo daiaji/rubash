@@ -52,6 +52,16 @@ pub(super) fn assignment_value_is_quoted(raw: &str) -> bool {
         return false;
     };
 
+    // GNU parse.y:7104 parse_compound_assignment: a compound array assignment
+    // (`x=(...)`) is NOT a quoted RHS. The `(` begins the compound body and
+    // every quote inside it is an element-level quote, not the assignment's
+    // quoting state. Returning true here would mark the whole compound body
+    // as quoted, which suppresses the data-quote hoisting the compound
+    // element tokenizer needs (unicode1.sub `[0x0022]=\"`).
+    if value.starts_with('(') {
+        return false;
+    }
+
     // Quotes inside a `${...}` body belong to the expansion itself (GNU keeps
     // them for the expansion stage), not to the assignment's quoting state.
     let mut in_backtick = false;

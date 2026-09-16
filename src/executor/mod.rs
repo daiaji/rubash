@@ -104,7 +104,35 @@ mod shell_options;
 #[cfg(windows)]
 mod sudo_builtin;
 
-pub(crate) use shell_options::GlobalStdout;
+pub(crate) use shell_options::{write_stderr_bytes, write_stdout_bytes, GlobalStdout};
+
+/// Writer that sends output through the Win32 `WriteFile` stdout path,
+/// matching the executor's `write_default_stdout` sink. Used by builtins
+/// that need the same immediate, unbuffered write semantics as the main
+/// output path when invoked without redirection.
+pub(crate) struct WriteFileStdout;
+impl std::io::Write for WriteFileStdout {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        write_stdout_bytes(buf).map(|()| buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Writer that sends output through the Win32 `WriteFile` stderr path,
+/// matching the executor's `write_default_stderr` sink. Used by builtins
+/// that need the same immediate, unbuffered write semantics as the main
+/// diagnostic path when invoked without redirection.
+pub(crate) struct WriteFileStderr;
+impl std::io::Write for WriteFileStderr {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        write_stderr_bytes(buf).map(|()| buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 mod shift_echo_builtins;
 mod source_type_state;
@@ -126,6 +154,7 @@ mod command_subst_helpers;
 mod command_text;
 mod env_helpers;
 mod execution_misc;
+pub(crate) use execution_misc::printable_filename;
 mod function_env;
 mod local_helpers;
 mod parameter_case;

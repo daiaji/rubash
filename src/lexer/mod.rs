@@ -32,7 +32,7 @@ pub(crate) use ansi::decode_ansi_c_quoted;
 pub(crate) use quotes::remove_shell_quotes;
 pub(crate) use quotes::{
     ANSI_C_DQUOTE_MARKER, ANSI_C_DQUOTE_MARKER_STR, ANSI_C_QUOTE_MARKER, ANSI_C_QUOTE_MARKER_STR,
-    PARAM_NAME_END_MARKER,
+    PARAM_NAME_END_MARKER, escape_decoded_ansi_c_quotes,
 };
 pub use token::{Token, TokenKind};
 

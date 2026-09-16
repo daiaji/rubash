@@ -41,9 +41,9 @@ impl Executor {
             if is_closed_redirect_target(&target) {
             } else if self.write_output_fd_redirect(&target, &stdout)? {
             } else if redirect_target_fd(&target) == Some(2) {
-                std::io::stderr().lock().write_all(&stdout)?;
+                super::write_stderr_bytes(&stdout)?;
             } else if redirect_target_fd(&target) == Some(1) {
-                std::io::stdout().lock().write_all(&stdout)?;
+                super::write_stdout_bytes(&stdout)?;
             } else {
                 let mut file = self.create_redirect_output(&target, redirect.clobber)?;
                 file.write_all(&stdout)?;
@@ -53,9 +53,9 @@ impl Executor {
             if is_closed_redirect_target(&target) {
             } else if self.write_output_fd_redirect(&target, &stdout)? {
             } else if redirect_target_fd(&target) == Some(2) {
-                std::io::stderr().lock().write_all(&stdout)?;
+                super::write_stderr_bytes(&stdout)?;
             } else if redirect_target_fd(&target) == Some(1) {
-                std::io::stdout().lock().write_all(&stdout)?;
+                super::write_stdout_bytes(&stdout)?;
             } else {
                 let mut file = OpenOptions::new()
                     .create(true)
@@ -75,7 +75,7 @@ impl Executor {
                 if let Some(capture) = &mut self.stdout_capture {
                     capture.write_all(&stderr)?;
                 } else {
-                    std::io::stdout().lock().write_all(&stderr)?;
+                    super::write_stdout_bytes(&stderr)?;
                 }
             } else if !is_null_device(&target) {
                 let mut file = self.create_redirect_output(&target, redirect.clobber)?;
@@ -89,7 +89,7 @@ impl Executor {
                 if let Some(capture) = &mut self.stdout_capture {
                     capture.write_all(&stderr)?;
                 } else {
-                    std::io::stdout().lock().write_all(&stderr)?;
+                    super::write_stdout_bytes(&stderr)?;
                 }
             } else {
                 let mut file = OpenOptions::new()

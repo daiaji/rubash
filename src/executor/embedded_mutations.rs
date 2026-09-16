@@ -710,7 +710,15 @@ impl Executor {
                                 output.push('"');
                             }
                         } else {
-                            output.push_str(&decoded);
+                            // Tag decoded quotes with E010/E011 markers so
+                            // downstream quote removal (remove_shell_quotes in
+                            // append_array_value) treats them as data, not
+                            // syntax operators. Without this, `$'a"b'` decodes
+                            // to `a"b` and the bare `"` is stripped when stored
+                            // in an array (issue #109).
+                            output.push_str(
+                                &crate::lexer::escape_decoded_ansi_c_quotes(&decoded),
+                            );
                         }
                     } else {
                         output.push('$');

@@ -94,7 +94,7 @@ impl Executor {
             return Ok(false);
         }
         let command_name = expanded_command_name;
-        let normalized_command = command_name.replace('\\', "/");
+        let normalized_command = shell_display_path(&command_name).replace('\\', "/");
         let normalized_current_exe = env::current_exe()
             .ok()
             .map(|path| shell_display_path(&path.to_string_lossy()).replace('\\', "/"));
@@ -136,11 +136,34 @@ impl Executor {
                     == shell_path_to_windows(&self.expand_word(command), &self.env_vars)
             })
         });
+        // Save parent state BEFORE the this_shell_invocation block clears it.
         let saved_shell_state = this_shell_invocation.then(|| self.shell_state.clone());
+        let saved_functions = self.functions.clone();
+        let saved_function_redirects = self.function_definition_redirects.clone();
+        let saved_function_def_infos = self.function_def_infos.clone();
+        let saved_aliases = self.aliases.clone();
         if this_shell_invocation {
             let child_env = self.child_shell_environment();
             self.env_vars = child_env.clone();
-            self.shell_state.variables = crate::shell::VariableStore::from_environment(&child_env);
+            // GNU variables.c:511-526 (initialize_shell_variables): a fresh
+            // shell always sets IFS to its default when it is not in the
+            // inherited environment, so ${IFS+...} expands in the child.
+            self.env_vars
+                .entry("IFS".to_string())
+                .or_insert_with(|| " \t\n".to_string());
+            self.shell_state.variables = crate::shell::VariableStore::from_environment(&self.env_vars);
+            // GNU variables.c:511-526 (initialize_shell_variables): a fresh
+            // shell invocation inherits only exported variables and exported
+            // functions (via BASH_FUNC_<name>%% env vars). Non-exported
+            // functions, aliases, and shell-local state are NOT inherited.
+            // Clear the parent's functions/aliases and import only the
+            // exported ones from the child environment.
+            let (imported_funcs, imported_def_infos) =
+                import_exported_functions_from_env(&self.env_vars);
+            self.functions = imported_funcs;
+            self.function_definition_redirects = HashMap::new();
+            self.function_def_infos = imported_def_infos;
+            self.aliases = HashMap::new();
             // A fresh shell invocation entering a script derives
             // SIG_HARD_IGNORE from the inherited dispositions (trap.c
             // ignore_signal: "A signal ignored on entry to the shell cannot
@@ -151,15 +174,15 @@ impl Executor {
         }
         let saved_pipestatus = self.pipestatus.clone();
         let saved_positional_params = self.positional_params.clone();
-        let saved_functions = self.functions.clone();
-        let saved_function_redirects = self.function_definition_redirects.clone();
-        let saved_function_def_infos = self.function_def_infos.clone();
-        let saved_aliases = self.aliases.clone();
         let saved_bash_source_stack = self.bash_source_stack.clone();
         let saved_bash_lineno_stack = self.bash_lineno_stack.clone();
         let saved_bash_argc_stack = self.bash_argc_stack.clone();
         let saved_bash_argv_stack = self.bash_argv_stack.clone();
         let saved_cwd = env::current_dir().ok();
+        // GNU execute_cmd.c:6139-6233: a ${THIS_SH} script invocation is a
+        // fresh shell process, not a subshell. subshell_depth must NOT be
+        // incremented, or run_sigchld_trap_for_reaped_child suppresses
+        // SIGCHLD traps (trap8.sub: four CHLD firings for reaped children).
         let saved_depth = self.subshell_depth.get();
 
         if let Some(input) = self.function_call_stdin(cmd)? {
@@ -172,8 +195,22 @@ impl Executor {
                 .insert(INHERIT_PROCESS_STDIN.to_string(), "1".to_string());
         }
         self.set_env("__RUBASH_SCRIPT_NAME", script);
-        self.set_positional_params(cmd.words[1..].to_vec());
-        self.subshell_depth.set(saved_depth + 1);
+        // When this_shell_invocation is true, cmd.words[0] is the shell
+        // command (e.g. ${THIS_SH}) and cmd.words[1] is the script path;
+        // positional params start at cmd.words[2]. Otherwise cmd.words[0]
+        // is the script path and params start at cmd.words[1].
+        let param_start = if this_shell_invocation { 2 } else { 1 };
+        self.set_positional_params(cmd.words[param_start..].to_vec());
+        if this_shell_invocation {
+            // GNU variables.c:initialize_shell_variables sets OPTIND=1 for
+            // every new shell invocation. OPTIND is not exported, so
+            // child_shell_environment doesn't carry it over; set it here
+            // so getopts in the child starts fresh.
+            self.env_vars.insert("OPTIND".to_string(), "1".to_string());
+        }
+        if !this_shell_invocation {
+            self.subshell_depth.set(saved_depth + 1);
+        }
 
         let result = self.execute_ast(&ast);
         let status = self.exit_code;
@@ -217,15 +254,22 @@ impl Executor {
                     .map(|value| (name.clone(), value.clone()))
             })
             .collect::<HashMap<_, _>>();
-        // These are shell-local values maintained for every shell instance,
-        // even when they are not exported to native children.
+        // GNU variables.c:511-526 (initialize_shell_variables): a fresh
+        // shell invocation inherits only exported variables from the parent
+        // environment. IFS is not exported by default, so a child shell
+        // starts with the default " \t\n". Copying the parent's IFS into the
+        // child environment would leak non-default IFS values (e.g.
+        // intl.tests sets IFS=$(printf '%b' '\303\251') before running
+        // ${THIS_SH} ./intl1.sub, and the child must not inherit it).
+        // OLDPWD and SHELL are shell-local values maintained for every
+        // shell instance even when not exported to native children.
         if let Ok(current_dir) = env::current_dir() {
             child.insert(
                 "PWD".to_string(),
                 shell_display_path(&current_dir.to_string_lossy().replace('\\', "/")),
             );
         }
-        for name in ["OLDPWD", "IFS", "SHELL"] {
+        for name in ["OLDPWD", "SHELL"] {
             if let Some(value) = self.env_vars.get(name) {
                 child
                     .entry(name.to_string())

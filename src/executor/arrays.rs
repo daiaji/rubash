@@ -9,7 +9,7 @@ mod storage;
 
 pub(super) use mapfile::split_mapfile_input;
 pub(super) use storage::{
-    ansic_quote, ansic_shouldquote, array_indices, array_value_at, array_values,
+    array_indices, array_value_at, array_values,
     format_indexed_array_storage, format_indexed_array_values, indexed_array_entries,
     is_array_storage, is_marked_array_var, normalize_array_expanded_value,
     parse_array_integer_subscript, parse_array_numeric_subscript, parse_array_subscript,
@@ -24,7 +24,7 @@ use super::{
     apply_parameter_case_mod, assoc_value_at, case_pattern_matches, eval_arith_value,
     eval_conditional_arith_value, is_marked_var, is_shell_name, parse_indirect_pattern_removal,
     parse_parameter_case_mod, parse_parameter_replacement, parse_parameter_transform,
-    pattern_contains_glob, quote_assoc_key, remove_parameter_pattern, split_storage_words,
+    pattern_contains_glob, remove_parameter_pattern, split_storage_words,
     strip_matching_quotes, unquote_storage_value, Executor, ParameterTransform,
     ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
@@ -612,7 +612,8 @@ pub(super) fn append_array_value(
 
         if let Some((left, rhs)) = token.split_once('=') {
             if let Some(index) = array_assignment_index(left, &entries, env_vars) {
-                entries.insert(index, unquote_storage_value(rhs));
+                let decoded = unquote_storage_value(rhs);
+                entries.insert(index, decoded);
                 next_index = index + 1;
                 continue;
             }
@@ -646,7 +647,12 @@ pub(super) fn append_array_value(
         // same field after the closing quote (array6.sub
         // a2=(-iname 'abc -iname 'def) stores (-iname, "abc -iname def")).
         let split_needed = token_has_unquoted_whitespace(&token);
-        let partially_quoted = !quoted_token && (token.contains('\'') || token.contains('"'));
+        // A token is "partially quoted" only if it contains an UNESCAPED
+        // quote character. A `\"` from ANSI-C decoding ($'a"b') is data,
+        // not a quote operator, so it must not trigger the
+        // remove_shell_quotes path (issue #109: x=($'a"b') stored "ab"
+        // instead of "a\"b").
+        let partially_quoted = !quoted_token && has_unescaped_quote(&token);
         // GNU order (niubash #103 follow-up): quote removal on the raw
         // token, then restore the lexer carrier bytes, then unquote the
         // storage escaping. Unquoting first collapsed `x=(q\"q)` to `qq`
@@ -752,6 +758,27 @@ fn token_has_unquoted_whitespace(token: &str) -> bool {
     false
 }
 
+/// Check if the token contains an unescaped quote character (single or
+/// double). A `\"` (backslash-escaped double quote) is data, not a quote
+/// operator, so it does not count. This prevents `remove_shell_quotes`
+/// from stripping data quotes that came from ANSI-C decoding (issue #109:
+/// x=($'a"b') stored "ab" instead of "a\"b").
+fn has_unescaped_quote(token: &str) -> bool {
+    let mut escaped = false;
+    for ch in token.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '\'' | '"' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(super) fn array_assignment_tokens(value: &str) -> Vec<String> {
     let Some(inner) = value
         .strip_prefix('(')
@@ -764,7 +791,8 @@ pub(super) fn array_assignment_tokens(value: &str) -> Vec<String> {
         };
     };
 
-    split_storage_words(inner).collect()
+    let tokens: Vec<String> = split_storage_words(inner).collect();
+    tokens
 }
 
 pub(super) fn array_parameter_slice(

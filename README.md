@@ -12,24 +12,26 @@ A GNU Bash-compatible shell implementation written in Rust.
 
 Rubash is a from-scratch reimplementation of GNU Bash in Rust — lexer, parser, expansion engine, executor, builtins, and all. It targets byte-level compatibility with GNU Bash 5.3.0 and runs on Windows natively.
 
-**Current status**: 41 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 1535 lines, down from 3427 on Sep 9 (−55%). Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
+**Current status**: 43 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 2702 lines — of which `intl` alone accounts for 1209 lines (ANSI-C `$'...'` carrier-byte architecture, see below). Excluding `intl`, the remaining 39 suites total 1493 lines, down from 3427 on Sep 9 (−57%). Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
 
 ## Compatibility at a Glance
 
 ```
 GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
-(ledger: 2026-09-15 full re-run)
+(ledger: 2026-09-16 full re-run)
 
-  PASS (0 diff):   41 suites  ████████████████░░░░░░░░░░░░░░░░  49%
-  DIFF (1-50):     31 suites  ████████████░░░░░░░░░░░░░░░░░░░░  37%
-  DIFF (51-250):   11 suites  ████░░░░░░░░░░░░░░░░░░░░░░░░░░░░  13%
+  PASS (0 diff):   43 suites  █████████████████░░░░░░░░░░░░░░  52%
+  DIFF (1-50):     28 suites  ███████████░░░░░░░░░░░░░░░░░░░░  34%
+  DIFF (51-250):   11 suites  ████░░░░░░░░░░░░░░░░░░░░░░░░░░  13%
+  DIFF (251+):      1 suite   █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1%
   ────────────────────────────────────────────────────────────────
-  Total diff:      1535 lines (was 3427 on Sep 9 → −55% in 6 days)
+  Total diff:      2702 lines (intl=1209, excl-intl=1493)
+  Was 3427 on Sep 9 → excl-intl −57% in 7 days
 ```
 
 ### Fully passing suites (zero diff)
 
-`appendop` `arith-for` `attr` `builtins` `case` `casemod` `complete` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `herestr` `ifs` `invert` `lastpipe` `mapfile` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp2` `posixpat` `precedence` `printf` `quote` `rhs-exp` `rsh` `strip` `tilde` `tilde2` `trap`
+`appendop` `arith-for` `attr` `builtins` `case` `casemod` `comsub-eof` `complete` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp2` `posixpat` `precedence` `printf` `quote` `rhs-exp` `rsh` `strip` `tilde` `tilde2` `trap`
 
 ### Major recent fixes (Sep 2026)
 
@@ -44,6 +46,7 @@ GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
 | **history** | 190 → 127 | `history -d start-end` range deletion (GNU 5.3 feature) |
 | **globstar** | 182 → 4 | Multiplicity fix, command lookup cache, `checkhash` bypass (residual is WinuxCmd `ls` ordering, not rubash) |
 | **array/assoc** | 444+358 → 148+187 | Compound assignment quote grouping, `"$@"`/`$0` expansion, arithmetic subscript side effects (`count++`) |
+| **compound-array quoting** | intl 1194→1192 fails | Escaped `\"`/`\'`/`\\`/`` \` `` preserved through compound RHS; `quote_array_value` double-escape fix; data/syntax quote distinction in unquoted assignment RHS (`EChar=${Array[0x0022]}`) |
 | **signals** | BSD table → Linux table | USR1=10, CHLD=17, RTMIN=34, matching GNU 5.3.0 WSL contract |
 
 ### What Rubash can already run

@@ -5,12 +5,137 @@ use super::*;
 /// return it unchanged. Used by execute_disk_command (execute_cmd.c:5909)
 /// before printing "command not found" so a CR-only command name shows as
 /// `$'\r'` instead of a raw control character.
-pub(in crate::executor) fn printable_filename(name: &str) -> String {
-    if super::arrays::ansic_shouldquote(name) {
-        super::arrays::ansic_quote(name)
+pub(crate) fn printable_filename(name: &str) -> String {
+    if word_needs_ansic_quote(name) {
+        ansic_quote_with_markers(name)
     } else {
         name.to_string()
     }
+}
+
+/// True when the word contains non-printable characters OR raw-byte markers
+/// (U+E000 series). GNU strtrans.c:341 ansic_shouldquote tests printability
+/// in the active locale; Rubash additionally must quote when internal
+/// raw-byte markers are present so they don't leak as PUA chars.
+pub(crate) fn word_needs_ansic_quote(word: &str) -> bool {
+    if word.contains(char::from_u32(super::substitution_metadata::RAW_BYTE_MARKER_ESCAPE).unwrap()) {
+        return true;
+    }
+    word.chars().any(|ch| {
+        if ch.is_ascii() {
+            !(0x20..=0x7e).contains(&(ch as u8))
+        } else {
+            ch.is_control()
+        }
+    })
+}
+
+/// strtrans.c ansic_quote (230-308) over the decoded byte stream: raw-byte
+/// markers (U+E000 series) are decoded back to their original bytes before
+/// quoting, so diagnostics show `$'\247\100...'` instead of PUA replacement
+/// characters. Printable ASCII and printable wide chars stay literal.
+pub(crate) fn ansic_quote_with_markers(word: &str) -> String {
+    let bytes = super::substitution_metadata::shell_text_to_raw_bytes(word);
+    let mut out = String::with_capacity(4 * bytes.len() + 4);
+    out.push_str("$'");
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            0x1b => {
+                out.push_str("\\E");
+                index += 1;
+            }
+            0x07 => {
+                out.push_str("\\a");
+                index += 1;
+            }
+            0x08 => {
+                out.push_str("\\b");
+                index += 1;
+            }
+            0x09 => {
+                out.push_str("\\t");
+                index += 1;
+            }
+            0x0a => {
+                out.push_str("\\n");
+                index += 1;
+            }
+            0x0b => {
+                out.push_str("\\v");
+                index += 1;
+            }
+            0x0c => {
+                out.push_str("\\f");
+                index += 1;
+            }
+            0x0d => {
+                out.push_str("\\r");
+                index += 1;
+            }
+            b'\\' => {
+                out.push_str("\\\\");
+                index += 1;
+            }
+            b'\'' => {
+                out.push_str("\\'");
+                index += 1;
+            }
+            0x20..=0x7e => {
+                out.push(byte as char);
+                index += 1;
+            }
+            _ if byte >= 0x80 => {
+                // Try to decode a full UTF-8 character (GNU strtrans.c:266-282
+                // emits a printable wide char verbatim under a UTF-8 locale).
+                match std::str::from_utf8(&bytes[index..]) {
+                    Ok(text) => {
+                        let ch = text.chars().next().unwrap();
+                        if !ch.is_control() {
+                            out.push(ch);
+                            index += ch.len_utf8();
+                        } else {
+                            push_octal_escape(&mut out, byte);
+                            index += 1;
+                        }
+                    }
+                    Err(error) => {
+                        let valid = error.valid_up_to();
+                        if valid > 0 {
+                            let text = std::str::from_utf8(&bytes[index..index + valid]).unwrap();
+                            for ch in text.chars() {
+                                if !ch.is_control() {
+                                    out.push(ch);
+                                } else {
+                                    for b in ch.encode_utf8(&mut [0u8; 4]).as_bytes() {
+                                        push_octal_escape(&mut out, *b);
+                                    }
+                                }
+                            }
+                            index += valid;
+                        } else {
+                            push_octal_escape(&mut out, byte);
+                            index += 1;
+                        }
+                    }
+                }
+            }
+            _ => {
+                push_octal_escape(&mut out, byte);
+                index += 1;
+            }
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn push_octal_escape(out: &mut String, byte: u8) {
+    out.push('\\');
+    out.push((b'0' + ((byte >> 6) & 0o7)) as char);
+    out.push((b'0' + ((byte >> 3) & 0o7)) as char);
+    out.push((b'0' + (byte & 0o7)) as char);
 }
 
 pub(in crate::executor) fn is_arithmetic_command_words(words: &[String]) -> bool {

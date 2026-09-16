@@ -11,6 +11,15 @@ impl Executor {
         for (name, value) in assignments {
             let expanded_value = self.expand_assignment_value(value);
             self.apply_shell_assignment(name, expanded_value);
+            // GNU variables.c make_variable_value: an integer-attribute
+            // assignment that fails arithmetic evaluation (e.g. `i=0#4`
+            // with `declare -i i`) reports evalerror and propagates exit
+            // status 1. apply_shell_assignment resets exit_code to 0 on
+            // success, so promote the arithmetic_expansion_error flag here.
+            if self.arithmetic_expansion_error.get() {
+                self.arithmetic_expansion_error.set(false);
+                self.exit_code = 1;
+            }
         }
     }
 
@@ -472,7 +481,23 @@ impl Executor {
                 &self.env_vars,
             )
         } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
-            self.eval_integer_assignment_value(&value).to_string()
+            // GNU variables.c make_variable_value with integer attribute calls
+            // evalexp -> strlong, which reports "invalid number" / "invalid
+            // arithmetic base" etc. via evalerror. We mirror that here: if the
+            // arithmetic evaluation fails, report the error and store empty.
+            let (result, _category) =
+                eval_conditional_arith_value_categorized(&value, &self.env_vars);
+            if result.is_none() {
+                if let Some(msg) =
+                    crate::executor::arithmetic::arithmetic_error_message(&value, false, &self.env_vars)
+                {
+                    eprintln!("{}{}", self.diagnostic_prefix(), msg);
+                }
+                self.arithmetic_expansion_error.set(true);
+                String::new()
+            } else {
+                result.unwrap_or(0).to_string()
+            }
         } else {
             value
         };

@@ -25,15 +25,32 @@ impl Executor {
             // fires for it. rubash's words ["((", expr, "))"] would print a
             // second, normalized line (issue: gnu-compat set-x G16).
             let prefix = self.xtrace_prefix();
+            let mut xtrace_output = Vec::new();
             if !cmd.assignments.is_empty() && !cmd.words.is_empty() {
                 // GNU traces the assignment prefix on its own line before the
                 // command words (`foo=one echo hi` → `+ foo=one` `+ echo hi`).
                 let assignments = self.xtrace_assignment_text(cmd);
-                eprintln!("{prefix}{}", assignments.join(" "));
-                eprintln!("{prefix}{}", cmd.words.join(" "));
+                writeln!(xtrace_output, "{prefix}{}", assignments.join(" ")).ok();
+                writeln!(xtrace_output, "{prefix}{}", cmd.words.join(" ")).ok();
             } else {
                 let text = self.xtrace_command_text(cmd);
-                eprintln!("{prefix}{text}");
+                writeln!(xtrace_output, "{prefix}{text}").ok();
+            }
+            // GNU bash emits xtrace after applying the command's redirects
+            // (execute_cmd.c:4480+), so the trace goes to the redirected
+            // stderr. Rubash emits xtrace before redirect application, so
+            // check redirect_err_append for an inherited 2>&1 (fd-reference
+            // target) and route the trace to that fd's endpoint. This
+            // preserves the `2>&1` semantics for nested same-shell scripts.
+            if let Some(redirect) = &cmd.redirect_err_append {
+                let target = self.expand_word(&redirect.target);
+                if self.has_output_fd_target(&target) {
+                    let _ = self.write_output_fd_redirect(&target, &xtrace_output);
+                } else {
+                    let _ = self.write_default_stderr(&xtrace_output);
+                }
+            } else {
+                let _ = self.write_default_stderr(&xtrace_output);
             }
         }
 

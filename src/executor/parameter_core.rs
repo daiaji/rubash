@@ -59,6 +59,7 @@ impl Executor {
                 let expanded = self.expand_embedded_parameters_mut(value);
                 if !quoted
                     && !expanded.contains('=')
+                    && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
                     && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
                         || expanded.starts_with("~/"))
                 {
@@ -145,6 +146,7 @@ impl Executor {
                 .replace(DQ_DATA, "\"");
             if !quoted
                 && !expanded.contains('=')
+                && tilde_expand::assignment_value_needs_tilde_expansion(raw_value, true)
                 && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
                     || expanded.starts_with("~/"))
             {

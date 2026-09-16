@@ -180,7 +180,8 @@ impl Executor {
             );
             return None;
         };
-        array_value_at(&storage, index)
+        let result = array_value_at(&storage, index);
+        result
     }
 
     pub(in crate::executor) fn array_length(&self, name: &str) -> usize {

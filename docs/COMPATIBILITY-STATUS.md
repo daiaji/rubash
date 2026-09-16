@@ -1,6 +1,6 @@
 # Rubash ↔ GNU Bash 兼容性权威状态（单一事实来源）
 
-> 最后核对日期：2026-09-14（全量 true-baseline 重跑，83 套件，GNU 5.3.0 契约）
+> 最后核对日期：2026-09-16（全量 true-baseline 重跑，83 套件，GNU 5.3.0 契约）
 > 核对方法：用 `./target/debug/rubash.exe` 直接跑 GNU 官方测试文件
 > `third_party/bash/tests/<name>.tests`，对比 GNU bash 的真实输出。
 > 基线约定（2026-09-09 起生效）：语义比对一律用 WSL GNU Bash 5.3.0
@@ -14,8 +14,9 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-14）：40 零差 / 43 有 DIFF / 总 1819 行**
-> （详见第二十一节）
+> **最新台账（2026-09-16）：43 零差 / 40 有 DIFF / 总 2702 行**
+> （其中 intl=1209 为 ANSI-C `$'...'` 载体字节架构缺口，排除 intl 后余 39 套件共 1493 行；
+> 详见第二十二节）
 
 ## 一、总体结论
 
@@ -944,3 +945,60 @@ braces(1), arith-for(1)
 - 禁止手搓探针测量套件数字（曾导致 −540 假改善）
 - 任何"已修复/仍残留"状态变更必须真实跑对应 GNU 测试文件复现
 - WSL GNU Bash 5.3.0（`/usr/local/bin/bash`）为唯一契约基线
+
+## 第二十二节：2026-09-16 全量 true-baseline 审计
+
+**口径**：`scripts/true-baseline.sh` 无参数全跑，83 套件，WSL GNU Bash 5.3.0。
+
+**结果**：43 零差 / 40 有 DIFF / 总 2702 行。
+
+**分布**：
+- PASS (0 diff): 43 套件 (52%)
+- DIFF (1-50): 28 套件 (34%)
+- DIFF (51-250): 11 套件 (13%)
+- DIFF (251+): 1 套件 (1%) — intl=1209
+
+**新增零差**（自 2026-09-14 起）：`comsub-eof`、`heredoc`。
+
+**最大 DIFF 套件**（降序）：
+| 套件 | 差异行 | 备注 |
+|------|--------|------|
+| intl | 1209 | ANSI-C `$'...'` 载体字节架构：`\302\200` 存为 U+E000 而非 U+0080 |
+| assoc | 181 | 键切分/转义（与 array 同族） |
+| errors | 164 | 路径/环境差异 + 分诊待做 |
+| array | 146 | 复合赋值元素切分四层根因待分层重落 |
+| history | 127 | 会话历史内容/时机，CRLF 伪影 |
+| nameref | 93 | declare -p 链追踪 |
+| varenv | 85 | 环境大小写敏感性待分诊 |
+| glob | 78 | 待分诊 |
+| alias | 67 | 待分诊 |
+| quotearray | 64 | 待分诊 |
+| jobs | 53 | 待分诊 |
+
+**排除 intl 后**：39 套件共 1493 行（Sep 9 全量 3427 → 1493，−57%）。
+
+**本次会话修复**（compound-array quoting 族）：
+- `src/executor/assignment_expansion.rs` — 数据/语法引号区分：参数展开返回的引号
+  是数据（GNU `CTLESC` 保护），不应被 `remove_shell_quotes` 去除。仅当原始词也含引号
+  语法时才去引号。修复 `EChar=${Array[0x0022]}` 返回空值的问题。
+- `src/executor/arrays/storage.rs` — `quote_array_value` 双重转义 bug：`"` 应转义为
+  `\"`（2 字符），而非 `\\"`（3 字符）。
+- `src/lexer/word.rs` — 复合数组赋值原始 RHS 保留：`\"`/`\'`/`\`/`` \` `` 在复合
+  赋值括号内保留原始文本，供 `split_storage_words` 解析。
+- 新增 `DATA_ESCAPED_SQUOTE`/`DATA_ESCAPED_BACKSLASH` 载体标记，与既有
+  `DATA_ESCAPED_DQUOTE`/`DATA_BACKTICK` 配合，确保转义引号/反斜杠/反引号在
+  `expand_embedded_params_mut` 后存活。
+
+**GNU C 源码引用**：
+- `subst.c:4807 dequote_string()` / `subst.c:4865 dequote_word()` — 最终去引号仅作用于
+  原始词结构，不作用于参数展开引入的字符。
+- `subst.c:4692 dequote_escapes()` — `CTLESC` 保护数据字符不被去引号。
+- `parse.y:5366-5397 read_token_word()` — 反斜杠/引号在原始 token 中的处理。
+- `parse.y:7104 parse_compound_assignment()` / `parse.y:7127` 清除 `PST_NOEXPAND`。
+
+**intl 1209 行根因**（未修复，架构级）：
+`src/lexer/ansi.rs:257 push_ansi_c_byte()` 对字节 ≥ 0x80 调用
+`encode_raw_byte_marker()`，生成 U+E000 系列载体标记而非真实 Unicode 码点。
+`$'\302\200'`（UTF-8 编码的 U+0080）被存为两个独立的载体标记（U+E000 系列），
+而非 Unicode 码点 U+0080。字符串比较时 U+E000 ≠ U+0080，导致 1192/1318 个
+unicode1.sub 测试失败。修复需重构 ANSI-C 解码器对多字节序列的处理。

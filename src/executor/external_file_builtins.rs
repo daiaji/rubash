@@ -16,6 +16,12 @@ impl Executor {
                 self.exit_code = self.execute_pwd(&pwd_cmd)?;
                 Ok(true)
             }
+            "/bin/printf" | "/usr/bin/printf" => {
+                let mut printf_cmd = cmd.clone();
+                printf_cmd.words[0] = "printf".to_string();
+                self.exit_code = self.execute_printf(&printf_cmd)?;
+                Ok(true)
+            }
             "mkdir" => self.external_mkdir(cmd),
             "touch" => self.external_touch(cmd),
             "chmod" => self.external_chmod(cmd),

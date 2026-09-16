@@ -139,7 +139,7 @@ impl Executor {
                     cmd.words[1..].iter().map(String::as_str),
                     &mut self.env_vars,
                     &mut std::io::sink(),
-                    &mut std::io::stderr().lock(),
+                    &mut super::WriteFileStderr,
                 )?);
             }
             let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
@@ -147,7 +147,7 @@ impl Executor {
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.env_vars,
                 &mut file,
-                &mut std::io::stderr().lock(),
+                &mut super::WriteFileStderr,
             )?);
         }
 
@@ -161,17 +161,28 @@ impl Executor {
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.env_vars,
                 &mut file,
-                &mut std::io::stderr().lock(),
+                &mut super::WriteFileStderr,
             )?);
         }
 
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
+            if self.has_output_fd_target(&target) {
+                let mut stderr_buf = Vec::new();
+                let status = crate::builtins::cd::execute_with_io(
+                    cmd.words[1..].iter().map(String::as_str),
+                    &mut self.env_vars,
+                    &mut super::WriteFileStdout,
+                    &mut stderr_buf,
+                )?;
+                self.write_output_fd_redirect(&target, &stderr_buf)?;
+                return Ok(status);
+            }
             if is_null_device(&target) {
                 return Ok(crate::builtins::cd::execute_with_io(
                     cmd.words[1..].iter().map(String::as_str),
                     &mut self.env_vars,
-                    &mut std::io::stdout().lock(),
+                    &mut super::WriteFileStdout,
                     &mut std::io::sink(),
                 )?);
             }
@@ -179,13 +190,32 @@ impl Executor {
             return Ok(crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.env_vars,
-                &mut std::io::stdout().lock(),
+                &mut super::WriteFileStdout,
                 &mut file,
             )?);
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
             let target = self.expand_word(&redirect.target);
+            if self.has_output_fd_target(&target) {
+                let mut stderr_buf = Vec::new();
+                let status = crate::builtins::cd::execute_with_io(
+                    cmd.words[1..].iter().map(String::as_str),
+                    &mut self.env_vars,
+                    &mut super::WriteFileStdout,
+                    &mut stderr_buf,
+                )?;
+                self.write_output_fd_redirect(&target, &stderr_buf)?;
+                return Ok(status);
+            }
+            if is_null_device(&target) {
+                return Ok(crate::builtins::cd::execute_with_io(
+                    cmd.words[1..].iter().map(String::as_str),
+                    &mut self.env_vars,
+                    &mut super::WriteFileStdout,
+                    &mut std::io::sink(),
+                )?);
+            }
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -193,7 +223,7 @@ impl Executor {
             return Ok(crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.env_vars,
-                &mut std::io::stdout().lock(),
+                &mut super::WriteFileStdout,
                 &mut file,
             )?);
         }

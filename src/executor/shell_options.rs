@@ -558,7 +558,7 @@ impl Executor {
     }
 }
 
-fn write_stdout_bytes(output: &[u8]) -> io::Result<()> {
+pub(crate) fn write_stdout_bytes(output: &[u8]) -> io::Result<()> {
     // Builtins that write directly to the process stdout (set -o, declare,
     // alias, ...) must still be captured by command substitution and
     // pipeline stage capture. Thread-local capture makes that visible to
@@ -647,7 +647,7 @@ pub(in crate::executor) fn restore_stdout_capture(previous: Option<Vec<u8>>) {
     });
 }
 
-fn write_stderr_bytes(output: &[u8]) -> io::Result<()> {
+pub(crate) fn write_stderr_bytes(output: &[u8]) -> io::Result<()> {
     #[cfg(windows)]
     {
         return windows_raw_stdio::write_stderr(output);

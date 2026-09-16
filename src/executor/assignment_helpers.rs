@@ -559,7 +559,13 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
         .strip_prefix("$'")
         .and_then(|value| value.strip_suffix('\''))
     {
-        return crate::lexer::decode_ansi_c_quoted(inner);
+        // Tag decoded quotes with E010/E011 markers so subsequent quote
+        // removal (unquote_storage_value on the stored token) can tell
+        // data quotes from syntax quotes. Without this, `$'a"b'` decodes
+        // to `a"b` and the bare `"` is stripped as a quote operator
+        // (issue #109: x=($'a"b') stored "ab" instead of "a\"b").
+        let decoded = crate::lexer::decode_ansi_c_quoted(inner);
+        return crate::lexer::escape_decoded_ansi_c_quotes(&decoded);
     }
 
     fn restore_quote_markers(value: &str) -> String {
@@ -649,9 +655,10 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
             }
             decoded.push(ch);
         }
-        return decoded
-            .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
-            .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
+        // Do NOT restore E010/E011 markers here: they tag data quotes
+        // from ANSI-C decoding that must survive remove_shell_quotes.
+        // The markers are restored to actual quotes at output time.
+        return decoded;
     };
 
     let mut unquoted = String::new();

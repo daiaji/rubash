@@ -18,7 +18,20 @@ impl<'a> Lexer<'a> {
         // that merely contain `=` and `$(` (e.g. `echo "B: $(printf 'v=[%s]'
         // "$(printf 'mid')")"`) must still go through quote removal, otherwise
         // the trailing `"` leaks into the expanded argument.
-        let value = if is_assignment(&raw) && assignment_rhs_is_fully_single_quoted(&raw) {
+        let value = if is_assignment(&raw) && raw.contains("=(") {
+            // GNU parse.y:5652-5671 read_token_word: a compound array
+            // assignment (`name=(...)` or `name[sub]=(...)`) preserves the
+            // raw parenthesized RHS text verbatim. parse_compound_assignment
+            // (parse.y:7104) clears PST_NOEXPAND (parse.y:7127), so the normal
+            // backslash branch (parse.y:5377-5397) keeps `\` in the token and
+            // sets pass_next_character to mark the next char literal. This
+            // means `\"`, `\'`, `\`` survive as literal `\"`, `\'`, `\`` in
+            // the token so assign_compound_array_list (arrayfunc.c) can
+            // tokenize the raw text with the original quoting intact.
+            // remove_shell_quotes_outside_backticks would convert `\"` to a
+            // data marker, corrupting the element tokenization.
+            raw.to_string()
+        } else if is_assignment(&raw) && assignment_rhs_is_fully_single_quoted(&raw) {
             // GNU subst.c never scans a single-quoted span: a wholly
             // single-quoted RHS is literal data, so `x='$(date)'` stores the
             // text `$(date)` and `x='$(date)'` must not reach the expander's

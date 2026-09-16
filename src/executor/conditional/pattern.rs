@@ -1,13 +1,119 @@
 pub(in crate::executor) fn case_pattern_matches(pattern: &str, word: &str) -> bool {
+    if pattern_contains_raw_byte_markers(pattern) && !pattern.contains('[') {
+        let pattern: Vec<char> = flatten_pattern_to_byte_chars(pattern);
+        let word: Vec<char> = flatten_word_to_byte_chars(word);
+        return case_pattern_matches_at_with_case(&pattern, 0, &word, 0, false);
+    }
     let pattern: Vec<char> = pattern.chars().collect();
     let word: Vec<char> = word.chars().collect();
     case_pattern_matches_at_with_case(&pattern, 0, &word, 0, false)
 }
 
 pub(in crate::executor) fn case_pattern_matches_nocase(pattern: &str, word: &str) -> bool {
+    if pattern_contains_raw_byte_markers(pattern) && !pattern.contains('[') {
+        let pattern: Vec<char> = flatten_pattern_to_byte_chars(pattern);
+        let word: Vec<char> = flatten_word_to_byte_chars(word);
+        return case_pattern_matches_at_with_case(&pattern, 0, &word, 0, true);
+    }
     let pattern: Vec<char> = pattern.chars().collect();
     let word: Vec<char> = word.chars().collect();
     case_pattern_matches_at_with_case(&pattern, 0, &word, 0, true)
+}
+
+/// Check if the pattern contains raw-byte marker sentinels (U+E000).
+/// When present, GNU's byte-level pattern matching (subst.c glob_pattern_patscan)
+/// matches raw bytes against the word's byte representation, so we flatten
+/// both sides to byte-chars for the char-level matcher.
+fn pattern_contains_raw_byte_markers(pattern: &str) -> bool {
+    pattern.contains(
+        char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+            .expect("raw-byte sentinel is a valid char"),
+    )
+}
+
+/// Base for byte-char representation: U+E100 + byte value. This PUA range is
+/// disjoint from the raw-byte marker range (U+E000-U+E100) and from ASCII
+/// pattern syntax chars (*, ?, \), so byte-chars never collide with syntax.
+const BYTE_CHAR_BASE: u32 = 0xE100;
+
+/// Flatten a pattern to byte-chars for byte-level matching. Pattern syntax
+/// chars (*, ?, \, CTLESC) are kept as-is; raw-byte markers become byte-chars;
+/// other chars become their UTF-8 byte-chars (each byte as U+E1xx).
+fn flatten_pattern_to_byte_chars(pattern: &str) -> Vec<char> {
+    use crate::executor::substitution_metadata::{
+        RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
+    };
+    let mut output = Vec::new();
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
+            match chars.peek().copied() {
+                Some(next)
+                    if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(next as u32)) =>
+                {
+                    chars.next();
+                    output.push(
+                        char::from_u32(BYTE_CHAR_BASE + (next as u32 - RAW_BYTE_MARKER_FIRST))
+                            .expect("byte-char is valid"),
+                    );
+                }
+                _ => {
+                    let mut encoded = [0; 4];
+                    for byte in ch.encode_utf8(&mut encoded).as_bytes() {
+                        output.push(char::from_u32(BYTE_CHAR_BASE + *byte as u32).expect("byte-char"));
+                    }
+                }
+            }
+        } else if ch == '*' || ch == '?' || ch == '\\' || ch == '\x11' {
+            output.push(ch);
+        } else if ch == '\x18' {
+            // Backslash data marker → byte-char for 0x5C
+            output.push(char::from_u32(BYTE_CHAR_BASE + 0x5C).expect("byte-char"));
+        } else {
+            let mut encoded = [0; 4];
+            for byte in ch.encode_utf8(&mut encoded).as_bytes() {
+                output.push(char::from_u32(BYTE_CHAR_BASE + *byte as u32).expect("byte-char"));
+            }
+        }
+    }
+    output
+}
+
+/// Flatten a word to byte-chars for byte-level matching. Raw-byte markers
+/// become byte-chars; Unicode chars become their UTF-8 byte-chars.
+fn flatten_word_to_byte_chars(word: &str) -> Vec<char> {
+    use crate::executor::substitution_metadata::{
+        RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
+    };
+    let mut output = Vec::new();
+    let mut chars = word.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
+            match chars.peek().copied() {
+                Some(next)
+                    if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(next as u32)) =>
+                {
+                    chars.next();
+                    output.push(
+                        char::from_u32(BYTE_CHAR_BASE + (next as u32 - RAW_BYTE_MARKER_FIRST))
+                            .expect("byte-char is valid"),
+                    );
+                }
+                _ => {
+                    let mut encoded = [0; 4];
+                    for byte in ch.encode_utf8(&mut encoded).as_bytes() {
+                        output.push(char::from_u32(BYTE_CHAR_BASE + *byte as u32).expect("byte-char"));
+                    }
+                }
+            }
+        } else {
+            let mut encoded = [0; 4];
+            for byte in ch.encode_utf8(&mut encoded).as_bytes() {
+                output.push(char::from_u32(BYTE_CHAR_BASE + *byte as u32).expect("byte-char"));
+            }
+        }
+    }
+    output
 }
 
 pub(in crate::executor) fn case_pattern_matches_at_with_case(

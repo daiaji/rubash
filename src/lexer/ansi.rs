@@ -28,26 +28,75 @@ pub(crate) fn is_assignment_carrier_byte(byte: u32) -> bool {
 pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
     let mut output = String::new();
     let mut chars = value.chars().peekable();
+    // Buffer for consecutive raw bytes >= 0x80 emitted by octal/hex escapes.
+    // GNU ansicstr (lib/sh/strtrans.c:130 `c &= 0xFF; *r++ = c;`) stores each
+    // escape as a single raw byte; in a UTF-8 locale, consecutive raw bytes
+    // that form a valid UTF-8 sequence are stored as those bytes and compare
+    // equal to the same bytes produced by printf '\UNNNNNNNN' (u32cconv →
+    // wctomb). Rubash words are Rust Strings (UTF-8), so we decode the
+    // buffered bytes as UTF-8 when the sequence is interrupted or at end of
+    // input: valid UTF-8 becomes Unicode scalar chars (matching
+    // u32cconv_utf8_text's char path), invalid bytes become raw-byte marker
+    // pairs (matching u32cconv_utf8_text's marker path for 5/6-byte forms
+    // and surrogate encodings that have no Rust char form).
+    let mut raw_byte_buf: Vec<u8> = Vec::new();
 
     while let Some(ch) = chars.next() {
         if ch != '\\' {
+            flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
             output.push(ch);
             continue;
         }
 
         match chars.next() {
-            Some('a') => output.push('\x07'),
-            Some('b') => output.push('\x08'),
-            Some('e') | Some('E') => push_ansi_c_byte(&mut output, 0x1b),
-            Some('f') => push_ansi_c_byte(&mut output, 0x0c),
-            Some('n') => output.push('\n'),
-            Some('r') => output.push('\r'),
-            Some('t') => output.push('\t'),
-            Some('v') => output.push('\x0b'),
-            Some('\\') => output.push('\\'),
-            Some('\'') => output.push('\''),
-            Some('"') => output.push('"'),
-            Some('?') => output.push('?'),
+            Some('a') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('\x07');
+            }
+            Some('b') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('\x08');
+            }
+            Some('e') | Some('E') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                push_ansi_c_byte(&mut output, 0x1b);
+            }
+            Some('f') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                push_ansi_c_byte(&mut output, 0x0c);
+            }
+            Some('n') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('\n');
+            }
+            Some('r') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('\r');
+            }
+            Some('t') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('\t');
+            }
+            Some('v') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('\x0b');
+            }
+            Some('\\') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('\\');
+            }
+            Some('\'') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('\'');
+            }
+            Some('"') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('"');
+            }
+            Some('?') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('?');
+            }
             Some('x') => {
                 if chars.peek().copied() == Some('{') {
                     // ksh93/bash backslash x open-brace form (lib/sh/strtrans.c): consume
@@ -66,14 +115,16 @@ pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
                         chars.next();
                     }
                     if value.is_empty() {
+                        flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
                         output.push('\0');
                     } else {
                         let parsed = u32::from_str_radix(&value, 16).unwrap_or(0) & 0xFF;
-                        push_ansi_c_byte(&mut output, parsed);
+                        push_or_buffer_raw_byte(&mut output, &mut raw_byte_buf, parsed);
                     }
                 } else if let Some(value) = read_ansi_c_digits(&mut chars, 16, 2) {
-                    push_ansi_c_byte(&mut output, value & 0xFF);
+                    push_or_buffer_raw_byte(&mut output, &mut raw_byte_buf, value & 0xFF);
                 } else {
+                    flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
                     output.push('\\');
                     output.push('x');
                 }
@@ -90,15 +141,17 @@ pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
                     value = value * 8 + digit;
                     chars.next();
                 }
-                push_ansi_c_byte(&mut output, value & 0xFF);
+                push_or_buffer_raw_byte(&mut output, &mut raw_byte_buf, value & 0xFF);
             }
             Some(c) if c.is_ascii_digit() => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
                 output.push('\\');
                 output.push(c);
             }
             Some('u') => {
                 // GNU strtrans.c ansicstr requires exactly 4 hex digits
                 // for \uNNNN; a short run is literal \u followed by digits.
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
                 push_unicode_ansi_c(
                     &mut output,
                     read_ansi_c_digits_raw(&mut chars, 16, 4),
@@ -106,6 +159,7 @@ pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
                 );
             }
             Some('U') => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
                 push_unicode_ansi_c(
                     &mut output,
                     read_ansi_c_digits_raw(&mut chars, 16, 8),
@@ -119,6 +173,7 @@ pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
                 // Posix requires $'\c\\' to do backslash escaping: if the
                 // operand is `\` and the next character is also `\`,
                 // consume the second backslash (strtrans.c ansicstr 203-204).
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
                 if let Some(c) = chars.next() {
                     let operand = if c == '\\' && chars.peek() == Some(&'\\') {
                         chars.next();
@@ -137,13 +192,18 @@ pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
                     output.push('c');
                 }
             }
-            None => output.push('\\'),
+            None => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
+                output.push('\\');
+            }
             Some(other) => {
+                flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
                 output.push('\\');
                 output.push(other);
             }
         }
     }
+    flush_raw_byte_buf(&mut output, &mut raw_byte_buf);
 
     // GNU Bash stores words as NUL-terminated C strings, so a NUL byte inside a
     // dollar-single-quote ANSI-C string ends the word: everything from the
@@ -154,6 +214,55 @@ pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
     }
 
     output
+}
+
+/// Push a raw byte from an octal/hex escape. Bytes >= 0x80 are buffered for
+/// possible UTF-8 multi-byte decoding (matching GNU's byte-level storage in a
+/// UTF-8 locale). Bytes < 0x80 flush the buffer first, then go through
+/// `push_ansi_c_byte` directly (carrier bytes get marker pairs, others become
+/// plain chars).
+fn push_or_buffer_raw_byte(output: &mut String, buf: &mut Vec<u8>, byte: u32) {
+    let byte = byte as u8;
+    if byte >= 0x80 {
+        buf.push(byte);
+    } else {
+        flush_raw_byte_buf(output, buf);
+        push_ansi_c_byte(output, byte as u32);
+    }
+}
+
+/// Flush the raw-byte buffer, attempting UTF-8 decoding. Valid UTF-8 sequences
+/// become Unicode scalar chars (matching `u32cconv_utf8_text`'s char path, so
+/// `$'\302\200'` and `printf '\U00000080'` produce the same internal String).
+/// Invalid bytes become raw-byte marker pairs (matching `u32cconv_utf8_text`'s
+/// marker path for 5/6-byte forms and lone continuation bytes).
+fn flush_raw_byte_buf(output: &mut String, buf: &mut Vec<u8>) {
+    if buf.is_empty() {
+        return;
+    }
+    let bytes = std::mem::take(buf);
+    let mut start = 0;
+    while start < bytes.len() {
+        match std::str::from_utf8(&bytes[start..]) {
+            Ok(s) => {
+                output.push_str(s);
+                break;
+            }
+            Err(e) => {
+                let valid_len = e.valid_up_to();
+                if valid_len > 0 {
+                    let s = std::str::from_utf8(&bytes[start..start + valid_len]).unwrap();
+                    output.push_str(s);
+                }
+                // The byte at valid_up_to is invalid — emit as marker pair.
+                let invalid_byte = bytes[start + valid_len];
+                output.push_str(
+                    &crate::executor::substitution_metadata::encode_raw_byte_marker(invalid_byte),
+                );
+                start += valid_len + 1;
+            }
+        }
+    }
 }
 
 fn read_ansi_c_digits<I>(chars: &mut std::iter::Peekable<I>, radix: u32, max: usize) -> Option<u32>
@@ -213,13 +322,7 @@ where
 /// fall back to literal `\u` + the raw digits.
 fn push_unicode_ansi_c(output: &mut String, value: Option<(u32, String)>, prefix: &str) {
     match value {
-        Some((codepoint, raw)) if raw.len() == 4 || raw.len() == 8 => {
-            push_ansi_c_codepoint(output, codepoint)
-        }
-        Some((_, raw)) => {
-            output.push_str(prefix);
-            output.push_str(&raw);
-        }
+        Some((codepoint, _raw)) => push_ansi_c_codepoint(output, codepoint),
         None => output.push_str(prefix),
     }
 }

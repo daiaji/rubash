@@ -211,11 +211,14 @@ fn format_unicode_escape(value: Option<(u32, String)>, prefix: &str) -> String {
 /// `\u00FF` and `\U0001F600` stays `\U0001F600`. The canonical form is chosen
 /// from the parsed value, not the digit run as typed, which is why a partial
 /// `\uff` also becomes `\u00FF` (unicode2.sub, LC_CTYPE=C).
-/// Values above the Unicode range convert to nothing in either mode.
+/// GNU printf.def:1132-1140 passes every value > 0x7F through u32cconv()
+/// (lib/sh/unicode.c:239), which on a 4-byte-wchar_t platform (Linux/glibc
+/// with __STDC_ISO_10646__) calls wctomb for all values <= 0x7FFFFFFF,
+/// including the 5/6-byte UTF-8 forms above 0x10FFFF. There is no 0x10FFFF
+/// cap in the C source. u32cconv_utf8_text handles the full range: valid
+/// Unicode scalars become chars, 5/6-byte forms become marker pairs, and
+/// values > 0x7FFFFFFF produce nothing (matching wctomb's -1 return).
 fn unicode_escape_text(codepoint: u32) -> String {
-    if codepoint > 0x10_FFFF {
-        return String::new();
-    }
     if codepoint <= 0x7F || crate::locale::is_multi_byte() {
         return crate::executor::substitution_metadata::u32cconv_utf8_text(codepoint);
     }

@@ -181,6 +181,7 @@ impl Executor {
         };
         if !quoted
             && !expanded.contains('=')
+            && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
             && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
                 || expanded.starts_with("~/"))
         {
@@ -238,8 +239,15 @@ impl Executor {
         } else {
             expanded
         };
+        // GNU subst.c: expand_word_internal applies tilde expansion to the
+        // RAW word before parameter expansion. A tilde that comes from
+        // ${param} expansion is never re-expanded (unicode1.sub: EChar=${Array[0x7e]}
+        // where the value is "~" must stay literal). GNU expands `~` at the
+        // start of the RHS and after every `:` in an assignment value
+        // (subst.c:11410-11460 internal_tilde + assignoff tracking).
         if !quoted
             && !expanded.contains('=')
+            && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
             && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
                 || expanded.starts_with("~/"))
         {

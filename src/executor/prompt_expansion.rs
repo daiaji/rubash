@@ -1,5 +1,17 @@
 use super::*;
 
+/// Apply `ansic_quote` to a word when it contains non-printable characters
+/// or raw-byte markers (GNU print_cmd.c xtrace_print_word calls ansic_quote
+/// on words needing quoting). Words that are already printable are returned
+/// unchanged.
+fn xtrace_quote_word(word: &str) -> String {
+    if super::execution_misc::word_needs_ansic_quote(word) {
+        super::execution_misc::ansic_quote_with_markers(word)
+    } else {
+        word.to_string()
+    }
+}
+
 impl Executor {
     pub(in crate::executor) fn indirect_pattern_removal(&self, name: &str) -> Option<String> {
         let (ref_expr, pattern, operation) = parse_indirect_pattern_removal(name)?;
@@ -393,7 +405,7 @@ impl Executor {
     pub(in crate::executor) fn xtrace_command_text(&mut self, cmd: &CommandNode) -> String {
         let mut parts: Vec<String> = Vec::new();
         parts.extend(self.xtrace_assignment_text(cmd));
-        parts.extend(cmd.words.iter().cloned());
+        parts.extend(cmd.words.iter().map(|w| xtrace_quote_word(w)));
         parts.join(" ")
     }
 

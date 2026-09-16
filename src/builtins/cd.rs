@@ -42,8 +42,8 @@ struct Target {
 
 /// Execute `cd` with arguments after the command name.
 pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
+    let mut stdout = crate::executor::WriteFileStdout;
+    let mut stderr = crate::executor::WriteFileStderr;
     execute_with_io(
         args.iter().map(String::as_str),
         env_vars,
@@ -105,10 +105,12 @@ where
     if let Err(error) = env::set_current_dir(&target.path) {
         writeln!(
             stderr,
-            "rubash: cd: {}: {}",
-            target.path.display(),
+            "{}cd: {}: {}",
+            diagnostic_prefix(env_vars),
+            crate::executor::printable_filename(&target.path.to_string_lossy()),
             crate::posix_errors::message(&error)
         )?;
+        stderr.flush()?;
         return Ok(EXECUTION_FAILURE);
     }
 
@@ -140,6 +142,16 @@ where
     }
 
     Ok(EXECUTION_SUCCESS)
+}
+
+fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
+    if let (Some(script), Some(line)) = (
+        env_vars.get("__RUBASH_SCRIPT_NAME"),
+        env_vars.get("__RUBASH_CURRENT_LINE"),
+    ) {
+        return format!("{script}: line {line}: ");
+    }
+    "rubash: ".to_string()
 }
 
 fn parse_options<W>(args: &[&str], stderr: &mut W) -> io::Result<Result<(Mode, usize), i32>>

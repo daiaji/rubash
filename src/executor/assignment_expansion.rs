@@ -18,30 +18,86 @@ pub(in crate::executor) struct AssignmentExpansionResult {
 /// single-quoted segment data can never contain a raw `${` (the lexer
 /// protects those dollars as \x1f), so a plain `${` here is always a real
 /// expansion body (array6.sub: a2=("${a[@]/#/"-iname '"}")).
+/// Replace `"` with `marker` but skip a `"` preceded by a backslash (`\"`),
+/// which is element-level data in a compound array assignment (unicode1.sub
+/// `[0x0022]=\"` must stay `\"`, not become `\<marker>`).
+fn replace_unescaped_double_quotes(value: &str, marker: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            out.push(ch);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        if ch == '"' {
+            out.push_str(marker);
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 pub(in crate::executor) fn hoist_data_double_quotes(value: &str, marker: &str) -> String {
-    if !value.contains("${") {
-        return value.replace('"', marker);
+    // Simple fast path: no `${...}` and no `$'...'` — just replace all ".
+    // We must also check for $'...' (ANSI-C quotes) because a " inside
+    // $'...' is data, not syntax, and hoisting it corrupts the ANSI-C
+    // decode (issue #109: x=($'a"b') stored "ab" instead of "a\"b").
+    // A backslash-escaped `\"` is element-level data, not a syntax quote:
+    // hoisting it corrupts compound array elements like `[0x0022]=\"`
+    // (unicode1.sub) by turning `\"` into `\<marker>`, which the storage
+    // tokenizer mis-parses. Skip a `"` preceded by a backslash.
+    if !value.contains("${") && !value.contains("$'") {
+        return replace_unescaped_double_quotes(value, marker);
     }
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
-    while let Some(offset) = rest.find("${") {
-        out.push_str(&rest[..offset].replace('"', marker));
-        let body_start = offset + 2;
-        match matching_parameter_brace(&rest[body_start..]) {
-            Some(close) => {
-                out.push_str(&rest[offset..body_start + close + 1]);
-                rest = &rest[body_start + close + 1..];
-            }
-            None => {
-                // Unterminated body: keep the tail verbatim, matching the
-                // downstream scanner which also fails to close it.
-                out.push_str(&rest[offset..]);
+    loop {
+        // Find the nearest of "${" or "$'"
+        let brace_pos = rest.find("${");
+        let ansi_pos = rest.find("$'");
+        let pos = match (brace_pos, ansi_pos) {
+            (Some(b), Some(a)) => b.min(a),
+            (Some(b), None) => b,
+            (None, Some(a)) => a,
+            (None, None) => {
+                out.push_str(&replace_unescaped_double_quotes(rest, marker));
                 return out;
+            }
+        };
+        // Replace " in the segment before the special construct
+        out.push_str(&replace_unescaped_double_quotes(&rest[..pos], marker));
+        if rest[pos..].starts_with("${") {
+            let body_start = pos + 2;
+            match matching_parameter_brace(&rest[body_start..]) {
+                Some(close) => {
+                    out.push_str(&rest[pos..body_start + close + 1]);
+                    rest = &rest[body_start + close + 1..];
+                }
+                None => {
+                    out.push_str(&rest[pos..]);
+                    return out;
+                }
+            }
+        } else {
+            // $'...' ANSI-C quote: skip everything until the closing '
+            let body_start = pos + 2;
+            match rest[body_start..].find('\'') {
+                Some(close) => {
+                    out.push_str(&rest[pos..body_start + close + 1]);
+                    rest = &rest[body_start + close + 1..];
+                }
+                None => {
+                    // Unterminated $'...: keep the rest verbatim
+                    out.push_str(&rest[pos..]);
+                    return out;
+                }
             }
         }
     }
-    out.push_str(&rest.replace('"', marker));
-    out
 }
 
 impl Executor {
@@ -94,9 +150,10 @@ impl Executor {
             return self.expand_assignment_value_inner(value);
         }
         const DQ_DATA: &str = "\u{E102}";
-        let expanded =
-            self.expand_assignment_value_inner(&hoist_data_double_quotes(value, DQ_DATA));
-        expanded.replace(DQ_DATA, "\"")
+        let hoisted = hoist_data_double_quotes(value, DQ_DATA);
+        let expanded = self.expand_assignment_value_inner(&hoisted);
+        let result = expanded.replace(DQ_DATA, "\"");
+        result
     }
 
     /// GNU subst.c:4357 expand_string_assignment (reached with
@@ -144,7 +201,7 @@ impl Executor {
     }
 
     fn expand_assignment_value_inner(&mut self, value: &str) -> String {
-                // The verbatim single-element fast path is only for storage-shaped
+        // The verbatim single-element fast path is only for storage-shaped
         // values without expansions: a compound value containing a
         // parameter expansion (e.g. (${!xx})) must reach the compound
         // expander below or the expansion text lands in the array as a
@@ -285,9 +342,9 @@ impl Executor {
                 return expanded;
             }
         }
-        self.apply_parameter_assignment_expansions_in_word(value);
-                if let Some(expanded) = self.expand_compound_positional_at_assignment(value, quoted) {
-                        if compound_assignment {
+        let apply_result = self.apply_parameter_assignment_expansions_in_word(value);
+        if let Some(expanded) = self.expand_compound_positional_at_assignment(value, quoted) {
+            if compound_assignment {
                 return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
             }
             return expanded;
@@ -375,9 +432,32 @@ impl Executor {
             // become are not re-stripped as syntax, then restore them.
             const DATA_SINGLE_QUOTE: &str = "\u{E101}";
             const DATA_DOUBLE_QUOTE: &str = "\u{E102}";
-            let hoisted_value = value
-                .replace('\x17', DATA_SINGLE_QUOTE)
-                .replace('\x18', DATA_DOUBLE_QUOTE);
+            // GNU parse.y/arrayfunc.c: a compound array assignment preserves
+            // the raw parenthesized text so split_storage_words sees the
+            // original quoting. The embedded parameter walker treats a bare
+            // backtick as command substitution and strips the backslash from
+            // `\`` (and from `\"`), which corrupts compound elements like
+            // `[0x0060]=\`` (unicode1.sub). Hoist escaped backticks (and the
+            // backslash before `"`) out of the walker for compound
+            // assignments so they survive as literal element text.
+            let compound_paren_value = value.starts_with('(') && value.ends_with(')');
+            const DATA_BACKTICK: &str = "\u{E103}";
+            const DATA_ESCAPED_DQUOTE: &str = "\u{E104}";
+            const DATA_ESCAPED_SQUOTE: &str = "\u{E105}";
+            const DATA_ESCAPED_BACKSLASH: &str = "\u{E106}";
+            let hoisted_value = if compound_paren_value {
+                value
+                    .replace('\x17', DATA_SINGLE_QUOTE)
+                    .replace('\x18', DATA_DOUBLE_QUOTE)
+                    .replace("\\\\", DATA_ESCAPED_BACKSLASH)
+                    .replace("\\`", DATA_BACKTICK)
+                    .replace("\\\"", DATA_ESCAPED_DQUOTE)
+                    .replace("\\'", DATA_ESCAPED_SQUOTE)
+            } else {
+                value
+                    .replace('\x17', DATA_SINGLE_QUOTE)
+                    .replace('\x18', DATA_DOUBLE_QUOTE)
+            };
             let expanded_value = self.expand_embedded_parameters_mut(&hoisted_value);
             // A compound assignment never takes a whole-value quote-removal
             // pass: element words carry their own quote structure through the
@@ -385,8 +465,15 @@ impl Executor {
             // DATA (array6.sub ${a[@]/#/-iname '"}) would be re-stripped as
             // syntax here.
             let compound_paren_value = value.starts_with('(') && value.ends_with(')');
+            // GNU subst.c:4807 dequote_word only removes quote syntax from the
+            // original word, not quotes introduced by parameter expansion
+            // (those are CTLESC-protected). A bare `"` or `'` in the expanded
+            // value that came from ${arr[0x0022]} (whose value is `"`) is DATA,
+            // not syntax. Only strip when the original word carried quote
+            // syntax (e.g. `v=${IFS+'}'z}` stores `}z`).
             let stripped = if !compound_paren_value
                 && expanded_value.contains(['\'', '"'])
+                && hoisted_value.contains(['\'', '"'])
                 && !contains_command_substitution_payload(&expanded_value)
             {
                 crate::lexer::remove_shell_quotes(&expanded_value)
@@ -409,6 +496,10 @@ impl Executor {
             unescaped
                 .replace(DATA_SINGLE_QUOTE, "'")
                 .replace(DATA_DOUBLE_QUOTE, "\"")
+                .replace(DATA_BACKTICK, "\\`")
+                .replace(DATA_ESCAPED_DQUOTE, "\\\"")
+                .replace(DATA_ESCAPED_SQUOTE, "\\'")
+                .replace(DATA_ESCAPED_BACKSLASH, "\\\\")
         };
         let mut expanded = decode_command_substitution_payload(&expanded);
         if expanded.contains("<(") || expanded.contains(">(") {
@@ -430,11 +521,19 @@ impl Executor {
             return expanded;
         }
 
-        // TODO(subst.c/variables.c): Bash's assignment-word expansion has a
-        // special tilde pass on RHS prefixes and selected colon-separated
-        // path positions. Keep it centralized here until Rubash ports the
-        // `expand_string_assignment`/SHELL_VAR path more directly.
-        self.expand_assignment_tilde(&expanded)
+        // GNU subst.c: expand_word_internal applies tilde expansion to the
+        // RAW word before parameter expansion. A tilde that comes from
+        // ${param} expansion is never re-expanded (unicode1.sub: EChar=${Array[0x7e]}
+        // where the value is "~" must stay literal). GNU expands `~` at the
+        // start of the RHS and after every `:` in an assignment value
+        // (subst.c:11410-11460 internal_tilde + assignoff tracking).
+        if !expanded.contains('=')
+            && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
+        {
+            self.expand_assignment_tilde(&expanded)
+        } else {
+            expanded
+        }
     }
 
     fn expand_mixed_command_substitution_assignment(&mut self, value: &str) -> Option<String> {

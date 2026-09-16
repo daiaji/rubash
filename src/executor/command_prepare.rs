@@ -261,6 +261,16 @@ impl Executor {
                     }
                 }
             }
+            // GNU variables.c make_variable_value: an integer-attribute
+            // assignment that fails arithmetic evaluation (e.g. `i=0#4`
+            // with `declare -i i`) reports evalerror and propagates exit
+            // status 1. apply_shell_assignment returns true (the assignment
+            // was stored as empty) but sets arithmetic_expansion_error, so
+            // promote it to status here.
+            if self.arithmetic_expansion_error.get() {
+                self.arithmetic_expansion_error.set(false);
+                status = 1;
+            }
         }
         match self.apply_no_output_builtin_redirects_with_status(cmd) {
             Ok(redirect_failed) => {

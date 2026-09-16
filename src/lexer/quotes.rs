@@ -472,7 +472,7 @@ fn copy_ansi_c_single_quoted_raw(
 /// CTLESC equivalent; see the call site). The markers are the same ones the
 /// lexer emits for backslash-escaped quotes in source words, so every
 /// consumer already restores them.
-fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
+pub(crate) fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
     decoded
         .replace('\'', &ANSI_C_QUOTE_MARKER.to_string())
         .replace('"', &ANSI_C_DQUOTE_MARKER.to_string())

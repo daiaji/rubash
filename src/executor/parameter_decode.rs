@@ -87,6 +87,9 @@ pub(in crate::executor) fn remove_matching_prefix(
     length: MatchLength,
     extglob: bool,
 ) -> String {
+    if pattern_has_raw_byte_markers(pattern) {
+        return remove_matching_prefix_bytes(value, pattern, length, extglob);
+    }
     let indices: Vec<usize> = value
         .char_indices()
         .map(|(index, _)| index)
@@ -112,6 +115,9 @@ pub(in crate::executor) fn remove_matching_suffix(
     length: MatchLength,
     extglob: bool,
 ) -> String {
+    if pattern_has_raw_byte_markers(pattern) {
+        return remove_matching_suffix_bytes(value, pattern, length, extglob);
+    }
     let indices: Vec<usize> = value
         .char_indices()
         .map(|(index, _)| index)
@@ -128,6 +134,61 @@ pub(in crate::executor) fn remove_matching_suffix(
         }
     }
 
+    value.to_string()
+}
+
+/// Check if the pattern contains raw-byte marker sentinels (U+E000).
+fn pattern_has_raw_byte_markers(pattern: &str) -> bool {
+    pattern.contains(
+        char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+            .expect("raw-byte sentinel is a valid char"),
+    )
+}
+
+/// Byte-level prefix removal for patterns containing raw-byte markers.
+/// GNU subst.c operates on bytes, so we iterate over byte positions, not
+/// char boundaries (intl3.sub: ${euro##*$o202} removes bytes E2 82 from
+/// the 3-byte UTF-8 Euro sign, leaving byte AC).
+fn remove_matching_prefix_bytes(
+    value: &str,
+    pattern: &str,
+    length: MatchLength,
+    extglob: bool,
+) -> String {
+    let value_bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(value);
+    let iter: Box<dyn Iterator<Item = usize>> = match length {
+        MatchLength::Shortest => Box::new(0..=value_bytes.len()),
+        MatchLength::Longest => Box::new((0..=value_bytes.len()).rev()),
+    };
+    for end in iter {
+        let prefix =
+            crate::executor::substitution_metadata::bytes_to_shell_text(&value_bytes[..end]);
+        if removal_pattern_matches(pattern, &prefix, extglob) {
+            return crate::executor::substitution_metadata::bytes_to_shell_text(&value_bytes[end..]);
+        }
+    }
+    value.to_string()
+}
+
+/// Byte-level suffix removal for patterns containing raw-byte markers.
+fn remove_matching_suffix_bytes(
+    value: &str,
+    pattern: &str,
+    length: MatchLength,
+    extglob: bool,
+) -> String {
+    let value_bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(value);
+    let iter: Box<dyn Iterator<Item = usize>> = match length {
+        MatchLength::Shortest => Box::new((0..=value_bytes.len()).rev()),
+        MatchLength::Longest => Box::new(0..=value_bytes.len()),
+    };
+    for start in iter {
+        let suffix =
+            crate::executor::substitution_metadata::bytes_to_shell_text(&value_bytes[start..]);
+        if removal_pattern_matches(pattern, &suffix, extglob) {
+            return crate::executor::substitution_metadata::bytes_to_shell_text(&value_bytes[..start]);
+        }
+    }
     value.to_string()
 }
 
