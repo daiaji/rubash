@@ -145,13 +145,58 @@ impl SessionHistory {
     }
 
     /// bashhist.c load_history: append HISTFILE lines to the list.
+    /// lib/readline/histfile.c:267-476 read_history_range: when the file
+    /// has timestamps (lines starting with #digit), blank lines are not
+    /// skipped (they may be part of multi-line entries), and lines after
+    /// a timestamp that are not themselves timestamps are appended to
+    /// the previous entry when the file has multi-line entries.
     pub fn load_file(&mut self, path: &str, histsize: usize) -> io::Result<usize> {
         let content = fs::read_to_string(path)?;
+        let lines: Vec<&str> = content.lines().collect();
+        // histfile.c:377-381: detect timestamps (# followed by digit).
+        let has_timestamps = lines
+            .first()
+            .is_some_and(|l| {
+                l.starts_with('#')
+                    && l[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
+            });
+        // histfile.c:387: default_skipblanks = 0 when multiline entries.
+        let has_multiline = has_timestamps;
+        let default_skipblanks = !has_multiline;
+        let mut skipblanks = default_skipblanks;
+        let mut last_ts: Option<&str> = None;
         let mut count = 0usize;
-        for line in content.lines() {
-            self.entries.push(line.to_string());
-            self.stifle(histsize);
-            count += 1;
+        for line in &lines {
+            let is_timestamp = line.starts_with('#')
+                && line[1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit());
+            if is_timestamp {
+                // histfile.c:448-453: save timestamp, skip leading blanks.
+                last_ts = Some(line);
+                skipblanks = true;
+                continue;
+            }
+            let is_blank = line.is_empty();
+            if is_blank && skipblanks {
+                // histfile.c:426: skip blank lines when skipblanks is set.
+                continue;
+            }
+            // histfile.c:435: reset skipblanks to default.
+            skipblanks = default_skipblanks;
+            if last_ts.is_none() && has_multiline && !self.entries.is_empty() {
+                // histfile.c:436-437: append to previous entry (multiline).
+                let last = self.entries.last_mut().unwrap();
+                last.push('\n');
+                last.push_str(line);
+            } else {
+                // histfile.c:439: add as new entry.
+                self.entries.push(line.to_string());
+                self.stifle(histsize);
+                count += 1;
+            }
+            last_ts = None;
         }
         Ok(count)
     }

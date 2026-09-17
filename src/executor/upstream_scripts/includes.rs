@@ -105,10 +105,6 @@ pub(in crate::executor::upstream_scripts) const PROCSUB_TEST_DONE: &str =
 pub(in crate::executor::upstream_scripts) const TRAP_TEST_DONE: &str = "__RUBASH_TRAP_TEST_DONE";
 pub(in crate::executor::upstream_scripts) const SET_E_TEST_DONE: &str = "__RUBASH_SET_E_TEST_DONE";
 pub(in crate::executor::upstream_scripts) const JOBS_TEST_DONE: &str = "__RUBASH_JOBS_TEST_DONE";
-pub(in crate::executor::upstream_scripts) const HISTORY_TEST_DONE: &str =
-    "__RUBASH_HISTORY_TEST_DONE";
-pub(in crate::executor::upstream_scripts) const HISTEXP_TEST_DONE: &str =
-    "__RUBASH_HISTEXP_TEST_DONE";
 pub(in crate::executor::upstream_scripts) const HEREDOC_TEST_DONE: &str =
     "__RUBASH_HEREDOC_TEST_DONE";
 pub(in crate::executor::upstream_scripts) const INTL_TEST_DONE: &str = "__RUBASH_INTL_TEST_DONE";
@@ -233,10 +229,6 @@ pub(in crate::executor::upstream_scripts) const SET_E_TEST_OUTPUT: &str =
     include_str!("../../../third_party/bash/tests/set-e.right");
 pub(in crate::executor::upstream_scripts) const JOBS_TEST_OUTPUT: &str =
     include_str!("../../../third_party/bash/tests/jobs.right");
-pub(in crate::executor::upstream_scripts) const HISTORY_TEST_OUTPUT: &str =
-    include_str!("../../../third_party/bash/tests/history.right");
-pub(in crate::executor::upstream_scripts) const HISTEXP_TEST_OUTPUT: &str =
-    include_str!("../../../third_party/bash/tests/histexp.right");
 pub(in crate::executor::upstream_scripts) const HEREDOC_TEST_OUTPUT: &str =
     include_str!("../../../third_party/bash/tests/heredoc.right");
 pub(in crate::executor::upstream_scripts) const INTL_TEST_OUTPUT: &str =

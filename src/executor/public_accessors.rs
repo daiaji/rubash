@@ -281,6 +281,13 @@ impl Executor {
         self.session_history = session;
     }
 
+    /// Returns a clone of the session history handle, if any.
+    pub fn get_session_history(
+        &self,
+    ) -> Option<std::rc::Rc<std::cell::RefCell<crate::history::SessionHistory>>> {
+        self.session_history.clone()
+    }
+
     pub(crate) fn push_bash_source(&mut self, source: String) {
         let source = if self
             .env_vars

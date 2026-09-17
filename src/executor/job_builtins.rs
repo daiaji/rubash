@@ -784,6 +784,16 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = &cmd.words[1..];
+        // builtins/history.def: The history builtin works for file I/O
+        // (-r/-w/-a/-n) and listing even without `set -o history`.
+        // remember_on_history only controls automatic recording. Create
+        // a session history on demand so the builtin can read/list.
+        if self.session_history.is_none() {
+            let session = std::rc::Rc::new(std::cell::RefCell::new(
+                crate::history::SessionHistory::new(),
+            ));
+            self.set_session_history(Some(session));
+        }
         if let Some(session) = self.session_history.clone() {
             // The shell's own session history (scripts that ran
             // "set -o history") takes precedence over the host provider.
@@ -1098,6 +1108,11 @@ impl Executor {
                 let edited = edited.trim_end().to_string();
                 if edited.is_empty() {
                     return Ok(0);
+                }
+                // fc.def:539: echo_input_at_read = 1 before fc_execute_file.
+                // y.tab.c:5071-5075: each input line is echoed to stderr.
+                for line in edited.lines() {
+                    eprintln!("{line}");
                 }
                 if let Some(session) = session.as_ref() {
                     let control = self.get_env("HISTCONTROL").unwrap_or_default();

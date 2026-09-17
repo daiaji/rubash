@@ -133,8 +133,6 @@ impl Executor {
             || self.execute_upstream_trap_script()
             || self.execute_upstream_set_e_script()
             || self.execute_upstream_jobs_script()
-            || self.execute_upstream_history_script()
-            || self.execute_upstream_histexp_script()
             || self.execute_upstream_heredoc_script()
             || self.execute_upstream_intl_script()
             || self.execute_upstream_nameref_script()
