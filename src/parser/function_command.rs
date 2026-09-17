@@ -1,4 +1,4 @@
-use super::parse_loop::{parse_time_prefixed_compound_command, parse_time_prefixed_shell_command};
+use super::parse_loop::{parse_time_prefixed_compound_command, parse_time_prefixed_shell_command, unclosed_brace_eof_node, unclosed_paren_eof_node};
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
@@ -146,7 +146,13 @@ pub(super) fn parse_function_command(
     }
 
     if tokens.get(i).is_some_and(|token| token.value == "(") {
-        let (mut body, close_i) = parse_parenthesized_function_body(tokens, i)?;
+        // GNU parse.y:6890-6901: `name() (` reaching EOF unclosed reports
+        // "unexpected end of file from `(' command on line N" — do not let
+        // the `?` fall back to a `(`-unexpected simple command.
+        let Some((mut body, close_i)) = parse_parenthesized_function_body(tokens, i) else {
+            let command = unclosed_paren_eof_node(tokens, i);
+            return Some((command, tokens.len()));
+        };
         if let Some(line) = tokens.get(start).map(|token| token.position) {
             set_body_line(&mut body, line);
         }
@@ -200,7 +206,20 @@ pub(super) fn parse_function_command(
         return Some(finish_function_command(command, tokens, body_end));
     }
 
-    if tokens.get(i)?.value.trim() != "{" {
+    let body_token = tokens.get(i)?;
+    if body_token.value.trim() != "{" {
+        // GNU parse.y:6890-6901 (yyerror EOF path): `name() { ...` or
+        // `name() ( ...` that reaches EOF unclosed reports
+        // "unexpected end of file from `X' command on line N" naming the
+        // innermost unclosed compound — not a `(`-unexpected fallback to a
+        // simple command.
+        if body_token.kind == TokenKind::Keyword
+            && body_token.value.starts_with('{')
+            && !body_token.value.trim_end().ends_with('}')
+        {
+            let command = unclosed_brace_eof_node(tokens, i);
+            return Some((command, tokens.len()));
+        }
         return None;
     }
     let open_brace = i;
@@ -213,7 +232,7 @@ pub(super) fn parse_function_command(
     }
 
     let body_start = i;
-    let i = matching_brace_group_end(tokens, open_brace).or_else(|| {
+    let Some(i) = matching_brace_group_end(tokens, open_brace).or_else(|| {
         // A heredoc body is a complete lexical token, but older boundary
         // paths can omit the separator before the function closing brace.
         // Retain the final brace as the body terminator for serialized
@@ -221,7 +240,13 @@ pub(super) fn parse_function_command(
         (open_brace + 1..tokens.len())
             .rev()
             .find(|&index| is_keyword(tokens, index, "}"))
-    })?;
+    }) else {
+        // GNU parse.y:6890-6901: the `{` body never closed — report the
+        // compound-EOF error naming the innermost unclosed compound rather
+        // than falling back to a `(`-unexpected simple command.
+        let command = unclosed_brace_eof_node(tokens, open_brace);
+        return Some((command, tokens.len()));
+    };
 
     let body = parse(&tokens[body_start..i]).commands;
     let mut command = CommandNode::new();

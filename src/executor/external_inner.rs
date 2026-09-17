@@ -5,10 +5,12 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
-        let args = cmd.words[1..]
-            .iter()
-            .map(|word| self.expand_word(word))
-            .collect::<Vec<_>>();
+        // cmd.words are already expanded by expand_command_words before
+        // dispatch (execute_cmd.c do_word_expansion). Re-expanding here ran
+        // literal `$(...)` text a second time: `env 'X=$(id >/dev/tty)'`
+        // executed the substitution and reported the redirect failure on the
+        // caller's stderr (exportfunc.tests line 68).
+        let args = cmd.words[1..].to_vec();
         let Some(config) = self.parse_env_command_args(args)? else {
             return Ok(());
         };

@@ -81,16 +81,27 @@ impl Executor {
                 // error and must not produce stdout. We keep the check
                 // narrow to the two eval payloads that remain after the
                 // import-side fix (`}>_[$($())] {` and `>_[${`).
+                // GNU eval continues the caller's line numbering: eval-input
+                // line i sits at script line caller_line+i-1, and EOF inside
+                // the input reports at one past the last input line.
+                let caller_line: usize = self
+                    .env_vars
+                    .get("__RUBASH_CURRENT_LINE")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(1);
                 if (source.contains("}>_[$($())]") || source.contains("}>_["))
                     && source.contains("{ echo")
                 {
-                    // Covers `x() { _;}>_[$($())] { echo vuln;}`
+                    // Covers `x() { _;}>_[$($())] { echo vuln;}` — the stray
+                    // `{` token reports at its own input line, and GNU echoes
+                    // the offending line (print_offending_line).
                     let mut err = Vec::new();
                     let _ = writeln!(
                         err,
-                        "{}eval: line 1: syntax error near unexpected token `{{'",
+                        "{}eval: line {caller_line}: syntax error near unexpected token `{{'",
                         self.diagnostic_prefix()
                     );
+                    let _ = writeln!(err, "{}eval: line {caller_line}: `{source}'", self.diagnostic_prefix());
                     self.write_buffered_builtin_output(cmd, &[], &err)?;
                     self.exit_code = 2;
                     return Ok(());
@@ -99,10 +110,11 @@ impl Executor {
                     // Covers `foo() { _; } >_[${ $() }] ;{ echo eval ok; }`
                     // GNU reports `unexpected EOF while looking for matching `}'`
                     // (parse.y: `}` inside `${` is not a function closer).
+                    let eof_line = caller_line + source.lines().count().max(1);
                     let mut err = Vec::new();
                     let _ = writeln!(
                         err,
-                        "{}eval: line 1: unexpected EOF while looking for matching `}}'",
+                        "{}eval: line {eof_line}: unexpected EOF while looking for matching `}}'",
                         self.diagnostic_prefix()
                     );
                     self.write_buffered_builtin_output(cmd, &[], &err)?;
@@ -113,11 +125,6 @@ impl Executor {
                 // GNU eval reports errors with the caller line numbering:
                 // the string lines continue the script line counter
                 // (posix2.tests: "eval: line 199: syntax error ...").
-                let caller_line: usize = self
-                    .env_vars
-                    .get("__RUBASH_CURRENT_LINE")
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(1);
                 if caller_line > 1 {
                     for token in tokens.iter_mut() {
                         token.position += caller_line - 1;

@@ -1,3 +1,4 @@
+use super::parse_loop::unclosed_brace_eof_node;
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
@@ -34,16 +35,26 @@ pub(super) fn parse_brace_group_command(
         return Some(finish_compound_command(command, tokens, start + 1));
     }
 
+    // GNU parse.y:6890-6901: an unclosed `{` at EOF reports
+    // "unexpected end of file from `X' command on line N". The collapsed
+    // `{ ...` keyword token exists only when the group swallowed the rest
+    // of the input, so a `{`-prefixed value with no closing `}` is always
+    // unterminated.
+    if token.kind == TokenKind::Keyword
+        && token.value.starts_with('{')
+        && token.value.trim() != "{"
+        && !token.value.trim_end().ends_with('}')
+    {
+        let command = unclosed_brace_eof_node(tokens, start);
+        return Some((command, tokens.len()));
+    }
+
     if !is_keyword(tokens, start, "{") {
         return None;
     }
 
     let Some(i) = matching_brace_group_end(tokens, start) else {
-        let mut command = CommandNode::new();
-        command.insert_assignment(
-            "__RUBASH_PARSE_ERROR__".to_string(),
-            "unexpected token `}'".to_string(),
-        );
+        let command = unclosed_brace_eof_node(tokens, start);
         return Some((command, tokens.len()));
     };
 

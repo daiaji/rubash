@@ -63,14 +63,21 @@ impl Executor {
             return Err(ExecuteError::ExitCode(1));
         }
 
-        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_SUBSHELL__") {
-            // GNU parse.y:6890-6901 (yyerror EOF path): an unclosed `(`
-            // reports "unexpected end of file from `(' command on line N".
-            // Heredocs still pending inside the region issued their gather
-            // warnings during the parse (make_cmd.c:626), so emit them first.
+        if let Some(spec) = cmd
+            .get_assignment("__RUBASH_PARSE_ERROR_EOF_SUBSHELL__")
+            .map(|value| format!("(\x1e{value}"))
+            .or_else(|| cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__").cloned())
+        {
+            // GNU parse.y:6890-6901 (yyerror EOF path): an unclosed compound
+            // reports "unexpected end of file from `X' command on line N"
+            // naming the innermost open compound (compoundcmd_lineno stack
+            // top). Heredocs still pending inside the region issued their
+            // gather warnings during the parse (make_cmd.c:626), so emit
+            // them first.
             self.mark_parse_error();
             let mut fields = spec.split('\x1e');
-            let paren_line = fields
+            let compound_name = fields.next().unwrap_or("(");
+            let open_line = fields
                 .next()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(1);
@@ -99,7 +106,7 @@ impl Executor {
                 );
             }
             eprintln!(
-                "{}syntax error: unexpected end of file from `(' command on line {paren_line}",
+                "{}syntax error: unexpected end of file from `{compound_name}' command on line {open_line}",
                 self.parser_diagnostic_prefix_for_line(eof_line)
             );
             self.exit_code = 2;

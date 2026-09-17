@@ -54,10 +54,13 @@ pub(crate) fn record_heredoc_overflow(line: usize) {
     let _ = HEREDOC_OVERFLOW_LINE.compare_exchange(0, line, Ordering::SeqCst, Ordering::SeqCst);
 }
 
-/// Returns the recorded here-document overflow line, if any.
+/// Returns the recorded here-document overflow line, if any, and clears it.
+/// ${THIS_SH} scripts run in-process (external_finish.rs
+/// execute_direct_shell_script), so a consumed flag must not leak into a
+/// later tokenize in the same process.
 pub fn heredoc_overflow_line() -> Option<usize> {
     use std::sync::atomic::Ordering;
-    match HEREDOC_OVERFLOW_LINE.load(Ordering::SeqCst) {
+    match HEREDOC_OVERFLOW_LINE.swap(0, Ordering::SeqCst) {
         0 => None,
         line => Some(line),
     }

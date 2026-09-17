@@ -983,6 +983,211 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
     tokens.len()
 }
 
+/// The innermost still-open compound in `region`, modelling GNU's
+/// compoundcmd_lineno stack (parse.y:344-358): `(` `{` if for while until
+/// select case push; their closers pop only a matching top, so a `)` inside
+/// an unclosed `case` pattern list never pops a subshell.
+fn innermost_unclosed_compound(region: &[Token]) -> Option<(String, usize)> {
+    let mut stack: Vec<(&'static str, usize)> = Vec::new();
+    for token in region {
+        if token.kind != TokenKind::Keyword {
+            continue;
+        }
+        let value = token.value.trim_end();
+        // A collapsed `{...}` keyword token is a complete group; a `{`-token
+        // that does not end with `}` swallowed the rest of the input and is
+        // by construction the innermost opener.
+        if value.starts_with('{') {
+            if !value.ends_with('}') {
+                stack.push(("{", token.position));
+            }
+            continue;
+        }
+        match value {
+            "(" => stack.push(("(", token.position)),
+            ")" => {
+                if matches!(stack.last(), Some(("(", _))) {
+                    stack.pop();
+                }
+            }
+            "if" => stack.push(("if", token.position)),
+            "fi" => {
+                if matches!(stack.last(), Some(("if", _))) {
+                    stack.pop();
+                }
+            }
+            "for" | "while" | "until" | "select" => {
+                stack.push((
+                    match value {
+                        "for" => "for",
+                        "while" => "while",
+                        "until" => "until",
+                        _ => "select",
+                    },
+                    token.position,
+                ));
+            }
+            "done" => {
+                if matches!(
+                    stack.last(),
+                    Some(("for" | "while" | "until" | "select", _))
+                ) {
+                    stack.pop();
+                }
+            }
+            "case" => stack.push(("case", token.position)),
+            "esac" => {
+                if matches!(stack.last(), Some(("case", _))) {
+                    stack.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    stack
+        .last()
+        .map(|(name, line)| ((*name).to_string(), *line))
+}
+
+/// GNU parse.y:6890-6901 EOF reporting for an unclosed `{` group (plain
+/// `{ cmd` or a function body `name() { cmd`): "unexpected end of file from
+/// `X' command on line N" names the INNERMOST unclosed compound, and pending
+/// heredocs already warned during the parse (make_cmd.c:626).
+///
+/// `brace_index` points at either a bare `{` keyword token (body is the
+/// following tokens) or a collapsed `{ ...` keyword token the lexer emitted
+/// when an unclosed group swallowed the rest of the input — the swallowed
+/// text is retokenized so inner compounds and heredocs are still seen.
+pub(super) fn unclosed_brace_eof_node(tokens: &[Token], brace_index: usize) -> CommandNode {
+    let brace = &tokens[brace_index];
+    let brace_line = brace.position;
+    let inner_text = brace
+        .value
+        .strip_prefix('{')
+        .filter(|_| brace.value.trim_end() != "{")
+        .unwrap_or("");
+
+    // Region tokens for the innermost-compound and heredoc scans, mapped to
+    // absolute script lines.
+    let region_owned;
+    let region: &[Token] = if inner_text.is_empty() {
+        &tokens[brace_index + 1..]
+    } else {
+        let mut inner = crate::lexer::tokenize(inner_text);
+        for token in inner.iter_mut() {
+            token.position = token.position + brace_line - 1;
+        }
+        region_owned = inner;
+        &region_owned
+    };
+
+    // GNU reports the error at line_number once EOF is reached: one past the
+    // last physical line, plus one more when a trailing unquoted backslash
+    // forced a continuation read that hit EOF (eval `X() { (a)>\'`).
+    let last_line = if inner_text.is_empty() {
+        region
+            .iter()
+            .map(|token| token.position)
+            .max()
+            .unwrap_or(brace_line)
+    } else {
+        brace_line + inner_text.matches('\n').count()
+    };
+    let continuation = if inner_text.is_empty() {
+        false
+    } else {
+        inner_text.trim_end_matches([' ', '\t']).ends_with('\\')
+    };
+    compound_eof_error_node("{", brace_line, region, last_line, eof_line_extra(last_line, continuation))
+}
+
+/// `name() (` with no closing `)`: the same EOF reporting names the `(`.
+pub(super) fn unclosed_paren_eof_node(tokens: &[Token], paren_index: usize) -> CommandNode {
+    let paren_line = tokens[paren_index].position;
+    let region = &tokens[paren_index + 1..];
+    let last_line = region
+        .iter()
+        .map(|token| token.position)
+        .max()
+        .unwrap_or(paren_line);
+    compound_eof_error_node("(", paren_line, region, last_line, eof_line_extra(last_line, false))
+}
+
+fn eof_line_extra(last_line: usize, continuation: bool) -> usize {
+    last_line + 1 + usize::from(continuation)
+}
+
+fn compound_eof_error_node(
+    opener: &str,
+    open_line: usize,
+    region: &[Token],
+    last_line: usize,
+    eof_line: usize,
+) -> CommandNode {
+    let (name, name_line) = innermost_unclosed_compound(region)
+        .unwrap_or_else(|| (opener.to_string(), open_line));
+
+    // Heredocs still pending when EOF hit already warned during the GNU
+    // parse: pair `<<` delimiters with body tokens exactly like the subshell
+    // path, and warn for a `<<` whose body read never even produced a token.
+    let mut pending_delimiters: std::collections::VecDeque<(String, usize)> =
+        std::collections::VecDeque::new();
+    let mut warned: Vec<(String, usize, usize)> = Vec::new();
+    for (index, token) in region.iter().enumerate() {
+        if token.kind == TokenKind::HereDoc {
+            let delimiter = region
+                .get(index + 1)
+                .map(|next| next.value.clone())
+                .unwrap_or_default();
+            pending_delimiters.push_back((delimiter, token.position));
+            continue;
+        }
+        if token.kind != TokenKind::HereDocBody {
+            continue;
+        }
+        let (delimiter, _here_line) = pending_delimiters.pop_front().unwrap_or_default();
+        let gather_line = token.position;
+        let body = token
+            .value
+            .strip_prefix(crate::lexer::QUOTED_HEREDOC_MARKER)
+            .unwrap_or(token.value.as_str());
+        let unterminated = body.starts_with('\x1f');
+        let body = body
+            .strip_prefix('\x1f')
+            .or_else(|| body.strip_prefix('\x1e'))
+            .unwrap_or(body);
+        let body_lines = body.lines().count();
+        let consumed_last = gather_line + body_lines + usize::from(!unterminated);
+        if unterminated {
+            warned.push((delimiter, gather_line, consumed_last));
+        }
+    }
+    // A `<<` with no body token at all gathered at the last input line and
+    // warned there (GNU make_cmd.c gather at EOF: `f() { cat <<EOF` warns
+    // "at line 4" at prefix line 4).
+    for (delimiter, here_line) in pending_delimiters {
+        warned.push((delimiter, last_line.max(here_line), last_line.max(here_line)));
+    }
+
+    let mut command = CommandNode::new();
+    command.line = Some(open_line);
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR__".to_string(),
+        "unexpected end of file".to_string(),
+    );
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_EOF_COMPOUND__".to_string(),
+        format!("{name}\x1e{name_line}\x1e{eof_line}"),
+    );
+    for (warn_index, (delimiter, at_line, warn_line)) in warned.iter().enumerate() {
+        command.insert_assignment(
+            format!("__RUBASH_PARSE_ERROR_HD_WARN_{warn_index}__"),
+            format!("{delimiter}\x1e{at_line}\x1e{warn_line}"),
+        );
+    }
+    command
+}
+
 fn command_is_pending_inversion(command: &CommandNode) -> bool {
     if !command.inverted {
         return false;
