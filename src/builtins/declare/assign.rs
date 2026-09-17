@@ -119,14 +119,21 @@ where
                 continue;
             }
             if !assoc {
-                // GNU declare.def:935-943 (compat > 43: a parenthesized value
-                // on a declare operand is a compound array assignment, taken
-                // without the deprecated warning while the array is being
-                // created) and 992-993 (compound_array_assign outranks the
-                // subscript path): the subscript is discarded and the
-                // compound replaces the array (array.tests:112
-                // declare -a e[10]='(test)' stores [0]="test").
-                if !append_elem && value.starts_with('(') && value.ends_with(')') {
+                // GNU declare.def:927: if the operand has a subscript, the
+                // array already exists, and creating_array==0 (no -a/-A
+                // flag), it is a simple_array_assign — the value (even if
+                // parenthesized) is assigned as a STRING to the element,
+                // not parsed as a compound assignment. This is why
+                // `declare foo[1]='(4 5 6)'` stores "(4 5 6)" at index 1
+                // when foo already exists without -a, while `declare -a
+                // e[10]='(test)'` (with -a, creating_array=1) discards the
+                // subscript and stores [0]="test".
+                let array_exists = variables.get(base).is_some_and(|v| {
+                    v.starts_with('\x1d') || (v.starts_with('(') && v.ends_with(')'))
+                });
+                if !append_elem && value.starts_with('(') && value.ends_with(')')
+                    && (!array_exists || array)
+                {
                     // GNU arrayfunc.c:557 expand_compound_array_assignment:
                     // re-parse and expand the compound value (array.tests:115
                     // declare -a f='("${d[@]}")' expands d into f).

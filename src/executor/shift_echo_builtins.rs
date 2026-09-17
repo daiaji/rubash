@@ -155,22 +155,6 @@ impl Executor {
             self.exit_code = 0;
             return Ok(());
         }
-        if cmd.redirect_out.is_none() && cmd.append.is_none() {
-            if let Some(redirect_index) = cmd.words.iter().position(|word| word == ">") {
-                if let Some(target) = cmd.words.get(redirect_index + 1) {
-                    let echo_args =
-                        echo_args_without_background_marker(&cmd.words[1..redirect_index]);
-                    let target = self.expand_word(target);
-                    let mut file = self.create_redirect_output(&target, false)?;
-                    crate::builtins::echo::write_echo_decoded(
-                        echo_args.iter().map(String::as_str),
-                        &mut file,
-                    )?;
-                    return Ok(());
-                }
-            }
-        }
-
         let echo_args = echo_args_without_background_marker(&cmd.words[1..]);
         let mut output = Vec::new();
         crate::builtins::echo::write_echo_decoded(
