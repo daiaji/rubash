@@ -528,12 +528,35 @@ impl Executor {
         self.apply_command_output_redirects(&stdio_redirect_cmd, &mut body)?;
         // Preserve numbered redirects on every body command so its virtual fd
         // state sees the same left-to-right ordering.
-        let numbered_redirects = redirect_cmd
+        let mut numbered_redirects = redirect_cmd
             .redirects
             .iter()
             .filter(|redirect| is_numbered(redirect))
             .cloned()
             .collect::<Vec<_>>();
+        // GNU execute_cmd.c resolves subshell redirections in the parent
+        // context before the body runs: expand and anchor relative file
+        // targets now, or a `cd` in the body relocates them (niubash#118).
+        for redirect in &mut numbered_redirects {
+            if redirect.fd_var.is_some()
+                || matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+                )
+            {
+                continue;
+            }
+            let expanded = self.expand_word(&redirect.target);
+            let anchored = self.anchor_compound_redirect_target(&expanded);
+            if anchored != redirect.target {
+                redirect.target_metadata = Box::new(crate::parser::WordMetadata::new(
+                    0,
+                    anchored.clone(),
+                    anchored.clone(),
+                ));
+                redirect.target = anchored;
+            }
+        }
         if !numbered_redirects.is_empty() {
             for command in &mut body.commands {
                 command.redirects.splice(0..0, numbered_redirects.clone());

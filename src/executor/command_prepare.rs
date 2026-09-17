@@ -2,6 +2,10 @@ use super::glob::{pathname_expand_word, PathnameExpansion};
 use super::*;
 
 fn materialize_expanded_command_word(word: &str) -> String {
+    // Strip CTLESC (\x11) markers — they protect glob metacharacters during
+    // expansion and must not reach argv (find -name "*.txt" received \x11*
+    // and matched nothing).
+    let word = word.replace('\x11', "");
     decode_command_substitution_payload(&restore_pathname_escape_markers(
         &word
             .replace('\x15', "\\")
@@ -442,7 +446,8 @@ impl Executor {
             let mut words = Vec::new();
             for (word, suppress_glob) in expanded_words {
                 if suppress_glob {
-                    words.push(materialize_expanded_command_word(&word).replace('\x17', "'"));
+                    let materialized = materialize_expanded_command_word(&word).replace('\x17', "'");
+                    words.push(materialized);
                 } else {
                     match pathname_expand_word(&word, &self.env_vars) {
                         PathnameExpansion::Matches(matches) => words

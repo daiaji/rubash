@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::embedded_mutations::collect_command_substitution_source;
 use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 
 #[derive(Debug, Eq, PartialEq)]
@@ -42,31 +43,37 @@ fn replace_unescaped_double_quotes(value: &str, marker: &str) -> String {
 }
 
 pub(in crate::executor) fn hoist_data_double_quotes(value: &str, marker: &str) -> String {
-    // Simple fast path: no `${...}` and no `$'...'` — just replace all ".
-    // We must also check for $'...' (ANSI-C quotes) because a " inside
-    // $'...' is data, not syntax, and hoisting it corrupts the ANSI-C
-    // decode (issue #109: x=($'a"b') stored "ab" instead of "a\"b").
+    // Simple fast path: no `${...}`, no `$'...'`, no `$(...)`, no backtick —
+    // just replace all ". We must skip these constructs because a " inside
+    // them is not outer-word data:
+    //   * $'...' (ANSI-C quotes): a " inside is data, and hoisting it
+    //     corrupts the ANSI-C decode (issue #109: x=($'a"b') stored "ab"
+    //     instead of "a\"b").
+    //   * $(...) and `...` (command substitution): a " inside is syntax for
+    //     the nested parse (GNU parse.y:4451 parse_comsub re-parses the body
+    //     with its own quote state). Hoisting it turns the inner quote into
+    //     literal data (issue #119: `echo "x=[$(echo "y")]"` printed
+    //     `x=["y"]` instead of `x=[y]`).
     // A backslash-escaped `\"` is element-level data, not a syntax quote:
     // hoisting it corrupts compound array elements like `[0x0022]=\"`
     // (unicode1.sub) by turning `\"` into `\<marker>`, which the storage
     // tokenizer mis-parses. Skip a `"` preceded by a backslash.
-    if !value.contains("${") && !value.contains("$'") {
+    if !value.contains("${") && !value.contains("$'") && !value.contains("$(")
+        && !value.contains('`')
+    {
         return replace_unescaped_double_quotes(value, marker);
     }
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
     loop {
-        // Find the nearest of "${" or "$'"
-        let brace_pos = rest.find("${");
-        let ansi_pos = rest.find("$'");
-        let pos = match (brace_pos, ansi_pos) {
-            (Some(b), Some(a)) => b.min(a),
-            (Some(b), None) => b,
-            (None, Some(a)) => a,
-            (None, None) => {
-                out.push_str(&replace_unescaped_double_quotes(rest, marker));
-                return out;
-            }
+        // Find the nearest of "${", "$'", "$(", or "`"
+        let pos = ["${", "$'", "$(", "`"]
+            .iter()
+            .filter_map(|needle| rest.find(needle))
+            .min();
+        let Some(pos) = pos else {
+            out.push_str(&replace_unescaped_double_quotes(rest, marker));
+            return out;
         };
         // Replace " in the segment before the special construct
         out.push_str(&replace_unescaped_double_quotes(&rest[..pos], marker));
@@ -82,7 +89,25 @@ pub(in crate::executor) fn hoist_data_double_quotes(value: &str, marker: &str) -
                     return out;
                 }
             }
-        } else {
+        } else if rest[pos..].starts_with("$(") {
+            // Command substitution: the body's own quote state governs the
+            // closing paren (GNU parse.y:4451 parse_comsub), so reuse the
+            // storage-level collector — it already tracks quotes, comments,
+            // heredocs and case-pattern parens. It consumes through the
+            // closing `)`, so the remaining length locates the span; on
+            // unterminated input the whole rest is consumed.
+            let body = &rest[pos + 2..];
+            let mut chars = body.chars().peekable();
+            let _ = collect_command_substitution_source(
+                &mut chars,
+                &std::collections::HashMap::new(),
+            );
+            let remaining: usize = chars.map(|ch| ch.len_utf8()).sum();
+            let consumed = body.len() - remaining;
+            let end = pos + 2 + consumed;
+            out.push_str(&rest[pos..end]);
+            rest = &rest[end..];
+        } else if rest[pos..].starts_with("$'") {
             // $'...' ANSI-C quote: skip everything until the closing '
             let body_start = pos + 2;
             match rest[body_start..].find('\'') {
@@ -92,6 +117,33 @@ pub(in crate::executor) fn hoist_data_double_quotes(value: &str, marker: &str) -
                 }
                 None => {
                     // Unterminated $'...: keep the rest verbatim
+                    out.push_str(&rest[pos..]);
+                    return out;
+                }
+            }
+        } else {
+            // Backtick command substitution: skip to the next unescaped `.
+            let body_start = pos + 1;
+            let mut escaped = false;
+            let mut close = None;
+            for (offset, ch) in rest[body_start..].char_indices() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == '`' {
+                    close = Some(offset);
+                    break;
+                }
+            }
+            match close {
+                Some(close) => {
+                    out.push_str(&rest[pos..body_start + close + 1]);
+                    rest = &rest[body_start + close + 1..];
+                }
+                None => {
                     out.push_str(&rest[pos..]);
                     return out;
                 }

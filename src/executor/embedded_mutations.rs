@@ -1250,7 +1250,7 @@ fn collect_dollar_bracket_arithmetic_expansion(
     (expression, false)
 }
 
-fn collect_command_substitution_source(
+pub(in crate::executor) fn collect_command_substitution_source(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     aliases: &std::collections::HashMap<String, crate::builtins::alias::Alias>,
 ) -> String {

@@ -760,18 +760,28 @@ impl Executor {
             // `ls * | wc -c` gave 2 bytes instead of 15, while
             // `ls -1 | wc -c` was correct).
             let mut args: Vec<String> = Vec::new();
-            for word in command.words[1..].iter() {
+            for (arg_index, word) in command.words[1..].iter().enumerate() {
+                let word_index = arg_index + 1;
                 let value = self.expand_word(word);
                 // \x1d marks a fully quoted word and \x1b a quoted
                 // tilde; both stay literal.
                 if value.starts_with('\x1d') || value.starts_with('\x1b') {
-                    args.push(value);
+                    args.push(value.replace('\x11', ""));
+                    continue;
+                }
+                // Quoted words (e.g. "*.txt") must not be glob-expanded.
+                let metadata = command.word_metadata.get(word_index);
+                let raw = metadata.map(|metadata| metadata.raw.as_str());
+                if crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
+                    raw, metadata,
+                ) {
+                    args.push(value.replace('\x11', ""));
                     continue;
                 }
                 match glob::pathname_expand_word(&value, &self.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => args.extend(matches),
                     glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
-                        args.push(value)
+                        args.push(value.replace('\x11', ""))
                     }
                 }
             }
@@ -954,18 +964,28 @@ impl Executor {
             // `ls * | wc -c` gave 2 bytes instead of 15, while
             // `ls -1 | wc -c` was correct).
             let mut args: Vec<String> = Vec::new();
-            for word in command.words[1..].iter() {
+            for (arg_index, word) in command.words[1..].iter().enumerate() {
+                let word_index = arg_index + 1;
                 let value = self.expand_word(word);
                 // \x1d marks a fully quoted word and \x1b a quoted
                 // tilde; both stay literal.
                 if value.starts_with('\x1d') || value.starts_with('\x1b') {
-                    args.push(value);
+                    args.push(value.replace('\x11', ""));
+                    continue;
+                }
+                // Quoted words (e.g. "*.txt") must not be glob-expanded.
+                let metadata = command.word_metadata.get(word_index);
+                let raw = metadata.map(|metadata| metadata.raw.as_str());
+                if crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
+                    raw, metadata,
+                ) {
+                    args.push(value.replace('\x11', ""));
                     continue;
                 }
                 match glob::pathname_expand_word(&value, &self.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => args.extend(matches),
                     glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
-                        args.push(value)
+                        args.push(value.replace('\x11', ""))
                     }
                 }
             }
@@ -1165,13 +1185,21 @@ impl Executor {
                 //  marks a fully quoted word and  a quoted tilde;
                 // both stay literal, exactly as command_prepare does.
                 if expanded.starts_with('\x1d') || expanded.starts_with('\x1b') {
-                    out.push(expanded);
+                    out.push(expanded.replace('\x11', ""));
+                    continue;
+                }
+                // Quoted words (e.g. "*.txt") must not be glob-expanded.
+                let metadata = command.word_metadata.get(index);
+                if crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
+                    raw, metadata,
+                ) {
+                    out.push(expanded.replace('\x11', ""));
                     continue;
                 }
                 match glob::pathname_expand_word(&expanded, &self.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => out.extend(matches),
                     glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
-                        out.push(expanded)
+                        out.push(expanded.replace('\x11', ""))
                     }
                 }
             }
@@ -1428,7 +1456,8 @@ impl Executor {
                     crate::executor::external_file_builtins::cat_has_show_nonprinting(command);
                 let mut file_operands: Vec<String> = Vec::new();
                 let mut options_done = false;
-                for word in command.words[1..].iter() {
+                for (arg_index, word) in command.words[1..].iter().enumerate() {
+                    let word_index = arg_index + 1;
                     // GNU cat: a bare `-` operand is stdin at that position
                     // and `--` ends option processing; neither is a flag.
                     if word == "--" && !options_done {
@@ -1446,13 +1475,22 @@ impl Executor {
                     // \x1d marks a fully quoted word and \x1b a quoted
                     // tilde; both stay literal.
                     if value.starts_with('\x1d') || value.starts_with('\x1b') {
-                        file_operands.push(value);
+                        file_operands.push(value.replace('\x11', ""));
+                        continue;
+                    }
+                    // Quoted words (e.g. "*.txt") must not be glob-expanded.
+                    let metadata = command.word_metadata.get(word_index);
+                    let raw = metadata.map(|metadata| metadata.raw.as_str());
+                    if crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
+                        raw, metadata,
+                    ) {
+                        file_operands.push(value.replace('\x11', ""));
                         continue;
                     }
                     match glob::pathname_expand_word(&value, &self.env_vars) {
                         glob::PathnameExpansion::Matches(matches) => file_operands.extend(matches),
                         glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
-                            file_operands.push(value)
+                            file_operands.push(value.replace('\x11', ""))
                         }
                     }
                 }
