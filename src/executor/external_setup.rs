@@ -435,6 +435,15 @@ impl Executor {
                 redirect.target = new_target.clone();
             }
         }
+        // The rewritten command no longer carries process-substitution
+        // syntax in its words or redirect targets. Clear the consumed
+        // markers so a second pass over the same node (pipeline stage
+        // helpers re-enter through their own materialization call) is a
+        // no-op instead of re-running every substitution source.
+        rewritten.process_substitutions.clear();
+        for metadata in &mut rewritten.word_metadata {
+            metadata.process_substitutions.clear();
+        }
         sync_ordered_redirect_targets(&mut rewritten);
         Ok((rewritten, files))
     }

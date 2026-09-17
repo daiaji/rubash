@@ -705,6 +705,7 @@ impl Executor {
                         && index != 0)
                     || !command.assignments.is_empty()
                     || !command.process_substitutions.is_empty()
+                    || command_has_pipeline_process_substitution(command)
             || command.pipe == Some(2)
         }) {
             return Ok(None);
@@ -914,6 +915,7 @@ impl Executor {
                         && index != 0)
                     || !command.assignments.is_empty()
                     || !command.process_substitutions.is_empty()
+                    || command_has_pipeline_process_substitution(command)
             || command.pipe == Some(2)
         }) {
             return Ok(None);
@@ -1187,7 +1189,49 @@ impl Executor {
         // error flags around the stage so the outer word-expansion check in
         // command_execute never observes them.
         let saved = self.snapshot_arithmetic_error_flags();
-        let result = self.execute_pipeline_stage_inner(command, input, force_compound_errexit);
+        // GNU forks a <( ) / >( ) child while expanding the pipeline
+        // element's words inside that element's subshell (subst.c
+        // process_substitute, execute_cmd.c). The builtin/function/external
+        // stage helpers each run their own materialization, but the inline
+        // arms below consume command.words directly, so a procsub argument
+        // there survived as a literal path (issue #113:
+        // `cat <(echo ps) | grep -q ps`). Run the shared materialization
+        // here so every stage form sees real paths; the helpers' own
+        // materialization calls are no-ops on the rewritten node.
+        let result = if command_has_pipeline_process_substitution(command) {
+            // The substitution child inherits the stage's stdin — the
+            // upstream pipe — so expose the captured input while the
+            // substitution sources run.
+            let old_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
+            let old_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+            self.env_vars
+                .insert(FUNCTION_STDIN.to_string(), input.to_string());
+            self.env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+            let materialized = self.command_with_process_substitution_files(command);
+            restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
+            restore_optional_env_var(
+                &mut self.env_vars,
+                FUNCTION_STDIN_OFFSET,
+                old_stdin_offset,
+            );
+            match materialized {
+                Ok((materialized, process_substitutions)) => {
+                    let inner = self.execute_pipeline_stage_inner(
+                        &materialized,
+                        input,
+                        force_compound_errexit,
+                    );
+                    match self.finish_process_substitutions(process_substitutions) {
+                        Err(error) => Err(error),
+                        Ok(()) => inner,
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            self.execute_pipeline_stage_inner(command, input, force_compound_errexit)
+        };
         let nounset_hit = self.restore_arithmetic_error_flags(&saved);
         match result {
             Ok(Some((output, stderr, _status))) if nounset_hit => {
@@ -1378,8 +1422,19 @@ impl Executor {
                 let show_nonprinting =
                     crate::executor::external_file_builtins::cat_has_show_nonprinting(command);
                 let mut file_operands: Vec<String> = Vec::new();
+                let mut options_done = false;
                 for word in command.words[1..].iter() {
-                    if word.starts_with('-') {
+                    // GNU cat: a bare `-` operand is stdin at that position
+                    // and `--` ends option processing; neither is a flag.
+                    if word == "--" && !options_done {
+                        options_done = true;
+                        continue;
+                    }
+                    if word == "-" {
+                        file_operands.push(word.clone());
+                        continue;
+                    }
+                    if !options_done && word.starts_with('-') {
                         continue;
                     }
                     let value = self.expand_word(word);
@@ -1400,7 +1455,33 @@ impl Executor {
                     let mut output = String::new();
                     let mut stderr = String::new();
                     let mut status = 0;
+                    // `cat -` consumes the stage's stdin once; later `-`
+                    // operands see EOF. Resolved lazily so commands without
+                    // a `-` operand never touch the stdin machinery.
+                    let mut stdin_remaining: Option<String> = None;
                     for path in file_operands {
+                        if path == "-" {
+                            if stdin_remaining.is_none() {
+                                stdin_remaining = Some(
+                                    self.stdin_string_for_command_mut(command)
+                                        .unwrap_or_else(|| input.to_string()),
+                                );
+                            }
+                            let text = stdin_remaining.take().unwrap_or_default();
+                            let bytes = if show_nonprinting {
+                                crate::executor::external_file_builtins::cat_v_filter(
+                                    text.as_bytes(),
+                                )
+                            } else {
+                                text.into_bytes()
+                            };
+                            output.push_str(
+                                &crate::executor::substitution_metadata::bytes_to_shell_text(
+                                    &bytes,
+                                ),
+                            );
+                            continue;
+                        }
                         match fs::read(shell_path_to_windows(&path, &self.env_vars)) {
                             Ok(bytes) => {
                                 let bytes = if show_nonprinting {
@@ -1883,6 +1964,38 @@ fn command_has_non_concurrent_pipeline_redirects(
             );
         !is_initial_heredoc && !is_final_output
     })
+}
+
+// The native concurrent pipeline runs members through CreateProcess with
+// the parsed word text as argv; it has no process-substitution
+// materialization, so a member carrying <( ) / >( ) must take the
+// sequential stage path, where execute_pipeline_stage materializes the
+// substitutions into temp paths first.
+fn command_has_pipeline_process_substitution(command: &CommandNode) -> bool {
+    !command.process_substitutions.is_empty()
+        || command.word_metadata.iter().any(|metadata| {
+            !metadata.process_substitutions.is_empty()
+                || metadata.raw.contains("<(")
+                || metadata.raw.contains(">(")
+        })
+        || command.words.iter().any(|word| {
+            (word.starts_with("<(") || word.starts_with(">(")) && word.ends_with(')')
+        })
+        || command.redirects.iter().any(|redirect| {
+            redirect.target.starts_with("<(") || redirect.target.starts_with(">(")
+        })
+        || [
+            command.redirect_in.as_ref(),
+            command.redirect_out.as_ref(),
+            command.append.as_ref(),
+            command.redirect_err.as_ref(),
+            command.redirect_err_append.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|redirect| {
+            redirect.target.starts_with("<(") || redirect.target.starts_with(">(")
+        })
 }
 
 struct TimePipelinePrefix {
