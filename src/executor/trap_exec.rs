@@ -630,6 +630,29 @@ impl Executor {
         self.apply_command_output_redirects_inner(cmd, ast, false)
     }
 
+    /// GNU execute_cmd.c applies a compound command's redirections in the
+    /// parent context before the body runs: a `cd` inside `( ... ) > f`
+    /// cannot relocate `f`. The body commands here re-open the injected
+    /// redirect target at their own execution time, so a relative target
+    /// must be anchored to the current directory now (niubash#118).
+    pub(in crate::executor) fn anchor_compound_redirect_target(&self, target: &str) -> String {
+        if is_closed_redirect_target(target)
+            || redirect_target_fd(target).is_some()
+            || is_null_device(target)
+            || target.starts_with('&')
+        {
+            return target.to_string();
+        }
+        let path = shell_path_to_windows(target, &self.env_vars);
+        if path.is_absolute() {
+            return target.to_string();
+        }
+        match env::current_dir() {
+            Ok(cwd) => shell_display_path(&cwd.join(&path).to_string_lossy()),
+            Err(_) => target.to_string(),
+        }
+    }
+
     fn apply_command_output_redirects_inner(
         &mut self,
         cmd: &CommandNode,
@@ -637,7 +660,8 @@ impl Executor {
         prepare_targets: bool,
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target =
+                self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
             if prepare_targets
                 && !is_closed_redirect_target(&target)
                 && redirect_target_fd(&target).is_none()
@@ -665,7 +689,8 @@ impl Executor {
             };
             apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
         } else if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
+            let target =
+                self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
@@ -685,7 +710,8 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target =
+                self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
             if prepare_targets
                 && !is_closed_redirect_target(&target)
                 && redirect_target_fd(&target).is_none()
@@ -714,7 +740,8 @@ impl Executor {
             };
             apply_stderr_append_redirect(&mut ast.commands, &append_redirect);
         } else if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
+            let target =
+                self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),

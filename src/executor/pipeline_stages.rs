@@ -389,6 +389,15 @@ impl Executor {
                     args.push(value);
                     continue;
                 }
+                // Quoted words (e.g. "*.txt") must not be glob-expanded.
+                let metadata = command.word_metadata.get(index);
+                let suppress = crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
+                    raw, metadata,
+                );
+                if suppress {
+                    args.push(value);
+                    continue;
+                }
                 match glob::pathname_expand_word(&value, &self.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => args.extend(matches),
                     glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
