@@ -171,8 +171,13 @@ impl Executor {
             );
             return None;
         };
+        // GNU arrayfunc.c:1582-1583 INDEX_ERROR(): a negative subscript that
+        // still resolves negative (empty/unset array) prints err_badarraysub
+        // and returns NULL — the expansion is empty but the command still
+        // runs. This is the VALUE expansion path (not ${#arr[bad]} length
+        // expansion which returns &expand_wdesc_error at subst.c:9955 and
+        // abandons the command), so we must NOT set arithmetic_nonfatal_error.
         let Some(index) = resolve_indexed_array_subscript(&storage, index) else {
-            self.arithmetic_nonfatal_error.set(true);
             eprintln!(
                 "{}{}: bad array subscript",
                 self.diagnostic_prefix(),

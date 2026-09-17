@@ -779,7 +779,17 @@ impl Executor {
         // "${1+  $@  }" to one word (exp suite).
         let quoted_whole_word =
             word.starts_with('\x1d') && !word.contains("$@") && !word.contains("$*");
-        if !quoted_whole_word && raw.is_some() && self.is_brace_expand_enabled()
+        // GNU brace expansion runs on the raw word text before quote removal.
+        // A fully double-quoted word (marked with \x1d) normally has no
+        // unquoted braces, but nested inner quotes can create unquoted
+        // regions: `"${letters["{2..6}"]}"` has `{2..6}` between inner quotes
+        // that are unquoted in the raw text, so GNU brace-expands it to
+        // `"${letters["2"]}" … "${letters["6"]}"`. Check the raw form for
+        // unquoted brace expansion even when the word is quote-marked.
+        let raw_has_braces = raw.is_some_and(|r| {
+            crate::expand::braces::expand_braces(r).len() > 1
+        });
+        if (!quoted_whole_word || raw_has_braces) && raw.is_some() && self.is_brace_expand_enabled()
         // GNU runs brace expansion before parameter expansion, so a
         // dollar-brace in the word does not suppress it: the dollar-brace
         // body is skipped by the brace scanner (foo{bar,${var.} splits).
