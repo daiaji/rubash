@@ -257,37 +257,4 @@ impl Executor {
         true
     }
 
-    pub(super) fn execute_upstream_history_script(&mut self) -> bool {
-        if self.env_vars.contains_key(HISTORY_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("history.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", HISTORY_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(HISTORY_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
-    }
-
-    pub(super) fn execute_upstream_histexp_script(&mut self) -> bool {
-        if self.env_vars.contains_key(HISTEXP_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("histexp.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", HISTEXP_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(HISTEXP_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
-    }
 }

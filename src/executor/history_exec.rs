@@ -61,11 +61,12 @@ pub(in crate::executor) fn execute_history_session(
     let mut mode = HistoryMode::List;
     let mut count: Option<usize> = None;
     let mut delete_offset: Option<String> = None;
-    let mut file: Option<String> = None;
     let mut operands: Vec<String> = Vec::new();
     let mut expecting_offset = false;
-    let mut expecting_file = false;
     let mut no_more_opts = false;
+    // history.def:161-166: track how many of -a/-r/-w/-n were given; GNU
+    // rejects "cannot use more than one of -anrw" when 2+ are set.
+    let mut anrw_count: u8 = 0;
 
     let mut i = 0usize;
     while i < args.len() {
@@ -73,12 +74,6 @@ pub(in crate::executor) fn execute_history_session(
         if expecting_offset {
             delete_offset = Some(arg.clone());
             expecting_offset = false;
-            i += 1;
-            continue;
-        }
-        if expecting_file {
-            file = Some(arg.clone());
-            expecting_file = false;
             i += 1;
             continue;
         }
@@ -112,25 +107,29 @@ pub(in crate::executor) fn execute_history_session(
                     }
                     'a' => {
                         mode = HistoryMode::Append;
-                        expecting_file = true;
+                        anrw_count += 1;
                     }
                     'w' => {
                         mode = HistoryMode::Write;
-                        expecting_file = true;
+                        anrw_count += 1;
                     }
                     'r' => {
                         mode = HistoryMode::Read;
-                        expecting_file = true;
+                        anrw_count += 1;
                     }
                     'n' => {
                         mode = HistoryMode::ReadNew;
-                        expecting_file = true;
+                        anrw_count += 1;
                     }
                     other => bad = Some(other),
                 }
             }
             if let Some(c) = bad {
-                let _ = writeln!(stderr, "history: -{c}: invalid option");
+                let _ = writeln!(
+                    stderr,
+                    "{}history: -{c}: invalid option",
+                    executor.diagnostic_prefix()
+                );
                 let _ = writeln!(stderr, "history: usage: history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]");
                 return Ok(2);
             }
@@ -145,6 +144,16 @@ pub(in crate::executor) fn execute_history_session(
         operands.push(arg.clone());
         i += 1;
     }
+    // history.def:161-166: reject when more than one of -a/-r/-w/-n is set.
+    if anrw_count > 1 {
+        let _ = writeln!(
+            stderr,
+            "{}history: cannot use more than one of -anrw",
+            executor.diagnostic_prefix()
+        );
+        return Ok(1);
+    }
+
     // GNU display_history -> get_numeric_arg: a non-numeric listing limit is
     // "numeric argument required" with EX_USAGE, not a full listing.
     if mode == HistoryMode::List {
@@ -292,15 +301,29 @@ pub(in crate::executor) fn execute_history_session(
             for operand in &operands {
                 let result = shell.expand(operand, ctx);
                 if result.status < 0 {
-                    let _ = writeln!(stderr, "history: {operand}: history expansion failed");
+                    let _ = writeln!(
+                        stderr,
+                        "{}history: {operand}: history expansion failed",
+                        executor.diagnostic_prefix()
+                    );
                     continue;
                 }
                 let _ = writeln!(stdout, "{}", result.text);
             }
         }
         HistoryMode::Append | HistoryMode::Write | HistoryMode::Read | HistoryMode::ReadNew => {
-            let Some(path) = file.or_else(|| executor.get_env("HISTFILE").map(String::from)) else {
-                let _ = writeln!(stderr, "history: filename not specified");
+            // history.def:159,273: filename is the first non-option argument
+            // (loptend); fall back to $HISTFILE when none is given.
+            let Some(path) = operands
+                .first()
+                .cloned()
+                .or_else(|| executor.get_env("HISTFILE").map(String::from))
+            else {
+                let _ = writeln!(
+                    stderr,
+                    "{}history: filename not specified",
+                    executor.diagnostic_prefix()
+                );
                 return Ok(2);
             };
             // Translate Git-Bash/POSIX spellings (/c/..., /dev/null) to the
@@ -319,7 +342,11 @@ pub(in crate::executor) fn execute_history_session(
                 _ => Ok(0),
             };
             if let Err(err) = outcome {
-                let _ = writeln!(stderr, "history: {path}: cannot open: {err}");
+                let _ = writeln!(
+                    stderr,
+                    "{}history: {path}: cannot open: {err}",
+                    executor.diagnostic_prefix()
+                );
                 return Ok(1);
             }
         }

@@ -141,6 +141,28 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 }
                 continue;
             }
+            // shell.c:913-974 parse_shell_options: short flags are parsed
+            // character by character. Expand clusters without -c/-o/-O
+            // (e.g. `-in` -> `-i` `-n`) so the per-flag match below sees
+            // them individually.
+            if !arg.starts_with("--")
+                && flags.len() > 1
+                && !flags.contains('c')
+                && !flags.contains('o')
+                && !flags.contains('O')
+                && flags.chars().all(|flag| {
+                    flag == 's'
+                        || flag == 'i'
+                        || flag == 'l'
+                        || flag == 'D'
+                        || cli_shell_flag_name(flag).is_some()
+                })
+            {
+                for flag in flags.chars() {
+                    expanded_args.push(format!("-{flag}"));
+                }
+                continue;
+            }
         }
         expanded_args.push(arg.clone());
     }
@@ -305,6 +327,18 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
         }
     }
 
+    // shell.c:1830-1842 init_interactive: when -i is set, the shell
+    // enables history (remember_on_history = enable_history_list = 1).
+    // Create the session history so commands are recorded and saved
+    // to $HISTFILE on exit (bashhist.c maybe_save_shell_history).
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+        && executor.get_session_history().is_none()
+    {
+        let session = std::rc::Rc::new(std::cell::RefCell::new(
+            rubash::history::SessionHistory::new(),
+        ));
+        executor.set_session_history(Some(session));
+    }
     run_no_script_with_init(executor, init_file.as_deref())
 }
 
@@ -804,6 +838,23 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             continue;
         }
 
+        // bashhist.c:869 bash_add_history: in interactive mode, each
+        // complete command is recorded to the session history.
+        if let Some(session) = executor.get_session_history() {
+            let trimmed = pending.trim_end();
+            if !trimmed.is_empty() {
+                let control = executor.get_env("HISTCONTROL").unwrap_or_default();
+                let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
+                let histsize = executor
+                    .get_env("HISTSIZE")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(500);
+                session
+                    .borrow_mut()
+                    .record(trimmed, &control, &ignore, histsize);
+            }
+        }
+
         let status = run_source_with_line_offset(
             executor,
             &pending,
@@ -831,7 +882,8 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
     }
 
     let status = executor.last_exit_code();
-    finish_shell(executor, status, false)
+    let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+    finish_shell(executor, status, interactive)
 }
 
 /// bashhist.c: does this script turn history on? Detects the long-form
@@ -1041,7 +1093,14 @@ fn run_history_group(
     // Record the entry (bashhist.c history_delimiting_chars join).
     if history_on {
         if cmdhist {
-            let record = build_recorded_entry(&record_texts, group, lithist);
+            let mut record = build_recorded_entry(&record_texts, group, lithist);
+            // bashhist.c:892-893: heredoc body lines (including the
+            // delimiter) preserve their trailing newlines. The entry
+            // ends with \n after the delimiter, producing a blank line
+            // in the history listing (%5d%c %s\n adds another \n).
+            if group.iter().any(|(_, is_body)| *is_body) && !record.ends_with('\n') {
+                record.push('\n');
+            }
             let was_recorded = if record.trim().is_empty() {
                 false
             } else {
@@ -1610,6 +1669,19 @@ fn run_source_with_line_offset(
 }
 
 fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> i32 {
+    // shell.c:1007-1009 exit_shell: if remember_on_history is set,
+    // maybe_save_shell_history() writes the session's history to $HISTFILE
+    // (bashhist.c:488-530). Interactive shells with -i have history
+    // enabled, so save on exit.
+    if interactive {
+        if let Some(session) = executor.get_session_history() {
+            if let Some(histfile) = executor.get_env("HISTFILE") {
+                if !histfile.is_empty() {
+                    let _ = session.borrow_mut().write_file(&histfile);
+                }
+            }
+        }
+    }
     // KNOWN WORKAROUND (do not mistake this for a real fix).
     //
     // coproc.tests ends with `exec 4<&${COPROC[0]}-`, `exec >&${COPROC[1]}-`,
