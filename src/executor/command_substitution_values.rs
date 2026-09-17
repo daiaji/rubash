@@ -182,7 +182,7 @@ impl Executor {
                 let output = child.wait_with_output().ok()?;
                 Some((
                     crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout)
-                        .trim_end_matches('\n')
+                        .trim_capture_terminator()
                         .to_string(),
                     output.status.code().unwrap_or(1),
                 ))
@@ -296,7 +296,7 @@ impl Executor {
         self.last_command_substitution_status.set(Some(status));
         Some(
             crate::executor::substitution_metadata::bytes_to_shell_text(&stdout)
-                .trim_end_matches('\n')
+                .trim_capture_terminator()
                 .to_string(),
         )
     }
@@ -754,7 +754,7 @@ impl Executor {
         }
         Some(
             bytes_to_shell_text(&output.stdout)
-                .trim_end_matches('\n')
+                .trim_capture_terminator()
                 .to_string(),
         )
     }

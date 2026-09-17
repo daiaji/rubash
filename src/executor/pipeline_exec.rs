@@ -15,13 +15,18 @@ fn timed_read_value(input: &TimedPipelineInput, start: f64, timeout: f64) -> (St
         value.push_str(chunk);
         if let Some(newline) = value.find('\n') {
             value.truncate(newline);
+            // CRLF input (`read -t`): the '\r' that precedes the newline is
+            // part of the terminator, matching `read`'s non-timed path.
+            if value.ends_with('\r') {
+                value.pop();
+            }
             return (value, 0);
         }
     }
 
     if input.eof_at <= deadline {
         return (
-            value.trim_end_matches('\n').to_string(),
+            value.trim_capture_terminator().to_string(),
             if value.is_empty() { 1 } else { 0 },
         );
     }

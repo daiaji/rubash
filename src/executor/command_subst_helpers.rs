@@ -212,11 +212,59 @@ fn unescape_remaining_shell_escapes_inner(value: &str) -> String {
     output
 }
 
+/// Command-substitution capture: strips the line terminator(s) GNU bash
+/// removes from a substitution's output, treating a Windows CRLF pair as a
+/// single terminator.
+///
+/// GNU (subst.c command_substitute) deletes every trailing newline and keeps
+/// any other trailing byte, so on Unix `o=$(printf 'a\r\n')` is `a\r`. That is
+/// fine when the tools in the pipe are GNU tools, but niubash runs
+/// Windows-native tools whose CRT text mode turns every `\n` into `\r\n`
+/// (measured: gawk, GoAWK's awk, ugrep, python, jq, xz, curl, 7z), and a native
+/// shell reads those pipes without the MSYS text-mode translation that turns
+/// `\r\n` back into `\n`. The stray `\r` therefore survives into `$o` and breaks
+/// `[ "$o" = x ]`, `case` labels, array keys and concatenated paths with an
+/// invisible byte (niubash #120).
+///
+/// Rule: a `\r` that immediately precedes a stripped `\n` is part of the
+/// terminator and is stripped with it; a lone trailing `\r` not followed by
+/// `\n` is preserved, so the GNU-fidelity case is intact. This is the same
+/// policy the lexer applies to CRLF script lines (niubash #106) and the same
+/// one `read` already applies to its input.
+pub(in crate::executor) trait CaptureTerminator {
+    fn trim_capture_terminator(&self) -> &str;
+}
+
+impl CaptureTerminator for str {
+    fn trim_capture_terminator(&self) -> &str {
+        let bytes = self.as_bytes();
+        let mut end = bytes.len();
+        while end > 0 && bytes[end - 1] == b'\n' {
+            end -= 1;
+            if end > 0 && bytes[end - 1] == b'\r' {
+                end -= 1;
+            }
+        }
+        &self[..end]
+    }
+}
+
+/// Byte-level form of the same rule, for capture paths that carry `Vec<u8>`
+/// until the final text conversion (GNU subst.c read_comsub).
+pub(in crate::executor) fn trim_capture_terminator_bytes(bytes: &mut Vec<u8>) {
+    while bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+}
+
 pub(in crate::executor) fn echo_command_substitution_output(args: &[String]) -> String {
     let mut bytes = echo_raw_output_bytes(args);
     bytes.retain(|byte| *byte != 0);
     bytes_to_shell_text(&bytes)
-        .trim_end_matches('\n')
+        .trim_capture_terminator()
         .to_string()
 }
 
