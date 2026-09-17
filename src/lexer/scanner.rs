@@ -335,7 +335,31 @@ impl<'a> Lexer<'a> {
                 if self.brace_group_contains_heredoc_operator() {
                     return Some(Token::new(TokenKind::Keyword, "{", start));
                 }
-                self.skip_brace();
+                let scan = self.skip_brace();
+                if !scan.closed {
+                    if let Some(comment_start) = scan.comment_start {
+                        // A word-initial `#' at the group's top level is a
+                        // comment, not group text (parse.y read_token ->
+                        // parse_comment). When the logical line ends inside the
+                        // group -- `f() { # note' is the whole first logical
+                        // line -- slicing to end of input used to fuse the
+                        // comment into the token (`{ # note'), which then
+                        // failed the parser's `value == "{"' body gate and
+                        // degraded into `syntax error near unexpected token
+                        // `('' (niubash #120 follow-up). Emit only the group
+                        // text seen before the comment and rescan from the
+                        // comment, which the dispatcher then drops like any
+                        // other comment.
+                        let value = self.input[start..comment_start].trim_end().to_string();
+                        let kind = if is_brace_expansion(&value) {
+                            TokenKind::BraceExpand
+                        } else {
+                            TokenKind::Keyword
+                        };
+                        self.position = comment_start;
+                        return Some(Token::new(kind, &value, start));
+                    }
+                }
                 if self
                     .peek()
                     .is_some_and(|ch| !is_word_delimiter(ch) || ch == '{')
