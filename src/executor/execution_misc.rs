@@ -515,6 +515,20 @@ pub(in crate::executor) fn eval_source_for_reparse(source: &str) -> String {
         .replace('\x1c', "")
         .replace('\x1f', "$")
         .replace('\x17', "'")
+        // GNU expand_word_internal's single-quote arm (subst.c:11882) takes the
+        // region body from string_extract_single_quoted (subst.c:1088), which
+        // only substrings the raw text, and then calls remove_quoted_escapes
+        // (subst.c:11902 -> 4901 -> dequote_escapes:4692), which strips just
+        // CTLESC-CTLESC and CTLESC-CTLNUL pairs. A `"` written inside single
+        // quotes therefore reaches eval as a bare quote character, and eval
+        // re-reads its argument as parser input (builtins/eval.def:49 ->
+        // evalstring -> parse_and_execute) where that bare quote delimits
+        // again. Rubash carries the same character as the data-double-quote
+        // marker in the word value, so it has to be rendered back to source
+        // here; otherwise eval re-parses the marker as literal data.
+        // niubash #124: `eval 'd='\''x'\''; mkdir -p "$d"'` handed the quotes
+        // to the child (`mkdir: cannot create directory '"/x"'`).
+        .replace('\x18', "\"")
         .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
         .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
     protect_unmatched_double_quoted_backticks(&source)
