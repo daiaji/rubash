@@ -99,10 +99,15 @@ where
         while let Some(option) = chars.next() {
             if option == 'o' {
                 if chars.peek().is_some() {
-                    writeln!(stderr, "rubash: set: {}: invalid option", arg)?;
                     writeln!(
                         stderr,
-                        "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [arg ...]"
+                        "{}set: {}: invalid option",
+                        builtin_error_prefix(env_vars),
+                        arg
+                    )?;
+                    writeln!(
+                        stderr,
+                        "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
                     )?;
                     return Ok(EX_USAGE);
                 }
@@ -112,7 +117,12 @@ where
                         if !name.is_empty() && !name.starts_with('-') && !name.starts_with('+') =>
                     {
                         if !is_shell_option(name) {
-                            writeln!(stderr, "rubash: set: {}: invalid option name", name)?;
+                            writeln!(
+                                stderr,
+                                "{}set: {}: invalid option name",
+                                builtin_error_prefix(env_vars),
+                                name
+                            )?;
                             // GNU set.def treats an invalid `-o` name as a
                             // usage error, distinct from a valid option that
                             // simply reports failure.
@@ -164,10 +174,16 @@ where
             }
 
             if !SET_FLAGS.contains(option) {
-                writeln!(stderr, "rubash: set: {}{}: invalid option", prefix, option)?;
                 writeln!(
                     stderr,
-                    "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [arg ...]"
+                    "{}set: {}{}: invalid option",
+                    builtin_error_prefix(env_vars),
+                    prefix,
+                    option
+                )?;
+                writeln!(
+                    stderr,
+                    "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
                 )?;
                 return Ok(EX_USAGE);
             }

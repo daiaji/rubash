@@ -31,7 +31,7 @@ where
     // entire `hash` builtin refuses with "hash: hashing disabled" and
     // returns failure, before any option parsing.
     if !crate::builtins::set::shell_option_enabled(env_vars, "hashall") {
-        writeln!(stderr, "{}hash: hashing disabled", script_prefix())?;
+        writeln!(stderr, "{}hash: hashing disabled", script_prefix(env_vars))?;
         return Ok(EXECUTION_FAILURE);
     }
 
@@ -50,7 +50,7 @@ where
                     writeln!(
                         stderr,
                         "{}hash: -p: option requires an argument",
-                        script_prefix()
+                        script_prefix(env_vars)
                     )?;
                     writeln!(
                         stderr,
@@ -86,8 +86,16 @@ where
                         print = true;
                     }
                     other => {
-                        writeln!(stderr, "rubash: hash: -{other}: invalid option")?;
-                        return Ok(EXECUTION_FAILURE);
+                        writeln!(
+                            stderr,
+                            "{}hash: -{other}: invalid option",
+                            script_prefix(env_vars)
+                        )?;
+                        writeln!(
+                            stderr,
+                            "hash: usage: hash [-lr] [-p pathname] [-dt] [name ...]"
+                        )?;
+                        return Ok(EX_USAGE);
                     }
                 }
             }
@@ -95,6 +103,18 @@ where
             names.push(arg.as_str());
         }
         index += 1;
+    }
+
+    // GNU builtins/hash.def:124-128: hash -d/-t with no arguments reports
+    // "hash: -d: option requires an argument" via sh_needarg.
+    if names.is_empty() && (delete || translate) {
+        let opt = if delete { "-d" } else { "-t" };
+        writeln!(
+            stderr,
+            "{}hash: {opt}: option requires an argument",
+            script_prefix(env_vars)
+        )?;
+        return Ok(EXECUTION_FAILURE);
     }
 
     let mut table = hash_table(env_vars);
@@ -105,11 +125,11 @@ where
         // (sh_notfound -> "hash: <name>: not found"); both fail the builtin.
         if crate::builtins::set::shell_option_enabled(env_vars, "restricted") {
             if pathname.contains('/') || pathname.contains('\\') {
-                writeln!(stderr, "{}hash: {pathname}: restricted", script_prefix())?;
+                writeln!(stderr, "{}hash: {pathname}: restricted", script_prefix(env_vars))?;
                 return Ok(EXECUTION_FAILURE);
             }
             if crate::executor::path::find_user_command(pathname, env_vars).is_none() {
-                writeln!(stderr, "{}hash: {pathname}: not found", script_prefix())?;
+                writeln!(stderr, "{}hash: {pathname}: not found", script_prefix(env_vars))?;
                 return Ok(EXECUTION_FAILURE);
             }
         }
@@ -118,7 +138,7 @@ where
                 writeln!(
                     stderr,
                     "{}hash: {pathname}: Is a directory",
-                    script_prefix()
+                    script_prefix(env_vars)
                 )?;
                 return Ok(EXECUTION_FAILURE);
             }
@@ -142,7 +162,7 @@ where
         let mut status = EXECUTION_SUCCESS;
         for name in names {
             if table.remove(name).is_none() {
-                writeln!(stderr, "{}hash: {name}: not found", script_prefix())?;
+                writeln!(stderr, "{}hash: {name}: not found", script_prefix(env_vars))?;
                 status = EXECUTION_FAILURE;
             } else {
                 // GNU hash.def `hash -d NAME`: phash_remove(w) drops the entry
@@ -166,7 +186,7 @@ where
                     writeln!(stdout, "{path}")?;
                 }
             } else {
-                writeln!(stderr, "{}hash: {name}: not found", script_prefix())?;
+                writeln!(stderr, "{}hash: {name}: not found", script_prefix(env_vars))?;
                 status = EXECUTION_FAILURE;
             }
         }
@@ -216,7 +236,7 @@ where
                 }
                 None => {
                     table.remove(name);
-                    writeln!(stderr, "{}hash: {name}: not found", script_prefix())?;
+                    writeln!(stderr, "{}hash: {name}: not found", script_prefix(env_vars))?;
                     status = EXECUTION_FAILURE;
                 }
             }
@@ -283,10 +303,10 @@ fn store_hash_table(env_vars: &mut HashMap<String, String>, table: &HashMap<Stri
     );
 }
 
-fn script_prefix() -> String {
-    if let (Ok(script), Ok(line)) = (
-        std::env::var("__RUBASH_SCRIPT_NAME"),
-        std::env::var("__RUBASH_CURRENT_LINE"),
+fn script_prefix(env_vars: &HashMap<String, String>) -> String {
+    if let (Some(script), Some(line)) = (
+        env_vars.get("__RUBASH_SCRIPT_NAME"),
+        env_vars.get("__RUBASH_CURRENT_LINE"),
     ) {
         return format!("{script}: line {line}: ");
     }

@@ -1,7 +1,7 @@
 use super::*;
 
 const READ_USAGE: &str =
-    "read: usage: read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]";
+    "read: usage: read [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]";
 
 /// GNU read.def:405: `read` accepts a name that is either a valid identifier
 /// or a valid array reference `name[subscript]` (array.tests:80 `read x[1]`).

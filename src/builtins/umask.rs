@@ -8,6 +8,20 @@ use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
+const EX_USAGE: i32 = 2;
+
+/// GNU builtins/common.c:83-94 builtin_error_prolog: the shell name, the
+/// executing line for scripts, then the builtin name. Reads the executor env
+/// map (same sources as Executor::diagnostic_prefix).
+fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
+    if let (Some(script), Some(line)) = (
+        env_vars.get("__RUBASH_SCRIPT_NAME"),
+        env_vars.get("__RUBASH_CURRENT_LINE"),
+    ) {
+        return format!("{script}: line {line}: ");
+    }
+    "rubash: ".to_string()
+}
 
 pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
@@ -40,15 +54,25 @@ where
                         'S' => symbolic = true,
                         'p' => reusable = true,
                         _ => {
-                            writeln!(stderr, "rubash: umask: {value}: invalid option")?;
-                            return Ok(2);
+                            writeln!(
+                                stderr,
+                                "{}umask: {value}: invalid option",
+                                diagnostic_prefix(env_vars)
+                            )?;
+                            writeln!(stderr, "umask: usage: umask [-p] [-S] [mode]")?;
+                            return Ok(EX_USAGE);
                         }
                     }
                 }
             }
             value if value.starts_with('-') => {
-                writeln!(stderr, "rubash: umask: {value}: invalid option")?;
-                return Ok(2);
+                writeln!(
+                    stderr,
+                    "{}umask: {value}: invalid option",
+                    diagnostic_prefix(env_vars)
+                )?;
+                writeln!(stderr, "umask: usage: umask [-p] [-S] [mode]")?;
+                return Ok(EX_USAGE);
             }
             value => mode = Some(value),
         }
@@ -59,7 +83,11 @@ where
             match parse_mask(mode) {
                 Some(mask) => mask,
                 None => {
-                    writeln!(stderr, "rubash: umask: {mode}: octal number out of range")?;
+                    writeln!(
+                        stderr,
+                        "{}umask: {mode}: octal number out of range",
+                        diagnostic_prefix(env_vars)
+                    )?;
                     return Ok(EXECUTION_FAILURE);
                 }
             }
@@ -69,14 +97,16 @@ where
                 Err(SymbolicModeError::Operator(ch)) => {
                     writeln!(
                         stderr,
-                        "rubash: umask: `{ch}': invalid symbolic mode operator"
+                        "{}umask: `{ch}': invalid symbolic mode operator",
+                        diagnostic_prefix(env_vars)
                     )?;
                     return Ok(EXECUTION_FAILURE);
                 }
                 Err(SymbolicModeError::Character(ch)) => {
                     writeln!(
                         stderr,
-                        "rubash: umask: `{ch}': invalid symbolic mode character"
+                        "{}umask: `{ch}': invalid symbolic mode character",
+                        diagnostic_prefix(env_vars)
                     )?;
                     return Ok(EXECUTION_FAILURE);
                 }
@@ -367,7 +397,7 @@ mod tests {
         assert_eq!(status, 2);
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
-            "rubash: umask: -Z: invalid option\n"
+            "rubash: umask: -Z: invalid option\numask: usage: umask [-p] [-S] [mode]\n"
         );
     }
 

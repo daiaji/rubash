@@ -10,6 +10,27 @@ impl Executor {
             self.exit_code = 0;
             return Ok(());
         };
+
+        // GNU builtins/builtin.def:64-66: no_options() rejects any option
+        // (empty option string). internal_getopt (bashgetopt.c:99) calls
+        // sh_invalidopt for the bad option, then no_options calls
+        // builtin_usage.
+        if name.starts_with('-') && name != "--" && name != "-" {
+            let mut stderr = Vec::new();
+            writeln!(
+                &mut stderr,
+                "{}builtin: {name}: invalid option",
+                self.diagnostic_prefix()
+            )?;
+            writeln!(
+                &mut stderr,
+                "builtin: usage: builtin [shell-builtin [arg ...]]"
+            )?;
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+            self.exit_code = 2;
+            return Ok(());
+        }
+
         let mut builtin_cmd = cmd.clone();
         builtin_cmd.words = args.to_vec();
 

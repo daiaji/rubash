@@ -154,7 +154,6 @@ mod command_subst_helpers;
 mod command_text;
 mod env_helpers;
 mod execution_misc;
-pub(crate) use execution_misc::printable_filename;
 mod function_env;
 mod local_helpers;
 mod parameter_case;

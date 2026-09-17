@@ -255,15 +255,27 @@ impl Executor {
                 );
                 return true;
             }
-            let subscript = self.expand_arithmetic_special_parameters(subscript);
-            let Some(index) = self.eval_arithmetic_expansion_value(&subscript) else {
+            let subscript_expanded = self.expand_arithmetic_special_parameters(subscript);
+            let Some(index) = self.eval_arithmetic_expansion_value(&subscript_expanded) else {
                 return false;
             };
-            let Some(index) = resolve_indexed_array_subscript(&current, index) else {
-                return false;
+            // GNU arrayfunc.c:1207-1211: negative subscripts to indexed arrays
+            // count back from end; if still negative, report "bad array
+            // subscript" via builtin_error ("[%s]: %s", sub, ...).
+            let Some(resolved) = resolve_indexed_array_subscript(&current, index) else {
+                // Report the bad subscript error. The caller (execute_unset)
+                // passes stderr via the executor, so emit directly.
+                let mut stderr = Vec::new();
+                let _ = writeln!(
+                    &mut stderr,
+                    "{}unset: [{subscript}]: bad array subscript",
+                    self.diagnostic_prefix()
+                );
+                let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), &stderr);
+                return true; // handled — don't fall through to variable unset
             };
             let mut entries = indexed_array_entries(&current);
-            entries.remove(&index);
+            entries.remove(&resolved);
             self.env_vars.insert(
                 array_name.to_string(),
                 format_indexed_array_storage(entries),

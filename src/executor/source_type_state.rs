@@ -25,6 +25,21 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         let expanded = self.expand_command_words(cmd)?;
         if expanded.words.get(1).is_none() {
+            // GNU builtins/source.def:143-144: `source`/`.` with no filename
+            // reports "filename argument required" + usage via builtin_error/
+            // builtin_usage, and returns EX_USAGE (2).
+            let mut stderr = Vec::new();
+            let command_name = &expanded.words[0];
+            writeln!(
+                stderr,
+                "{}{command_name}: filename argument required",
+                self.diagnostic_prefix()
+            )?;
+            writeln!(
+                stderr,
+                "{command_name}: usage: {command_name} [-p path] filename [arguments]"
+            )?;
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             self.exit_code = 2;
             return Ok(());
         };

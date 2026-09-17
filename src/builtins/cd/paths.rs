@@ -55,6 +55,17 @@ pub(super) fn logical_destination_display(old_pwd: &Path, target: &Path) -> Stri
 }
 
 pub(super) fn shell_var(env_vars: &HashMap<String, String>, name: &str) -> Option<String> {
+    // HOME and OLDPWD are shell variables managed by the shell itself
+    // (unset removes them from env_vars). On Windows, env::var still
+    // returns the original process value after unset because
+    // apply_required_windows_child_environment re-adds HOME from
+    // USERPROFILE. So for HOME and OLDPWD, only check env_vars.
+    if name == "HOME" || name == "OLDPWD" {
+        return env_vars
+            .get(name)
+            .cloned()
+            .filter(|value| !value.is_empty());
+    }
     env_vars
         .get(name)
         .cloned()
