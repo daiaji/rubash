@@ -192,29 +192,27 @@ impl Executor {
             Some(0) => 1,
             Some(_) => 0,
             None => {
-                // Raw-captured `(( ))` commands report division by 0 and
-                // trailing-input errors with GNU's exact lasttp remainder
-                // (trailing blank preserved); every other diagnostic keeps
-                // the established normalized-expression path.
-                let raw_display = raw_expression
-                    .map(|raw| raw.trim_start_matches([' ', '\t']))
-                    .unwrap_or(expression);
-                let raw_division = arithmetic_division_by_zero_token(raw_display)
-                    .map(|token| (raw_display, token.to_string()));
-                match raw_division {
-                    Some((display, token)) => {
-                        self.report_arithmetic_division_by_zero_raw(&display, &token)
-                    }
-                    None => {
-                        // GNU expr.c:484-485: trailing input after a
-                        // successful sub-expression parse. Use the raw
-                        // display so the trailing blank survives.
-                        if crate::executor::arithmetic::trailing_input_token(raw_display).is_some()
-                        {
-                            self.report_arithmetic_error_raw_display(raw_display);
-                        } else {
-                            self.report_arithmetic_error(expression);
-                        }
+                // GNU expr.c:1528 evalerror echoes the expression with only
+                // leading whitespace skipped, and every error token is the
+                // raw lasttp remainder to end-of-input (trailing blanks
+                // included). execute_arith_command (execute_cmd.c:3937)
+                // expands the string before evalexp, so the diagnostic text
+                // is the post-expansion expression — `(( 4 ? : $A ))` echoes
+                // `4 ? : 7 `. arith_display_expand applies the parameter part
+                // of expand_arith_string to the raw capture; the parser's
+                // joined `expression` field (which loses token adjacency like
+                // `<=`) and literal `$var` text are both wrong here. The
+                // expanded evaluator input is the fallback when no raw
+                // capture exists, normalized words the last resort.
+                if let Some(raw) = raw_expression {
+                    let display = self.arith_display_expand(raw);
+                    self.report_arithmetic_error_raw_display(&display);
+                } else {
+                    let eval_input = self.arithmetic_last_eval_input.borrow().clone();
+                    if !eval_input.is_empty() {
+                        self.report_arithmetic_error_raw_display(&eval_input);
+                    } else {
+                        self.report_arithmetic_error(expression);
                     }
                 }
                 if self.arithmetic_nounset_error.get() {
@@ -224,6 +222,104 @@ impl Executor {
                 }
             }
         }
+    }
+
+
+/// Parameter-level expansion of an arithmetic expression for error display.
+/// GNU's execute_arith_command (execute_cmd.c:3937) runs the raw expression
+/// through expand_arith_string(Q_DOUBLE_QUOTES|Q_ARITH) before evalexp, so a
+/// diagnostic like `(( 4 ? : $A ))` echoes the expanded text (`4 ? : 7 `).
+/// Only `$name`, `${name}`, positional, and special parameters are expanded
+/// here — `$(...)` command substitution and `${name:-...}` operators are left
+/// literal so nothing executes twice (the evaluation already expanded them).
+    fn arith_display_expand(&self, expression: &str) -> String {
+    if !expression.contains('$') {
+        return expression.to_string();
+    }
+    let mut output = String::with_capacity(expression.len());
+    let mut chars = expression.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '$' {
+            output.push(ch);
+            continue;
+        }
+        let lookup = |name: &str| -> Option<String> {
+            self.dynamic_parameter_value(name)
+                .or_else(|| self.shell_variable_value(name))
+                .or_else(|| std::env::var(name).ok())
+        };
+        match chars.peek().copied() {
+            Some('{') => {
+                chars.next();
+                let name = collect_braced_parameter_name(&mut chars);
+                // Only a plain `${name}` is expanded for display; operators
+                // like `${x:-word}` stay literal (rare inside failing arith).
+                if is_shell_name(&name) {
+                    if let Some(value) = lookup(&name) {
+                        output.push_str(&value);
+                    }
+                } else {
+                    output.push_str("${");
+                    output.push_str(&name);
+                    output.push('}');
+                }
+            }
+            Some('?') => {
+                chars.next();
+                output.push_str(&self.exit_code.to_string());
+            }
+            Some('$') => {
+                chars.next();
+                output.push_str(&self.shell_pid_value().to_string());
+            }
+            Some('!') => {
+                chars.next();
+                output.push_str(&self.last_background_pid_value());
+            }
+            Some('@') | Some('*') => {
+                chars.next();
+                output.push_str(&self.positional_params.join(" "));
+            }
+            Some('#') => {
+                chars.next();
+                output.push_str(&self.positional_params.len().to_string());
+            }
+            Some('-') => {
+                chars.next();
+                output.push_str(&self.shell_option_flags());
+            }
+            Some(first) if first.is_ascii_digit() => {
+                chars.next();
+                let index = first.to_digit(10).unwrap_or(0) as usize;
+                if index == 0 {
+                    output.push_str(&self.script_name_value());
+                } else {
+                    output.push_str(
+                        self.positional_params
+                            .get(index - 1)
+                            .map(String::as_str)
+                            .unwrap_or(""),
+                    );
+                }
+            }
+            Some(first) if is_shell_name_start(first) => {
+                let mut name = String::new();
+                while let Some(name_ch) = chars.peek().copied() {
+                    if !is_shell_name_char(name_ch) {
+                        break;
+                    }
+                    chars.next();
+                    name.push(name_ch);
+                }
+                if let Some(value) = lookup(&name) {
+                    output.push_str(&value);
+                }
+            }
+            Some(_) => output.push('$'),
+            None => output.push('$'),
+        }
+    }
+    output
     }
 
     pub(in crate::executor) fn execute_let(&mut self, expressions: &[String]) -> i32 {

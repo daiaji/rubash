@@ -175,8 +175,17 @@ impl Executor {
             {
                 self.arithmetic_fatal_error.set(true);
                 if !self.arithmetic_expansion_error.replace(true) {
-                    let message = crate::executor::arithmetic::arithmetic_error_message(expression, true, &self.env_vars)
-                        .unwrap_or_else(|| format!("{expression}: syntax error in expression (error token is \"{expression}\")"));
+                    // GNU evalexp reports against the post-expansion string
+                    // (expand_arith_string ran before it); the captured eval
+                    // input echoes `$var` values, not the literal text.
+                    let eval_input = self.arithmetic_last_eval_input.borrow().clone();
+                    let display = if eval_input.is_empty() {
+                        expression
+                    } else {
+                        eval_input.as_str()
+                    };
+                    let message = crate::executor::arithmetic::arithmetic_error_message(display, true, &self.env_vars)
+                        .unwrap_or_else(|| format!("{display}: syntax error in expression (error token is \"{display}\")"));
                     eprintln!("{}{}", self.diagnostic_prefix(), message);
                 }
                 return String::new();
@@ -553,7 +562,9 @@ impl Executor {
             // parse-failed-entirely case (trailing token == entire expression)
             // and fix the message to match GNU.
             if message.contains("arithmetic syntax error in expression") {
-                if let Some(token) = crate::executor::arithmetic::trailing_input_token(expression) {
+                if let Some((token, _)) =
+                    crate::executor::arithmetic::trailing_input_token(expression)
+                {
                     if token.trim() == expression.trim() {
                         let command_context =
                             self.env_vars.get("__RUBASH_IS_C").map(String::as_str) != Some("1");

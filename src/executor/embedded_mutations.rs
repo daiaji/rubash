@@ -492,9 +492,21 @@ impl Executor {
                                 {
                                     self.arithmetic_fatal_error.set(true);
                                     if !self.arithmetic_expansion_error.replace(true) {
+                                        // GNU evalexp reports against the
+                                        // post-expansion string
+                                        // (expand_arith_string ran first);
+                                        // the captured eval input echoes
+                                        // `$var` values, not literal text.
+                                        let eval_input =
+                                            self.arithmetic_last_eval_input.borrow().clone();
+                                        let display = if eval_input.is_empty() {
+                                            expression.as_str()
+                                        } else {
+                                            eval_input.as_str()
+                                        };
                                         if let Some(message) =
                                             crate::executor::arithmetic::arithmetic_error_message(
-                                                &expression,
+                                                display,
                                                 true,
                                                 &self.env_vars,
                                             )

@@ -697,6 +697,7 @@ impl Executor {
             arithmetic_nounset_error: Cell::new(false),
             arithmetic_last_error_category: Cell::new(None),
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
+            arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             background_children: HashMap::new(),

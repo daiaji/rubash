@@ -68,6 +68,24 @@ pub(crate) enum ArithmeticErrorCategory {
     TrailingInput,
 }
 
+/// GNU expr.c diagnostic class for the unparsed remainder of an arithmetic
+/// expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::executor) enum TrailingInputKind {
+    /// The full parse completed and left trailing tokens (expr.c:485):
+    /// `x=9 y=41` -> `arithmetic syntax error in expression`.
+    InExpression,
+    /// The parse died at an operand position -- the token at the stop point
+    /// cannot begin an operand (expr.c:1120 `exp0`'s operand-expected):
+    /// `x = 2 ,, 3` stops at the second `,`, `5 + * 3` at `*`.
+    OperandExpected,
+    /// The parse completed but the leftover begins with a character that is
+    /// no valid arithmetic token at all -- readtok's junk branch
+    /// (expr.c:1507-1509) with the previous token an operand:
+    /// `2 @ 3` -> `invalid arithmetic operator`.
+    InvalidOperator,
+}
+
 impl Executor {
     /// Snapshot the arithmetic error flags so a subshell boundary (command
     /// substitution, pipeline element) can restore them afterwards; errors
@@ -169,6 +187,7 @@ impl Executor {
         } else {
             normalize_arithmetic_quotes(&with_assoc_keys)
         };
+        *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.env_vars) {
                 self.arithmetic_nounset_error.set(true);
@@ -219,6 +238,7 @@ impl Executor {
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression);
         let expression =
             normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(&with_assoc_keys));
+        *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.env_vars) {
                 self.arithmetic_nounset_error.set(true);
@@ -475,7 +495,9 @@ pub(crate) fn arithmetic_error_category(expression: &str) -> Option<ArithmeticEr
 /// unparsed remainder (`y=41 `, trailing blank included). This function
 /// re-parses the expression and returns that trailing remainder so the
 /// diagnostic can format it exactly as GNU does.
-pub(in crate::executor) fn trailing_input_token(expression: &str) -> Option<String> {
+pub(in crate::executor) fn trailing_input_token(
+    expression: &str,
+) -> Option<(String, TrailingInputKind)> {
     let normalized = normalize_arithmetic_quotes(expression);
     if normalized.trim().is_empty() {
         return None;
@@ -495,17 +517,49 @@ pub(in crate::executor) fn trailing_input_token(expression: &str) -> Option<Stri
         error_category: None,
         no_expand: false,
     };
-    let _ = parser.parse_comma();
+    let parsed_ok = parser.parse_comma().is_some();
     parser.skip_ws();
     if parser.pos < parser.input.len() {
         // GNU lasttp points to the token start; the remainder from there to
         // the end of the expression is the error token (trailing blank kept).
         let token = &normalized[parser.pos..];
         if !token.is_empty() {
-            return Some(token.to_string());
+            // GNU expr.c: a mid-parse failure means the stop position was an
+            // operand slot (exp0 -> operand expected). A completed parse with
+            // leftover input splits on whether the leftover can begin a
+            // token at all: junk characters hit readtok's
+            // invalid-arithmetic-operator branch (expr.c:1507-1509, curtok
+            // is an operand), valid token starts are plain trailing input
+            // (expr.c:485).
+            let kind = if !parsed_ok {
+                TrailingInputKind::OperandExpected
+            } else if token_starts_with_non_arith_char(token) {
+                TrailingInputKind::InvalidOperator
+            } else {
+                TrailingInputKind::InExpression
+            };
+            return Some((token.to_string(), kind));
         }
     }
     None
+}
+
+/// True when `token` starts with a character GNU's arithmetic tokenizer
+/// cannot begin a token with -- not a digit, not a `legal_variable_starter`
+/// (alpha/underscore), and not an `is_arithop` character
+/// (expr.c:1285-1303). `@`, `#`, `[`, `;` land here; `~` is BNOT (a real
+/// operator token) and stays plain trailing input.
+fn token_starts_with_non_arith_char(token: &str) -> bool {
+    let Some(ch) = token.chars().next() else {
+        return false;
+    };
+    !(ch.is_ascii_alphanumeric()
+        || ch == '_'
+        || matches!(
+            ch,
+            '=' | '>' | '<' | '+' | '-' | '*' | '/' | '%' | '!' | '(' | ')' | '&' | '|' | '^'
+                | '~' | '?' | ':' | ','
+        ))
 }
 
 pub(crate) fn eval_conditional_arith_value(
@@ -1046,11 +1100,17 @@ fn arithmetic_error_message_ctx(
     // input after a successful sub-expression parse, e.g. `(( x=9 y=41 ))`
     // reports "arithmetic syntax error in expression" with the unparsed
     // remainder as the error token.
-    if let Some(token) = trailing_input_token(expression) {
-        let msg = if command_context {
-            "arithmetic syntax error in expression"
-        } else {
-            "syntax error in expression"
+    if let Some((token, kind)) = trailing_input_token(expression) {
+        let msg = match kind {
+            TrailingInputKind::OperandExpected => operand_expected,
+            TrailingInputKind::InvalidOperator => invalid_operator,
+            TrailingInputKind::InExpression => {
+                if command_context {
+                    "arithmetic syntax error in expression"
+                } else {
+                    "syntax error in expression"
+                }
+            }
         };
         return Some(format!("{expression}: {msg} (error token is \"{token}\")"));
     }
@@ -1151,9 +1211,11 @@ fn arithmetic_error_message_ctx(
             {
                 end += 1;
             }
-            let token = &expression[index + 1..end];
+            // GNU lasttp points at `.` (readtok's junk branch); the token
+            // is the raw remainder to the end of the expression.
+            let token = &expression[index + 1..];
             return Some(format!(
-                "{expression}: {invalid_operator} (error token is \"{token}{token_space}\")"
+                "{expression}: {invalid_operator} (error token is \"{token}\")"
             ));
         }
     }
@@ -1169,8 +1231,12 @@ fn arithmetic_error_message_ctx(
             })
             .filter(|digits| !digits.is_empty())
         {
+            // GNU lasttp points at the first digit of the exponent; the
+            // token is the raw remainder to the end of the expression.
+            let digit_start = expression.len() - after.len() + 1;
+            let token = &expression[digit_start..];
             return Some(format!(
-                "{expression}: exponent less than 0 (error token is \"{digits}{token_space}\")"
+                "{expression}: exponent less than 0 (error token is \"{token}\")"
             ));
         }
     }
@@ -1179,14 +1245,10 @@ fn arithmetic_error_message_ctx(
     // reference (which does not exist) and reports `operand expected`.
     // Double quotes are fine (`$(( "1" ))` is 1), so only single quotes count.
     if let Some(start) = expression.find('\'') {
-        let rest = &expression[start + 1..];
-        let end = rest
-            .find('\'')
-            .map(|index| start + 1 + index)
-            .unwrap_or(expression.len());
-        let token = &expression[start..end];
+        // remainder to the end of the expression, trailing blanks included.
+        let token = &expression[start..];
         return Some(format!(
-            "{expression}: {operand_expected} (error token is \"{token}{token_space}\")"
+            "{expression}: {operand_expected} (error token is \"{token}\")"
         ));
     }
 
@@ -1744,7 +1806,9 @@ fn empty_ternary_branch_token(expression: &str) -> Option<String> {
     let question = expression.find('?')?;
     let colon = expression[question..].find(':')? + question;
     if expression[colon + 1..].trim().is_empty() {
-        Some(": ".to_string())
+        // GNU lasttp points at the `:`; the token is the raw remainder to
+        // the end of the expression, trailing blanks included.
+        Some(expression[colon..].to_string())
     } else {
         None
     }
@@ -1794,7 +1858,7 @@ fn empty_ternary_true_branch_token(expression: &str) -> Option<String> {
 /// (`if (lasttok != STR)`) is `attempted assignment to non-variable`,
 /// while a variable left-hand side passes the lvalue check and then fails
 /// with `operand expected` once the missing operand is read.
-fn trailing_operator_error(
+pub(in crate::executor) fn trailing_operator_error(
     expression: &str,
     _trailing_space: bool,
     command_context: bool,

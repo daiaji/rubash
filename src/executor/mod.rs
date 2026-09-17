@@ -507,6 +507,12 @@ pub struct Executor {
     /// uses this so the error token reflects the post-expansion text (GNU
     /// evalexp runs after parameter/command substitution).
     arithmetic_last_error_expression: std::cell::RefCell<String>,
+    /// Expanded+normalized expression text from the most recent
+    /// `(( ... ))` evaluation — the exact string `evalexp` saw. GNU
+    /// execute_arith_command (execute_cmd.c:3937) runs
+    /// expand_arith_string before evalexp, so diagnostics echo the
+    /// post-expansion text (`$A` shows its value, not the literal).
+    arithmetic_last_eval_input: std::cell::RefCell<String>,
     /// True while an if/elif condition list is executing: word-expansion
     /// failures must pierce function frames so the enclosing compound
     /// command can abandon itself entirely (GNU probe f4).
