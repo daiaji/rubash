@@ -12,26 +12,26 @@
 
 Rubash 是用 Rust 从零实现的 GNU Bash —— 词法分析、解析器、展开引擎、执行器、内建命令，全部重写。目标是与 GNU Bash 5.3.0 逐字节兼容，原生运行在 Windows 上。
 
-**当前状态**：83 个 GNU Bash 上游测试套件中 43 个零差异通过。全部 83 套件总差异 2702 行 —— 其中 `intl` 单套件占 1209 行（ANSI-C `$'...'` 载体字节架构缺口，见下文）。排除 `intl` 后余 39 套件共 1493 行，7 天内从 3427 行下降 57%。完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
+**当前状态**：83 个 GNU Bash 上游测试套件中 42 个零差异通过。全部 83 套件总差异 1833 行，9 天内从 3427 行下降 46%。（此前报告的 `intl`=1209 为缺 locale 的环境噪音；harness 现在自动生成 `en_US.UTF-8`，`intl` 实测为 2 行。）完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
 
 ## 兼容性一览
 
 ```
 GNU Bash 5.3.0 测试套件 — 83 个文件，true-baseline 实测
-（台账：2026-09-16 全量复核）
+（台账：2026-09-17 全量复核）
 
-  零差通过：      43 套件  █████████████████░░░░░░░░░░░░░░  52%
-  小差异(1-50)：  28 套件  ███████████░░░░░░░░░░░░░░░░░░░░  34%
-  中差异(51-250)：11 套件  ████░░░░░░░░░░░░░░░░░░░░░░░░░░  13%
+  零差通过：      42 套件  █████████████████░░░░░░░░░░░░░░  51%
+  小差异(1-50)：  26 套件  ██████████░░░░░░░░░░░░░░░░░░░░░  31%
+  中差异(51-250)：14 套件  █████░░░░░░░░░░░░░░░░░░░░░░░░░  17%
   大差异(251+)：   1 套件  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1%
   ────────────────────────────────────────────────────────────────
-  总差异：        2702 行（intl=1209，排除 intl 后 1493 行）
-  9月9日为 3427 行 → 排除 intl 后 7 天内 −57%
+  总差异：        1833 行（harness locale 修复后 intl=2）
+  9月9日为 3427 行 → 8 天内 −46%
 ```
 
 ### 完全通过的套件（零差异）
 
-`appendop` `arith-for` `attr` `builtins` `case` `casemod` `comsub-eof` `complete` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp2` `posixpat` `precedence` `printf` `quote` `rhs-exp` `rsh` `strip` `tilde` `tilde2` `trap`
+`appendop` `arith-for` `attr` `builtins` `case` `casemod` `comsub-eof` `complete` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp2` `posixpat` `precedence` `printf` `quote` `rhs-exp` `rsh` `strip` `tilde` `tilde2`
 
 ### 近期重大修复（2026 年 9 月）
 
@@ -40,7 +40,7 @@ GNU Bash 5.3.0 测试套件 — 83 个文件，true-baseline 实测
 | **dbg-support** | 635 → 0 | AND 列表双触发、source-scope trap 继承、`{` 回归 |
 | **rsh** | 194 → 0 | `set +o restricted` 静默解除修复、受限 shell 全链路 |
 | **invocation** | 14 → 0 | `BASH_ARGV0`、长选项表、`--pretty-print`、`-o`/`-O` 启动报错 |
-| **trap** | 3 → 0 | ERR 行号绑定、SIGCHLD 排队、后台子进程 trap 隔离 |
+| **trap** | 3 → ~5（竞态） | ERR 行号绑定、SIGCHLD 排队、后台子进程 trap 隔离；残余差异为 SIGCHLD/`wait` 时序，非确定性 |
 | **func** | 58 → 0 | POSIX funcname 规则、AST printer、special-builtin 优先级 |
 | **complete** | 115 → 0 | 多操作数 compspec 注册 |
 | **history** | 190 → 127 | `history -d start-end` 范围删除（GNU 5.3 特性） |

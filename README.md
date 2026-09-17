@@ -12,26 +12,26 @@ A GNU Bash-compatible shell implementation written in Rust.
 
 Rubash is a from-scratch reimplementation of GNU Bash in Rust — lexer, parser, expansion engine, executor, builtins, and all. It targets byte-level compatibility with GNU Bash 5.3.0 and runs on Windows natively.
 
-**Current status**: 43 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 2702 lines — of which `intl` alone accounts for 1209 lines (ANSI-C `$'...'` carrier-byte architecture, see below). Excluding `intl`, the remaining 39 suites total 1493 lines, down from 3427 on Sep 9 (−57%). Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
+**Current status**: 42 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 1833 lines, down from 3427 on Sep 9 (−46%). (The previously reported `intl`=1209 was missing-locale environment noise; the harness now generates `en_US.UTF-8`, and `intl` measures 2 lines.) Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
 
 ## Compatibility at a Glance
 
 ```
 GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
-(ledger: 2026-09-16 full re-run)
+(ledger: 2026-09-17 full re-run)
 
-  PASS (0 diff):   43 suites  █████████████████░░░░░░░░░░░░░░  52%
-  DIFF (1-50):     28 suites  ███████████░░░░░░░░░░░░░░░░░░░░  34%
-  DIFF (51-250):   11 suites  ████░░░░░░░░░░░░░░░░░░░░░░░░░░  13%
+  PASS (0 diff):   42 suites  █████████████████░░░░░░░░░░░░░░  51%
+  DIFF (1-50):     26 suites  ██████████░░░░░░░░░░░░░░░░░░░░░  31%
+  DIFF (51-250):   14 suites  █████░░░░░░░░░░░░░░░░░░░░░░░░░  17%
   DIFF (251+):      1 suite   █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1%
   ────────────────────────────────────────────────────────────────
-  Total diff:      2702 lines (intl=1209, excl-intl=1493)
-  Was 3427 on Sep 9 → excl-intl −57% in 7 days
+  Total diff:      1833 lines (intl=2 after harness locale fix)
+  Was 3427 on Sep 9 → −46% in 8 days
 ```
 
 ### Fully passing suites (zero diff)
 
-`appendop` `arith-for` `attr` `builtins` `case` `casemod` `comsub-eof` `complete` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp2` `posixpat` `precedence` `printf` `quote` `rhs-exp` `rsh` `strip` `tilde` `tilde2` `trap`
+`appendop` `arith-for` `attr` `builtins` `case` `casemod` `comsub-eof` `complete` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp2` `posixpat` `precedence` `printf` `quote` `rhs-exp` `rsh` `strip` `tilde` `tilde2`
 
 ### Major recent fixes (Sep 2026)
 
@@ -40,7 +40,7 @@ GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
 | **dbg-support** | 635 → 0 | AND-list dual fire, source-scope trap inheritance, `{` regression |
 | **rsh** | 194 → 0 | `set +o restricted` silent lift, full restricted-shell enforcement |
 | **invocation** | 14 → 0 | `BASH_ARGV0`, long options, `--pretty-print`, `-o`/`-O` prologs |
-| **trap** | 3 → 0 | ERR line binding, SIGCHLD queue, background child trap isolation |
+| **trap** | 3 → ~5 (racy) | ERR line binding, SIGCHLD queue, background child trap isolation; residual diff is SIGCHLD/`wait` timing, nondeterministic |
 | **func** | 58 → 0 | POSIX funcname rules, AST printer, special-builtin precedence |
 | **complete** | 115 → 0 | Multi-operand compspec registration |
 | **history** | 190 → 127 | `history -d start-end` range deletion (GNU 5.3 feature) |
