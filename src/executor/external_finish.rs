@@ -131,10 +131,11 @@ impl Executor {
         // This in-process child path mirrors the same check in
         // main.rs run_source_with_line_offset.
         if let Some(line) = crate::lexer::heredoc_overflow_line() {
-            self.set_env("__RUBASH_SCRIPT_NAME", script);
-            let prefix = self.parser_diagnostic_prefix_for_line(line);
             let mut stderr = Vec::new();
-            let _ = writeln!(&mut stderr, "{prefix}maximum here-document count exceeded");
+            let _ = writeln!(
+                &mut stderr,
+                "{script}: line {line}: maximum here-document count exceeded"
+            );
             self.finish_external_error(cmd, &stderr, 2)?;
             return Ok(());
         }
