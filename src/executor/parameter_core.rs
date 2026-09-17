@@ -141,7 +141,9 @@ impl Executor {
             // would lose the `'a b'` boundary). Hoist `'` to a sentinel
             // before expansion and restore after, exactly as DQ_DATA does
             // for `"`.
-            const SQ_DATA: &str = "\u{E103}";
+            // \u{E103} is DATA_BACKTICK in assignment_expansion.rs; use a
+            // free codepoint or the sentinel decodes as a backtick.
+            const SQ_DATA: &str = "\u{E107}";
             let hoisted_dq = hoist_data_double_quotes(raw_value, DQ_DATA);
             let hoisted_sq = hoist_data_single_quotes(&hoisted_dq, SQ_DATA);
             let expanded = self

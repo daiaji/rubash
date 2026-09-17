@@ -333,8 +333,10 @@ impl Executor {
             return self.expand_assignment_value_inner(value);
         }
         const DQ_DATA: &str = "\u{E102}";
-        const SQ_DATA: &str = "\u{E103}";
-        const BS_DATA: &str = "\u{E104}";
+        // NOTE: \u{E103}/\u{E104} are already taken below by DATA_BACKTICK /
+        // DATA_ESCAPED_DQUOTE; these sentinels must use free codepoints.
+        const SQ_DATA: &str = "\u{E107}";
+        const BS_DATA: &str = "\u{E108}";
         // GNU arrayfunc.c:581 parse_string_to_word_list preserves the
         // W_QUOTED flag on each compound-assignment word; the expansion pass
         // expands words individually. Rubash expands the whole body as one
