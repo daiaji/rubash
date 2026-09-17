@@ -927,7 +927,7 @@ impl Executor {
             body_reply.unwrap_or_default()
         } else {
             bytes_to_shell_text(&captured)
-                .trim_end_matches('\n')
+                .trim_capture_terminator()
                 .to_string()
         }
     }
@@ -1170,7 +1170,7 @@ impl Executor {
 
         Some(
             bytes_to_shell_text(&output)
-                .trim_end_matches('\n')
+                .trim_capture_terminator()
                 .to_string(),
         )
     }

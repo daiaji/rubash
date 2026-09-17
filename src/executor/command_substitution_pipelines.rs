@@ -305,7 +305,7 @@ impl Executor {
             }
             output
         };
-        output = output.trim_end_matches('\n').to_string();
+        output = output.trim_capture_terminator().to_string();
         self.last_command_substitution_status.set(Some(0));
         Some(SubstitutionOutput::readback(
             output.into_bytes(),
@@ -362,7 +362,7 @@ impl Executor {
                 }
                 output.push_str(&self.stdin_string_for_command(command)?);
             }
-            return Some(output.trim_end_matches('\n').to_string());
+            return Some(output.trim_capture_terminator().to_string());
         }
 
         let mut output = self.stdin_string_for_command(first)?;
@@ -380,7 +380,7 @@ impl Executor {
             }
         }
 
-        Some(output.trim_end_matches('\n').to_string())
+        Some(output.trim_capture_terminator().to_string())
     }
 
     pub(in crate::executor) fn command_substitution_pipeline_output(
@@ -415,7 +415,7 @@ impl Executor {
         for stage in stages.iter().skip(1) {
             (output, status) = self.command_substitution_pipeline_filter(stage, &output)?;
         }
-        Some((output.trim_end_matches('\n').to_string(), status))
+        Some((output.trim_capture_terminator().to_string(), status))
     }
 
     pub(in crate::executor) fn timed_command_substitution_output(
@@ -495,7 +495,7 @@ impl Executor {
                 self.last_command_substitution_status.set(Some(status));
                 Some(
                     bytes_to_shell_text(&stdout)
-                        .trim_end_matches('\n')
+                        .trim_capture_terminator()
                         .to_string(),
                 )
             }
@@ -527,7 +527,7 @@ impl Executor {
                     }
                 }
                 self.last_command_substitution_status.set(Some(0));
-                Some(output.trim_end_matches('\n').to_string())
+                Some(output.trim_capture_terminator().to_string())
             }
             Some(_) => self.run_external_command_substitution(words),
         }

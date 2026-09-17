@@ -9,6 +9,8 @@
 //! text (prompt glyphs such as U+E0A0) can never collide with the marker
 //! space and survives every encode/decode round trip byte-exact.
 
+use crate::executor::command_subst_helpers::trim_capture_terminator_bytes;
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::executor) enum SubstitutionQuoteContext {
@@ -16,7 +18,6 @@ pub(in crate::executor) enum SubstitutionQuoteContext {
     DoubleQuoted,
     HereDocument,
 }
-
 /// Sentinel introducing a raw-byte marker pair.
 pub(crate) const RAW_BYTE_MARKER_ESCAPE: u32 = 0xe000;
 /// First marker payload char, encoding raw byte 0x00.
@@ -147,9 +148,9 @@ impl SubstitutionOutput {
     ) -> Self {
         // GNU read_comsub discards NUL bytes while reading the child pipe.
         bytes.retain(|byte| *byte != 0);
-        while bytes.last() == Some(&b'\n') {
-            bytes.pop();
-        }
+        // Trailing line terminator(s), CRLF-aware: see
+        // trim_capture_terminator_bytes and niubash #120.
+        trim_capture_terminator_bytes(&mut bytes);
         Self {
             bytes,
             status,
@@ -887,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn readback_removes_nuls_and_only_trailing_newlines() {
+    fn readback_removes_nuls_and_trailing_line_terminators() {
         let output = SubstitutionOutput::readback(
             b"a\0b\n\n".to_vec(),
             17,
@@ -897,6 +898,34 @@ mod tests {
         assert_eq!(output.status, 17);
         assert_eq!(output.context, SubstitutionQuoteContext::HereDocument);
         assert_eq!(output.text_lossy(), "ab");
+    }
+
+    /// Windows-native tools write "\r\n" for every "\n". The '\r' of a CRLF
+    /// terminator leaves with the '\n' it belongs to; an interior CRLF and a
+    /// lone trailing '\r' are data (niubash #120).
+    #[test]
+    fn readback_strips_crlf_terminators_only() {
+        let terminator =
+            SubstitutionOutput::readback(b"a\r\n".to_vec(), 0, SubstitutionQuoteContext::Unquoted);
+        assert_eq!(terminator.bytes, b"a");
+
+        let repeated = SubstitutionOutput::readback(
+            b"a\r\n\r\n".to_vec(),
+            0,
+            SubstitutionQuoteContext::Unquoted,
+        );
+        assert_eq!(repeated.bytes, b"a");
+
+        let interior = SubstitutionOutput::readback(
+            b"a\r\nb\r\n".to_vec(),
+            0,
+            SubstitutionQuoteContext::Unquoted,
+        );
+        assert_eq!(interior.bytes, b"a\r\nb");
+
+        let lone_cr =
+            SubstitutionOutput::readback(b"a\r".to_vec(), 0, SubstitutionQuoteContext::Unquoted);
+        assert_eq!(lone_cr.bytes, b"a\r");
     }
 
     #[test]
