@@ -1,6 +1,16 @@
 use super::dolbrace::{scan_braced_parameter, BraceContext, DolbraceState};
 use super::scanner::Lexer;
 
+/// How a `{ ... }' brace-group scan ended (see `Lexer::skip_brace`).
+pub(super) struct BraceScan {
+    /// True when the matching `}' was consumed.
+    pub(super) closed: bool,
+    /// Byte offset of the first word-initial `#' comment that began at the
+    /// group's top level, when the scan ran past one. Everything from that
+    /// offset on is comment text, not group text.
+    pub(super) comment_start: Option<usize>,
+}
+
 impl<'a> Lexer<'a> {
     pub(super) fn skip_cmd_subst(&mut self) {
         let mut depth = 1;
@@ -361,13 +371,28 @@ impl<'a> Lexer<'a> {
             }
         }
     }
-    pub(super) fn skip_brace(&mut self) {
+    /// Scans a `{ ... }' brace group starting at the opening brace.
+    ///
+    /// `closed` reports whether the matching `}' was consumed; an unterminated
+    /// group ends at the end of the logical line instead. `comment_start`
+    /// reports a word-initial `#' comment seen at the group's top level, so the
+    /// caller can tell group text from comment text: a `#' comments out the
+    /// rest of its physical line (parse.y read_token -> parse_comment), and
+    /// without this the scanner sliced the comment into the brace token
+    /// (`f() { # note' became `{ # note'), which the parser then rejected
+    /// (niubash #120 follow-up).
+    pub(super) fn skip_brace(&mut self) -> BraceScan {
         let mut depth = 1usize;
         let mut case_depth = 0usize;
         let mut word = String::new();
         let mut word_boundary = true;
         let mut current_word_boundary = true;
-        let mut comment_start = true;
+        // The scan starts just past the opening `{', which is itself a word
+        // start, so the character at hand is mid-word: `{#note' is one word in
+        // GNU (a `#' comments only at a word start), and the whitespace
+        // branches below raise this again for `{ # note'.
+        let mut comment_start = false;
+        let mut comment_at = None;
         let mut saw_top_level_whitespace = false;
         let mut ansi_single = false;
         let mut escaped = false;
@@ -410,6 +435,10 @@ impl<'a> Lexer<'a> {
                 continue;
             }
             if c == '#' && comment_start {
+                if comment_at.is_none() && depth == 1 {
+                    // `advance' already consumed the `#', which is one byte.
+                    comment_at = Some(self.position - 1);
+                }
                 while self.peek().is_some_and(|ch| ch != '\n') {
                     self.advance();
                 }
@@ -429,10 +458,16 @@ impl<'a> Lexer<'a> {
                             continue;
                         }
                         if !saw_top_level_whitespace {
-                            break;
+                            return BraceScan {
+                                closed: true,
+                                comment_start: comment_at,
+                            };
                         }
                         if self.brace_close_can_end_compact_group() {
-                            break;
+                            return BraceScan {
+                                closed: true,
+                                comment_start: comment_at,
+                            };
                         }
                         depth = 1;
                     }
@@ -481,6 +516,10 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
+        BraceScan {
+            closed: false,
+            comment_start: comment_at,
+        }
     }
 
     fn brace_close_can_end_compact_group(&self) -> bool {
@@ -493,6 +532,13 @@ impl<'a> Lexer<'a> {
                     continue;
                 }
                 '\n' => return true,
+                // A word-initial `#' after the closing brace comments out the
+                // rest of the physical line (parse.y read_token ->
+                // parse_comment), so the `}' really does end the group:
+                // `{ echo x; } # note' (niubash #120 follow-up). Without this
+                // the group keeps scanning for a later `}' and swallows the
+                // comment text into the brace token.
+                '#' => return true,
                 ';' | '|' | '&' | '<' | '>' | ')' => return true,
                 _ if !saw_blank => return true,
                 _ if ch.is_ascii_digit()
