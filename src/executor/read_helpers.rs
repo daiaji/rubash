@@ -354,6 +354,14 @@ pub(in crate::executor) fn trim_read_input(
         if let Some((before, _)) = input.split_once(delimiter) {
             input = before.trim_end_matches('\r').to_string();
         } else if delimiter == '\n' {
+            // NOTE: this also drops a lone trailing '\r' that is real data
+            // (`printf 'a\r' | read x` gives "a" where GNU keeps "a\r"). The
+            // permissive pop is load-bearing: the pty/pipe readers stop at the
+            // delimiter and hand the line over without its '\n', so a CRLF
+            // terminator arrives here as a bare trailing '\r' and can only be
+            // recognised by this pop. Tightening it needs those readers to
+            // report whether the delimiter they consumed was preceded by a
+            // '\r'; until then the CRLF case wins over the lone-CR case.
             while input.ends_with('\n') || input.ends_with('\r') {
                 input.pop();
             }

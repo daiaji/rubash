@@ -174,7 +174,7 @@ impl Executor {
                 return fs::read_to_string(path)
                     .map(|value| {
                         self.last_command_substitution_status.set(Some(0));
-                        value.trim_end_matches('\n').to_string()
+                        value.trim_capture_terminator().to_string()
                     })
                     .unwrap_or_else(|_| {
                         self.last_command_substitution_status.set(Some(1));
@@ -329,7 +329,7 @@ impl Executor {
             let expanded_args = self.brace_expanded_substitution_args(&words, &word_parts);
             return self
                 .recho_output(&expanded_args)
-                .trim_end_matches('\n')
+                .trim_capture_terminator()
                 .to_string();
         }
 
@@ -337,7 +337,7 @@ impl Executor {
             let expanded_args = self.brace_expanded_substitution_args(&words, &word_parts);
             return self
                 .zecho_output(&expanded_args)
-                .trim_end_matches('\n')
+                .trim_capture_terminator()
                 .to_string();
         }
 
@@ -389,7 +389,7 @@ impl Executor {
             .unwrap_or(1);
             self.last_command_substitution_status.set(Some(status));
             return bytes_to_shell_text(&stdout)
-                .trim_end_matches('\n')
+                .trim_capture_terminator()
                 .to_string();
         }
 
@@ -420,7 +420,7 @@ impl Executor {
                 }
             }
             self.last_command_substitution_status.set(Some(status));
-            return output.trim_end_matches('\n').to_string();
+            return output.trim_capture_terminator().to_string();
         }
 
         if words.first().map(String::as_str) == Some("basename") {
@@ -479,7 +479,7 @@ impl Executor {
             {
                 self.last_command_substitution_status.set(Some(status));
                 return String::from_utf8_lossy(&stdout)
-                    .trim_end_matches(['\r', '\n'])
+                    .trim_capture_terminator()
                     .to_string();
             }
         }
