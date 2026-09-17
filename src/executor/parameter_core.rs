@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::assignment_expansion::hoist_data_double_quotes;
+use crate::executor::assignment_expansion::{hoist_data_double_quotes, hoist_data_single_quotes};
 
 impl Executor {
     pub(in crate::executor) fn is_brace_expand_enabled(&self) -> bool {
@@ -132,6 +132,17 @@ impl Executor {
             // `echo K='a"b'` loses the quote when this re-scan re-reads the
             // bare quote as a delimiter.
             const DQ_DATA: &str = "\u{E102}";
+            // GNU arrayfunc.c:581 parse_string_to_word_list preserves the
+            // W_QUOTED flag on each compound-assignment word; the expansion
+            // pass expands words individually. Rubash expands the whole body
+            // as one string, whose quote removal consumes `'` delimiters
+            // and destroys single-quote word grouping (`foo=('a b' 1 "$v1" 2)`
+            // would lose the `'a b'` boundary). Hoist `'` to a sentinel
+            // before expansion and restore after, exactly as DQ_DATA does
+            // for `"`.
+            const SQ_DATA: &str = "\u{E103}";
+            let hoisted_dq = hoist_data_double_quotes(raw_value, DQ_DATA);
+            let hoisted_sq = hoist_data_single_quotes(&hoisted_dq, SQ_DATA);
             let expanded = self
                 .expand_embedded_parameters_mut(&format!(
                     "{}{}",
@@ -140,9 +151,10 @@ impl Executor {
                     } else {
                         ""
                     },
-                    hoist_data_double_quotes(raw_value, DQ_DATA)
+                    hoisted_sq
                 ))
-                .replace(DQ_DATA, "\"");
+                .replace(DQ_DATA, "\"")
+                .replace(SQ_DATA, "'");
             if !quoted
                 && !expanded.contains('=')
                 && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")

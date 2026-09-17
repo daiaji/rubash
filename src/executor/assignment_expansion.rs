@@ -44,6 +44,137 @@ pub(in crate::executor) fn hoist_data_double_quotes(value: &str, marker: &str) -
     out
 }
 
+/// Hoist raw `'` quote DATA to `marker` before compound-assignment expansion.
+/// GNU arrayfunc.c:581 `parse_string_to_word_list` splits the compound
+/// assignment into words with the shell parser, preserving the W_QUOTED flag
+/// on each word. The expansion pass (`expand_words_no_vars`) then expands
+/// each word individually. Rubash expands the entire compound body as one
+/// string via `expand_embedded_parameters_mut`, which performs quote removal
+/// — consuming `'` delimiters and outputting their content bare. That
+/// destroys single-quote word grouping: `foo=('a b' 1 "$v1" 2)` loses the
+/// `'a b'` boundary and `a b` splits into two words. Hoisting `'` to a
+/// sentinel before expansion (and restoring after) preserves the boundary
+/// exactly as `hoist_data_double_quotes` does for `"`.
+///
+/// `$'...'` ANSI-C quotes use `'` as delimiters; those must NOT be hoisted
+/// or the construct breaks (assoc15.sub: `[$'\001']=$'\001\001\001\001'`).
+/// `${...}` bodies are also preserved verbatim, matching
+/// `hoist_data_double_quotes`.
+pub(in crate::executor) fn hoist_data_single_quotes(value: &str, marker: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.char_indices().peekable();
+    let chars_vec: Vec<(usize, char)> = value.char_indices().collect();
+    let mut idx = 0;
+    while idx < chars_vec.len() {
+        let (_, ch) = chars_vec[idx];
+        // Skip $'...' ANSI-C quote bodies: the ' delimiters belong to the
+        // construct, not to single-quote word grouping.
+        if ch == '$' && idx + 1 < chars_vec.len() && chars_vec[idx + 1].1 == '\'' {
+            out.push('$');
+            out.push('\'');
+            idx += 2;
+            while idx < chars_vec.len() {
+                let (_, c) = chars_vec[idx];
+                if c == '\\' && idx + 1 < chars_vec.len() {
+                    out.push(c);
+                    out.push(chars_vec[idx + 1].1);
+                    idx += 2;
+                    continue;
+                }
+                out.push(c);
+                if c == '\'' {
+                    idx += 1;
+                    break;
+                }
+                idx += 1;
+            }
+            continue;
+        }
+        // Skip ${...} bodies: quotes inside are parameter-expansion syntax.
+        if ch == '$' && idx + 1 < chars_vec.len() && chars_vec[idx + 1].1 == '{' {
+            let body_start = chars_vec[idx + 1].0 + 1;
+            if let Some(close) = matching_parameter_brace(&value[body_start..]) {
+                out.push_str(&value[chars_vec[idx].0..body_start + close + 1]);
+                idx = chars_vec
+                    .iter()
+                    .position(|(offset, _)| *offset >= body_start + close + 1)
+                    .unwrap_or(chars_vec.len());
+                continue;
+            }
+        }
+        if ch == '\'' {
+            out.push_str(marker);
+        } else {
+            out.push(ch);
+        }
+        idx += 1;
+    }
+    out
+}
+
+/// Hoist `\\` (escaped backslash) to `marker` before compound-assignment
+/// expansion. GNU arrayfunc.c:581 `parse_string_to_word_list` splits the
+/// compound body into words FIRST, then `expand_words_no_vars` expands each
+/// word individually — so `\\` is a standalone word that produces `\`.
+/// Rubash expands the whole body as one string via
+/// `expand_embedded_parameters_mut`, which turns `\\` into `\`; the remaining
+/// `\` then escapes the following space in `split_storage_words`, merging
+/// `\\ 5` into ` 5` instead of two words `\` and `5` (assoc11.sub line 30).
+/// Hoisting `\\` to a sentinel before expansion preserves it for
+/// `split_storage_words` to handle correctly.
+/// `${...}` and `$'...'` bodies are skipped (their backslashes are syntax).
+pub(in crate::executor) fn hoist_data_backslashes(value: &str, marker: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let chars: Vec<(usize, char)> = value.char_indices().collect();
+    let mut idx = 0;
+    while idx < chars.len() {
+        let (_, ch) = chars[idx];
+        // Skip $'...' ANSI-C quote bodies
+        if ch == '$' && idx + 1 < chars.len() && chars[idx + 1].1 == '\'' {
+            out.push('$');
+            out.push('\'');
+            idx += 2;
+            while idx < chars.len() {
+                let (_, c) = chars[idx];
+                if c == '\\' && idx + 1 < chars.len() {
+                    out.push(c);
+                    out.push(chars[idx + 1].1);
+                    idx += 2;
+                    continue;
+                }
+                out.push(c);
+                if c == '\'' {
+                    idx += 1;
+                    break;
+                }
+                idx += 1;
+            }
+            continue;
+        }
+        // Skip ${...} bodies
+        if ch == '$' && idx + 1 < chars.len() && chars[idx + 1].1 == '{' {
+            let body_start = chars[idx + 1].0 + 1;
+            if let Some(close) = matching_parameter_brace(&value[body_start..]) {
+                out.push_str(&value[chars[idx].0..body_start + close + 1]);
+                idx = chars
+                    .iter()
+                    .position(|(offset, _)| *offset >= body_start + close + 1)
+                    .unwrap_or(chars.len());
+                continue;
+            }
+        }
+        // Hoist \\ (escaped backslash) to sentinel
+        if ch == '\\' && idx + 1 < chars.len() && chars[idx + 1].1 == '\\' {
+            out.push_str(marker);
+            idx += 2;
+            continue;
+        }
+        out.push(ch);
+        idx += 1;
+    }
+    out
+}
+
 impl Executor {
     pub(in crate::executor) fn expand_assignment_value_result(
         &mut self,
@@ -86,7 +217,7 @@ impl Executor {
     fn expand_assignment_value_hoisting(&mut self, value: &str) -> String {
         // Only hoist when no command-substitution payload is present: quotes
         // inside a $()/backtick body are syntax for the nested parse, not data.
-        if !value.contains('"')
+        if (!value.contains('"') && !value.contains('\'') && !value.contains("\\\\"))
             || value.contains('`')
             || value.contains("$(")
             || contains_command_substitution_payload(value)
@@ -94,9 +225,26 @@ impl Executor {
             return self.expand_assignment_value_inner(value);
         }
         const DQ_DATA: &str = "\u{E102}";
-        let expanded =
-            self.expand_assignment_value_inner(&hoist_data_double_quotes(value, DQ_DATA));
-        expanded.replace(DQ_DATA, "\"")
+        const SQ_DATA: &str = "\u{E103}";
+        const BS_DATA: &str = "\u{E104}";
+        // GNU arrayfunc.c:581 parse_string_to_word_list preserves the
+        // W_QUOTED flag on each compound-assignment word; the expansion pass
+        // expands words individually. Rubash expands the whole body as one
+        // string, whose quote removal consumes `'` and `"` delimiters and
+        // destroys word grouping (`foo=('a b' 1 "$v1" 2)` would lose the
+        // `'a b'` boundary). Hoist both quote families to sentinels before
+        // expansion and restore after, exactly as DQ_DATA already did for `"`.
+        // Similarly, `\\` (escaped backslash) must be hoisted or
+        // expand_embedded_parameters_mut turns it into `\`, which then
+        // escapes the following space in split_storage_words (assoc11.sub).
+        let hoisted_dq = hoist_data_double_quotes(value, DQ_DATA);
+        let hoisted_sq = hoist_data_single_quotes(&hoisted_dq, SQ_DATA);
+        let hoisted_bs = hoist_data_backslashes(&hoisted_sq, BS_DATA);
+        let expanded = self.expand_assignment_value_inner(&hoisted_bs);
+        expanded
+            .replace(DQ_DATA, "\"")
+            .replace(SQ_DATA, "'")
+            .replace(BS_DATA, "\\\\")
     }
 
     /// GNU subst.c:4357 expand_string_assignment (reached with

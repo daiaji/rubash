@@ -469,11 +469,9 @@ pub(in crate::executor) fn format_key_value_transform_part(
     quoted: bool,
 ) -> String {
     if quoted {
-        format!(
-            "{} {}",
-            quote_key_value_transform_key(key),
-            quote_array_value(value)
-        )
+        let quoted_key = quote_key_value_transform_key(key);
+        let quoted_value = quote_array_value(value);
+        format!("{quoted_key} {quoted_value}")
     } else {
         format!("{key} {value}")
     }
