@@ -48,6 +48,22 @@ impl Executor {
                 return Ok(1);
             }
         }
+        // GNU declare.def:465-473: when -f is used with an assignment
+        // (name=value), find_function is called with the full name string
+        // (including '=value'), which never matches a function name, so
+        // "cannot use `-f' to make functions" is always reported.
+        if function_flag_on {
+            for arg in args {
+                if !arg.starts_with('-') && !arg.starts_with('+') && arg.contains('=') {
+                    writeln!(
+                        stderr,
+                        "{}declare: cannot use `-f' to make functions",
+                        self.diagnostic_prefix()
+                    )?;
+                    return Ok(1);
+                }
+            }
+        }
         let names: Vec<&str> = args
             .iter()
             .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))

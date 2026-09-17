@@ -93,7 +93,15 @@ impl Executor {
                 )?;
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 self.exit_code = 1;
-                Ok(())
+                // GNU break.def:86-88 / continue.def:126-128: even when the
+                // count is out of range, `breaking`/`continuing` is set to
+                // loop_level. For `break 0` this breaks the current loop.
+                // For `continue 0`, `continuing = loop_level` with a count
+                // of 0 effectively breaks the loop (the rest of the body is
+                // skipped and the loop does not advance to the next
+                // iteration), so both cases return Break.
+                let level = self.loop_depth;
+                Err(ExecuteError::Break(level))
             }
             Err(LoopControlError::NotNumeric(value)) => {
                 writeln!(

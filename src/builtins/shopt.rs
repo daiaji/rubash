@@ -70,6 +70,8 @@ where
     let mut mode = ShoptMode::List;
     let mut names = Vec::new();
     let mut status = EXECUTION_SUCCESS;
+    let mut saw_set = false;
+    let mut saw_unset = false;
 
     for arg in args {
         if arg == "--" {
@@ -78,8 +80,14 @@ where
         if arg.starts_with('-') && arg != "-" {
             for option in arg[1..].chars() {
                 match option {
-                    's' => mode = ShoptMode::Set,
-                    'u' => mode = ShoptMode::Unset,
+                    's' => {
+                        mode = ShoptMode::Set;
+                        saw_set = true;
+                    }
+                    'u' => {
+                        mode = ShoptMode::Unset;
+                        saw_unset = true;
+                    }
                     'q' => mode = ShoptMode::Query,
                     'p' => print = true,
                     'o' => use_set_options = true,
@@ -98,6 +106,17 @@ where
         } else {
             names.push(arg.as_str());
         }
+    }
+
+    // GNU builtins/shopt.def:331-334: if both -s and -u are given, report
+    // "cannot set and unset shell options simultaneously" via builtin_error.
+    if saw_set && saw_unset {
+        writeln!(
+            stderr,
+            "{}shopt: cannot set and unset shell options simultaneously",
+            diagnostic_prefix()
+        )?;
+        return Ok(EXECUTION_FAILURE);
     }
 
     if use_set_options {

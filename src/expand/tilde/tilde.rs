@@ -11,17 +11,20 @@ pub const QUOTED_ASSIGNMENT_VALUE: char = '\x1c';
 pub fn home_value(env_vars: &HashMap<String, String>) -> String {
     // Bash's tilde expansion follows HOME when it is set. USERPROFILE is
     // only a Windows fallback for shells that have no HOME value.
-    let names = ["HOME", "USERPROFILE"];
-
-    names
-        .into_iter()
-        .find_map(|name| {
-            env_vars
-                .get(name)
-                .filter(|value| !value.is_empty())
-                .cloned()
-                .or_else(|| std::env::var(name).ok().filter(|value| !value.is_empty()))
-        })
+    // On Windows, env::var("HOME") still returns the original process value
+    // after `unset HOME` because apply_required_windows_child_environment
+    // re-adds HOME from USERPROFILE. So only check env_vars for HOME.
+    if let Some(home) = env_vars.get("HOME").filter(|v| !v.is_empty()) {
+        return home.clone();
+    }
+    // USERPROFILE is a Windows-only fallback; it is not a shell variable
+    // that can be unset, so the env::var fallback is safe here.
+    if let Some(home) = env_vars.get("USERPROFILE").filter(|v| !v.is_empty()) {
+        return home.clone();
+    }
+    std::env::var("USERPROFILE")
+        .ok()
+        .filter(|value| !value.is_empty())
         .unwrap_or_default()
 }
 

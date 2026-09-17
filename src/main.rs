@@ -525,7 +525,11 @@ fn check_binary_file(sample: &[u8]) -> bool {
 fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
     let path = executor.resolve_shell_path(script);
     let Ok(contents) = fs::read_to_string(&path) else {
-        eprintln!("bash: {script}: No such file or directory");
+        let shell_name = executor
+            .get_env("__RUBASH_SHELL_NAME")
+            .or_else(|| executor.get_env("BASH_ARGV0"))
+            .unwrap_or("bash");
+        eprintln!("{shell_name}: {script}: No such file or directory");
         return 1;
     };
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
@@ -656,7 +660,15 @@ fn run_script_file_with_init(
         let message = std::fs::metadata(&path)
             .map(|_| "Permission denied".to_string())
             .unwrap_or_else(|e| rubash::posix_errors::message(&e));
-        eprintln!("bash: {}: {}", script, message);
+        // GNU error.c:90-117 get_name_for_error: in non-interactive mode,
+        // $0 (dollar_vars[0]) is used as the error prefix. When running
+        // `${THIS_SH} ./errors1.sub`, $0 is the full path of the shell
+        // executable (e.g. /usr/local/bin/bash).
+        let shell_name = executor
+            .get_env("__RUBASH_SHELL_NAME")
+            .or_else(|| executor.get_env("BASH_ARGV0"))
+            .unwrap_or("bash");
+        eprintln!("{shell_name}: {script}: {message}");
         return 1;
     };
     // GNU shell.c:1685-1692 + general.c:718-741 (check_binary_file): a

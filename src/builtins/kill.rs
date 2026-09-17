@@ -117,8 +117,15 @@ where
         }
         if value == "-s" || value == "-n" {
             let Some(sigspec) = args.get(index + 1).map(String::as_str) else {
-                write_kill_usage(stderr)?;
-                return Ok(2);
+                // GNU builtins/kill.def:130-131: sh_needarg(word) prints
+                // "kill: -s: option requires an argument" with the full
+                // diagnostic prolog, then returns EXECUTION_FAILURE.
+                writeln!(
+                    stderr,
+                    "{}kill: {value}: option requires an argument",
+                    diagnostic_prefix()
+                )?;
+                return Ok(1);
             };
             if translate_signal(sigspec).is_none() {
                 writeln!(
@@ -171,9 +178,11 @@ where
         }
 
         let Some(pid) = parse_pid(operand) else {
+            // GNU builtins/common.c:236 sh_badpid: "`%s': not a pid or
+            // valid job spec"
             writeln!(
                 stderr,
-                "{}kill: {operand}: arguments must be process or job IDs",
+                "{}kill: `{operand}': not a pid or valid job spec",
                 diagnostic_prefix()
             )?;
             status = 1;
@@ -220,10 +229,12 @@ fn write_kill_usage<E>(stderr: &mut E) -> io::Result<()>
 where
     E: Write,
 {
+    // GNU builtins/common.c:128-135 builtin_usage: prints only
+    // "this_command_name: usage: " + short_doc, WITHOUT the script/line
+    // prolog from builtin_error_prolog.
     writeln!(
         stderr,
-        "{}kill: usage: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]",
-        diagnostic_prefix()
+        "kill: usage: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]"
     )
 }
 

@@ -88,6 +88,22 @@ impl Executor {
         self.finish_mapfile_error(cmd, stderr, 1)
     }
 
+    /// GNU builtins/mapfile.def:330: `builtin_error (_("empty array variable
+    /// name"))` for an empty array name argument.
+    pub(in crate::executor) fn mapfile_empty_array_name(
+        &mut self,
+        cmd: &CommandNode,
+        command_name: &str,
+        stderr: &mut Vec<u8>,
+    ) -> i32 {
+        let _ = writeln!(
+            stderr,
+            "{}{command_name}: empty array variable name",
+            self.diagnostic_prefix()
+        );
+        self.finish_mapfile_error(cmd, stderr, 2)
+    }
+
     pub(in crate::executor) fn mapfile_missing_option_argument(
         &mut self,
         cmd: &CommandNode,

@@ -428,6 +428,19 @@ impl Executor {
                     let option = word.trim_start_matches('-').chars().next().unwrap_or('-');
                     return self.mapfile_invalid_option(cmd, command_name, option, &mut stderr);
                 }
+                word if word.is_empty() => {
+                    if array_name.is_none() {
+                        // GNU builtins/mapfile.def:330: empty array name
+                        // reports "empty array variable name" (EX_USAGE),
+                        // distinct from sh_invalidid for non-identifier names.
+                        return self.mapfile_empty_array_name(
+                            cmd,
+                            command_name,
+                            &mut stderr,
+                        );
+                    }
+                    index += 1;
+                }
                 word if is_shell_name(word) => {
                     if array_name.is_none() {
                         array_name = Some(word.to_string());

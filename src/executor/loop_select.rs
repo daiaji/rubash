@@ -98,6 +98,18 @@ impl Executor {
                 let _ = self.run_debug_trap(&for_text)?;
             }
             ran_body = true;
+            // GNU execute_cmd.c:3064 bind_variable: assigning to a readonly
+            // loop variable reports "VAR: readonly variable" and aborts the
+            // loop with status 1.
+            if is_marked_var(&self.env_vars, READONLY_VARS, &for_command.variable) {
+                eprintln!(
+                    "{}{}: readonly variable",
+                    self.diagnostic_prefix(),
+                    for_command.variable
+                );
+                self.exit_code = 1;
+                return Ok(());
+            }
             self.env_vars
                 .insert(for_command.variable.clone(), value.clone());
             // Keep the typed scalar in sync: function assignments can create a

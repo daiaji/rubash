@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 mod paths;
 
-use crate::expand::tilde::tilde::home_value;
 use paths::{
     current_logical_pwd, filesystem_path_for_display, logical_destination,
     logical_destination_display, logical_pwd_var_display, set_shell_env, shell_display_path,
@@ -19,6 +18,18 @@ use std::path::{Path, PathBuf};
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
+
+/// GNU builtins/common.c:83-94 builtin_error_prolog: the shell name, the
+/// executing line for scripts, then the builtin name.
+fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
+    if let (Some(script), Some(line)) = (
+        env_vars.get("__RUBASH_SCRIPT_NAME"),
+        env_vars.get("__RUBASH_CURRENT_LINE"),
+    ) {
+        return format!("{script}: line {line}: ");
+    }
+    "rubash: ".to_string()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -64,13 +75,13 @@ where
     E: Write,
 {
     let args: Vec<&str> = args.into_iter().collect();
-    let (mode, first_operand) = match parse_options(&args, stderr)? {
+    let (mode, first_operand) = match parse_options(&args, env_vars, stderr)? {
         Ok(parsed) => parsed,
         Err(status) => return Ok(status),
     };
 
     if args.len().saturating_sub(first_operand) > 1 {
-        writeln!(stderr, "rubash: cd: too many arguments")?;
+        writeln!(stderr, "{}cd: too many arguments", diagnostic_prefix(env_vars))?;
         return Ok(EX_USAGE);
     }
 
@@ -92,21 +103,60 @@ where
         // TODO(builtins/cd.def): This is a Windows-host bridge for the GNU
         // Bash upstream tests that use POSIX system directories. A complete
         // shell should keep logical and physical directory state separately.
-        set_shell_env(env_vars, "OLDPWD", logical_pwd_var_display(&old_pwd));
-        set_shell_env(env_vars, "PWD", shell_pwd_display_path(&logical_dir));
+        // GNU cd.def:136-175 bindpwd: check readonly for OLDPWD and PWD.
+        let pwd_readonly = env_vars
+            .get("__RUBASH_READONLY_VARS")
+            .map(|v| v.split('\x1f').any(|name| name == "PWD"))
+            .unwrap_or(false);
+        let oldpwd_readonly = env_vars
+            .get("__RUBASH_READONLY_VARS")
+            .map(|v| v.split('\x1f').any(|name| name == "OLDPWD"))
+            .unwrap_or(false);
+        let mut failed = false;
+        if oldpwd_readonly {
+            writeln!(
+                stderr,
+                "{}OLDPWD: readonly variable",
+                diagnostic_prefix(env_vars)
+            )?;
+            failed = true;
+        } else {
+            set_shell_env(env_vars, "OLDPWD", logical_pwd_var_display(&old_pwd));
+        }
+        if pwd_readonly {
+            writeln!(
+                stderr,
+                "{}PWD: readonly variable",
+                diagnostic_prefix(env_vars)
+            )?;
+            failed = true;
+        } else {
+            set_shell_env(env_vars, "PWD", shell_pwd_display_path(&logical_dir));
+        }
         env_vars.insert("__RUBASH_PHYSICAL_PWD".to_string(), logical_dir.to_string());
         match target.print {
             PrintPath::Always | PrintPath::CdPath => writeln!(stdout, "{logical_dir}")?,
             PrintPath::Never => {}
         }
+        if failed {
+            return Ok(EXECUTION_FAILURE);
+        }
         return Ok(EXECUTION_SUCCESS);
     }
 
     if let Err(error) = env::set_current_dir(&target.path) {
+        // GNU builtins/cd.def:427: builtin_error("%s: %s", printable_filename(dirname), strerror(e))
+        // reports the user-given path, not the Windows-converted path.
+        let display_path = target
+            .display
+            .as_deref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| target.path.to_string_lossy().to_string());
         writeln!(
             stderr,
-            "rubash: cd: {}: {}",
-            target.path.display(),
+            "{}cd: {}: {}",
+            diagnostic_prefix(env_vars),
+            display_path,
             crate::posix_errors::message(&error)
         )?;
         return Ok(EXECUTION_FAILURE);
@@ -125,12 +175,43 @@ where
         Mode::Physical => shell_display_path(&new_pwd),
     };
 
-    set_shell_env(env_vars, "OLDPWD", logical_pwd_var_display(&old_pwd));
     let pwd_value = match mode {
         Mode::Logical => new_pwd_display.clone(),
         Mode::Physical => shell_pwd_display_path(&new_pwd.to_string_lossy()),
     };
-    set_shell_env(env_vars, "PWD", pwd_value);
+    // GNU builtins/cd.def:136-175 bindpwd: if PWD or OLDPWD is readonly,
+    // bind_variable/setpwd fails and cd returns EXECUTION_FAILURE.
+    // The error is emitted by err_readonly (error.c:455) via report_error,
+    // which uses the error_prolog format: "shell: line N: VAR: readonly variable".
+    let pwd_readonly = env_vars
+        .get("__RUBASH_READONLY_VARS")
+        .map(|v| v.split('\x1f').any(|name| name == "PWD"))
+        .unwrap_or(false);
+    let oldpwd_readonly = env_vars
+        .get("__RUBASH_READONLY_VARS")
+        .map(|v| v.split('\x1f').any(|name| name == "OLDPWD"))
+        .unwrap_or(false);
+    let mut failed = false;
+    if oldpwd_readonly {
+        writeln!(
+            stderr,
+            "{}OLDPWD: readonly variable",
+            diagnostic_prefix(env_vars)
+        )?;
+        failed = true;
+    } else {
+        set_shell_env(env_vars, "OLDPWD", logical_pwd_var_display(&old_pwd));
+    }
+    if pwd_readonly {
+        writeln!(
+            stderr,
+            "{}PWD: readonly variable",
+            diagnostic_prefix(env_vars)
+        )?;
+        failed = true;
+    } else {
+        set_shell_env(env_vars, "PWD", pwd_value);
+    }
     env_vars.remove("__RUBASH_PHYSICAL_PWD");
 
     match target.print {
@@ -139,10 +220,18 @@ where
         _ => {}
     }
 
+    if failed {
+        return Ok(EXECUTION_FAILURE);
+    }
+
     Ok(EXECUTION_SUCCESS)
 }
 
-fn parse_options<W>(args: &[&str], stderr: &mut W) -> io::Result<Result<(Mode, usize), i32>>
+fn parse_options<W>(
+    args: &[&str],
+    env_vars: &HashMap<String, String>,
+    stderr: &mut W,
+) -> io::Result<Result<(Mode, usize), i32>>
 where
     W: Write,
 {
@@ -164,7 +253,12 @@ where
                 'P' => mode = Mode::Physical,
                 'e' => {}
                 other => {
-                    writeln!(stderr, "rubash: cd: -{}: invalid option", other)?;
+                    writeln!(
+                        stderr,
+                        "{}cd: -{}: invalid option",
+                        diagnostic_prefix(env_vars),
+                        other
+                    )?;
                     writeln!(stderr, "cd: usage: cd [-L|[-P [-e]]] [dir]")?;
                     return Ok(Err(EX_USAGE));
                 }
@@ -186,24 +280,19 @@ where
     W: Write,
 {
     match operand {
-        None => match if cfg!(windows) {
-            let home = home_value(env_vars);
-            (!home.is_empty()).then_some(home)
-        } else {
-            shell_var(env_vars, "HOME")
-        } {
+        None => match shell_var(env_vars, "HOME") {
             Some(home) => Ok(Some(Target {
                 path: filesystem_path_for_display(&home, env_vars),
-                display: None,
+                display: Some(PathBuf::from(home)),
                 print: PrintPath::Never,
             })),
             None => {
-                writeln!(stderr, "rubash: cd: HOME not set")?;
+                writeln!(stderr, "{}cd: HOME not set", diagnostic_prefix(env_vars))?;
                 Ok(None)
             }
         },
         Some("") => {
-            writeln!(stderr, "rubash: cd: null directory")?;
+            writeln!(stderr, "{}cd: null directory", diagnostic_prefix(env_vars))?;
             Ok(None)
         }
         Some("-") => match shell_var(env_vars, "OLDPWD") {
@@ -213,7 +302,7 @@ where
                 print: PrintPath::Always,
             })),
             None => {
-                writeln!(stderr, "rubash: cd: OLDPWD not set")?;
+                writeln!(stderr, "{}cd: OLDPWD not set", diagnostic_prefix(env_vars))?;
                 Ok(None)
             }
         },
@@ -319,8 +408,9 @@ mod tests {
     #[test]
     fn cd_d_remains_invalid_bash_option() {
         let mut stderr = Vec::new();
+        let env = std::collections::HashMap::new();
 
-        let parsed = super::parse_options(&["-d"], &mut stderr).unwrap();
+        let parsed = super::parse_options(&["-d"], &env, &mut stderr).unwrap();
 
         assert_eq!(parsed, Err(super::EX_USAGE));
         assert!(String::from_utf8(stderr)
