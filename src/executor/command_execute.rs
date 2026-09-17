@@ -63,6 +63,49 @@ impl Executor {
             return Err(ExecuteError::ExitCode(1));
         }
 
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_SUBSHELL__") {
+            // GNU parse.y:6890-6901 (yyerror EOF path): an unclosed `(`
+            // reports "unexpected end of file from `(' command on line N".
+            // Heredocs still pending inside the region issued their gather
+            // warnings during the parse (make_cmd.c:626), so emit them first.
+            self.mark_parse_error();
+            let mut fields = spec.split('\x1e');
+            let paren_line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            let eof_line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            for index in 0usize.. {
+                let key = format!("__RUBASH_PARSE_ERROR_HD_WARN_{index}__");
+                let Some(warn) = cmd.get_assignment(&key) else {
+                    break;
+                };
+                let mut parts = warn.split('\x1e');
+                let delimiter = parts.next().unwrap_or("");
+                let at_line = parts
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(1);
+                let warn_line = parts
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(1);
+                eprintln!(
+                    "{}warning: here-document at line {at_line} delimited by end-of-file (wanted `{delimiter}')",
+                    self.diagnostic_prefix_for_line(warn_line)
+                );
+            }
+            eprintln!(
+                "{}syntax error: unexpected end of file from `(' command on line {paren_line}",
+                self.parser_diagnostic_prefix_for_line(eof_line)
+            );
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
+
         if cmd.has_assignment("__RUBASH_PARSE_ERROR__") {
             self.mark_parse_error();
             if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {

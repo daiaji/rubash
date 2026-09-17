@@ -26,7 +26,7 @@ pub(super) fn collect_trailing_redirections(
         }
 
         if token.kind == TokenKind::HereDocBody {
-            if fill_pending_heredoc_body(command, &token.value) {
+            if fill_pending_heredoc_body(command, &token.value, token.position) {
                 *index += 1;
                 continue;
             }
@@ -281,6 +281,7 @@ pub(super) fn assign_here_string_redirect_raw(
             quoted_delimiter: false,
             here_string: true,
             body: Some(format!("\x1d{target}")),
+            gather_line: None,
         });
     } else {
         command.here_string = Some(target.to_string());
@@ -506,77 +507,82 @@ pub(super) fn take_redirect_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
     Some(fd)
 }
 
-pub(super) fn assign_heredoc_body(current_cmd: &mut CommandNode, ast: &mut Ast, body: String) {
+pub(super) fn assign_heredoc_body(
+    current_cmd: &mut CommandNode,
+    ast: &mut Ast,
+    body: String,
+    gather_line: usize,
+) {
     for command in ast.commands.iter_mut() {
-        if fill_pending_heredoc_body_recursive(command, &body) {
+        if fill_pending_heredoc_body_recursive(command, &body, gather_line) {
             return;
         }
     }
-    if fill_pending_heredoc_body_recursive(current_cmd, &body) {
+    if fill_pending_heredoc_body_recursive(current_cmd, &body, gather_line) {
         return;
     }
     current_cmd.heredoc = Some(body);
 }
 
-fn fill_pending_heredoc_body_recursive(cmd: &mut CommandNode, body: &str) -> bool {
-    if fill_pending_heredoc_body(cmd, body) {
+fn fill_pending_heredoc_body_recursive(cmd: &mut CommandNode, body: &str, gather_line: usize) -> bool {
+    if fill_pending_heredoc_body(cmd, body, gather_line) {
         return true;
     }
 
     if let Some(pipeline) = &mut cmd.pipeline_command {
-        if fill_pending_heredoc_body_in_commands(&mut pipeline.stages, body) {
+        if fill_pending_heredoc_body_in_commands(&mut pipeline.stages, body, gather_line) {
             return true;
         }
     }
     if let Some(list) = &mut cmd.and_or_list {
-        if fill_pending_heredoc_body_in_commands(&mut list.commands, body) {
+        if fill_pending_heredoc_body_in_commands(&mut list.commands, body, gather_line) {
             return true;
         }
     }
     if let Some(time) = &mut cmd.time_command {
-        if fill_pending_heredoc_body_recursive(&mut time.command, body) {
+        if fill_pending_heredoc_body_recursive(&mut time.command, body, gather_line) {
             return true;
         }
     }
     if let Some(background) = &mut cmd.background_command {
-        if fill_pending_heredoc_body_recursive(&mut background.command, body) {
+        if fill_pending_heredoc_body_recursive(&mut background.command, body, gather_line) {
             return true;
         }
     }
     if let Some(inverted) = &mut cmd.inverted_command {
-        if fill_pending_heredoc_body_recursive(&mut inverted.command, body) {
+        if fill_pending_heredoc_body_recursive(&mut inverted.command, body, gather_line) {
             return true;
         }
     }
     if let Some(for_command) = &mut cmd.for_command {
-        if fill_pending_heredoc_body_in_commands(&mut for_command.body, body) {
+        if fill_pending_heredoc_body_in_commands(&mut for_command.body, body, gather_line) {
             return true;
         }
     }
     if let Some(if_command) = &mut cmd.if_command {
-        if fill_pending_heredoc_body_in_commands(&mut if_command.condition, body)
-            || fill_pending_heredoc_body_in_commands(&mut if_command.then_body, body)
+        if fill_pending_heredoc_body_in_commands(&mut if_command.condition, body, gather_line)
+            || fill_pending_heredoc_body_in_commands(&mut if_command.then_body, body, gather_line)
             || if_command.elif_branches.iter_mut().any(|branch| {
-                fill_pending_heredoc_body_in_commands(&mut branch.condition, body)
-                    || fill_pending_heredoc_body_in_commands(&mut branch.body, body)
+                fill_pending_heredoc_body_in_commands(&mut branch.condition, body, gather_line)
+                    || fill_pending_heredoc_body_in_commands(&mut branch.body, body, gather_line)
             })
             || if_command
                 .else_body
                 .as_mut()
-                .is_some_and(|commands| fill_pending_heredoc_body_in_commands(commands, body))
+                .is_some_and(|commands| fill_pending_heredoc_body_in_commands(commands, body, gather_line))
         {
             return true;
         }
     }
     if let Some(loop_command) = &mut cmd.loop_command {
-        if fill_pending_heredoc_body_in_commands(&mut loop_command.condition, body)
-            || fill_pending_heredoc_body_in_commands(&mut loop_command.body, body)
+        if fill_pending_heredoc_body_in_commands(&mut loop_command.condition, body, gather_line)
+            || fill_pending_heredoc_body_in_commands(&mut loop_command.body, body, gather_line)
         {
             return true;
         }
     }
     if let Some(subshell) = &mut cmd.subshell_command {
-        if fill_pending_heredoc_body_in_commands(&mut subshell.body, body) {
+        if fill_pending_heredoc_body_in_commands(&mut subshell.body, body, gather_line) {
             return true;
         }
     }
@@ -584,23 +590,23 @@ fn fill_pending_heredoc_body_recursive(cmd: &mut CommandNode, body: &str) -> boo
         if case_command
             .clauses
             .iter_mut()
-            .any(|clause| fill_pending_heredoc_body_in_commands(&mut clause.body, body))
+            .any(|clause| fill_pending_heredoc_body_in_commands(&mut clause.body, body, gather_line))
         {
             return true;
         }
     }
     if let Some(select_command) = &mut cmd.select_command {
-        if fill_pending_heredoc_body_in_commands(&mut select_command.body, body) {
+        if fill_pending_heredoc_body_in_commands(&mut select_command.body, body, gather_line) {
             return true;
         }
     }
     if let Some(function) = &mut cmd.function_command {
-        if fill_pending_heredoc_body_in_commands(&mut function.body, body) {
+        if fill_pending_heredoc_body_in_commands(&mut function.body, body, gather_line) {
             return true;
         }
     }
     if let Some(brace_group) = &mut cmd.brace_group {
-        if fill_pending_heredoc_body_in_commands(&mut brace_group.body, body) {
+        if fill_pending_heredoc_body_in_commands(&mut brace_group.body, body, gather_line) {
             return true;
         }
     }
@@ -608,7 +614,7 @@ fn fill_pending_heredoc_body_recursive(cmd: &mut CommandNode, body: &str) -> boo
         if coproc
             .body
             .as_mut()
-            .is_some_and(|commands| fill_pending_heredoc_body_in_commands(commands, body))
+            .is_some_and(|commands| fill_pending_heredoc_body_in_commands(commands, body, gather_line))
         {
             return true;
         }
@@ -617,13 +623,13 @@ fn fill_pending_heredoc_body_recursive(cmd: &mut CommandNode, body: &str) -> boo
     false
 }
 
-fn fill_pending_heredoc_body_in_commands(commands: &mut [CommandNode], body: &str) -> bool {
+fn fill_pending_heredoc_body_in_commands(commands: &mut [CommandNode], body: &str, gather_line: usize) -> bool {
     commands
         .iter_mut()
-        .any(|command| fill_pending_heredoc_body_recursive(command, body))
+        .any(|command| fill_pending_heredoc_body_recursive(command, body, gather_line))
 }
 
-pub(super) fn fill_pending_heredoc_body(cmd: &mut CommandNode, body: &str) -> bool {
+pub(super) fn fill_pending_heredoc_body(cmd: &mut CommandNode, body: &str, gather_line: usize) -> bool {
     let Some(redirect) = cmd
         .heredoc_redirects
         .iter_mut()
@@ -633,9 +639,11 @@ pub(super) fn fill_pending_heredoc_body(cmd: &mut CommandNode, body: &str) -> bo
     };
 
     redirect.body = Some(body.to_string());
+    redirect.gather_line = Some(gather_line);
     if redirect.fd.is_none() {
         cmd.heredoc = Some(body.to_string());
         cmd.heredoc_delimiter = Some(redirect.delimiter.clone());
+        cmd.heredoc_gather_line = Some(gather_line);
     }
     true
 }
@@ -660,5 +668,6 @@ pub(super) fn heredoc_redirect(
             .any(|ch| matches!(ch, '\'' | '"' | '\\')),
         here_string: false,
         body: None,
+        gather_line: None,
     }
 }

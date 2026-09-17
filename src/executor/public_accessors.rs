@@ -639,6 +639,14 @@ impl Executor {
     /// parser_diagnostic_prefix but for a caller-supplied line number.
     pub fn parser_diagnostic_prefix_for_line(&self, line: usize) -> String {
         let is_c = self.env_vars.contains_key("__RUBASH_IS_C");
+        // error.c yy_input_name: inside `eval` the input stream name is
+        // "eval" and overrides the -c tag (`bash: eval: line N:`).
+        if self.env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
+            if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
+                return format!("{script}: eval: line {line}: ");
+            }
+            return format!("bash: eval: line {line}: ");
+        }
         if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
             if is_c {
                 return format!("{script}: -c: line {line}: ");
@@ -653,22 +661,22 @@ impl Executor {
     }
 
     pub(in crate::executor) fn report_unterminated_heredoc(&self, cmd: &CommandNode) {
-        let start_line = cmd.line.unwrap_or(1);
+        // GNU parse.y:3130/make_cmd.c:627: `lineno` is the parser's
+        // line_number when gather_here_documents ran make_here_document —
+        // the physical line where the command's logical line ended (advanced
+        // by any earlier heredoc bodies of the same command), not the `<<`
+        // line. internal_warning's prefix uses line_number after the body
+        // scan, i.e. gather_line + body lines consumed.
+        let gather_line = cmd.heredoc_gather_line.or(cmd.line).unwrap_or(1);
         let body_lines = cmd
             .heredoc
             .as_deref()
             .map(unterminated_heredoc_body_line_count)
             .unwrap_or(0);
-        let warning_line = start_line + body_lines;
+        let warning_line = gather_line + body_lines;
         let delimiter = cmd.heredoc_delimiter.as_deref().unwrap_or("");
-        // GNU make_cmd.c:627: `lineno` is the line_number at the time
-        // gather_here_documents was called (the line where `<<EOF` appeared
-        // for simple commands), and internal_warning's prefix uses the
-        // current line_number (after make_here_document read the body,
-        // i.e. the EOF/delimiter line).  So "at line N" = start_line and
-        // the prefix = warning_line.
         eprintln!(
-            "{}warning: here-document at line {start_line} delimited by end-of-file (wanted `{delimiter}')",
+            "{}warning: here-document at line {gather_line} delimited by end-of-file (wanted `{delimiter}')",
             self.diagnostic_prefix_for_line(warning_line)
         );
     }
@@ -680,16 +688,16 @@ impl Executor {
     /// line is the delimiter line (start_line + body_lines + 1), and "at line
     /// N" is the heredoc start line.
     pub(in crate::executor) fn report_warned_heredoc(&self, cmd: &CommandNode) {
-        let start_line = cmd.line.unwrap_or(1);
+        let gather_line = cmd.heredoc_gather_line.or(cmd.line).unwrap_or(1);
         let body_lines = cmd
             .heredoc
             .as_deref()
             .map(unterminated_heredoc_body_line_count)
             .unwrap_or(0);
-        let delimiter_line = start_line + body_lines + 1;
+        let delimiter_line = gather_line + body_lines + 1;
         let delimiter = cmd.heredoc_delimiter.as_deref().unwrap_or("");
         eprintln!(
-            "{}warning: here-document at line {start_line} delimited by end-of-file (wanted `{delimiter}')",
+            "{}warning: here-document at line {gather_line} delimited by end-of-file (wanted `{delimiter}')",
             self.diagnostic_prefix_for_line(delimiter_line)
         );
     }
@@ -702,7 +710,11 @@ impl Executor {
             .as_deref()
             .map(unterminated_heredoc_body_line_count)
             .unwrap_or(0);
-        let warning_line = start_line + body_lines;
+        let warning_line = cmd
+            .heredoc_gather_line
+            .or(cmd.line)
+            .unwrap_or(1)
+            + body_lines;
         let syntax_line = warning_line + 1;
         eprintln!(
             "{}syntax error: unexpected end of file from `(' command on line {start_line}",

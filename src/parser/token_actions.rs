@@ -627,7 +627,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         }
         TokenKind::HereDocBody => {
             note_command_line(&mut state.current_cmd, token);
-            assign_heredoc_body(&mut state.current_cmd, &mut state.ast, token.value.clone());
+            assign_heredoc_body(
+                &mut state.current_cmd,
+                &mut state.ast,
+                token.value.clone(),
+                token.position,
+            );
         }
         TokenKind::And | TokenKind::Or => {
             if command_is_open_conditional(&state.current_cmd) {

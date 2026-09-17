@@ -800,6 +800,7 @@ impl Printer {
                     quoted_delimiter: false,
                     here_string: false,
                     body: None,
+                    gather_line: None,
                 };
                 self.cprintf(&heredoc_header(&info));
             } else {
@@ -905,6 +906,7 @@ impl Printer {
             quoted_delimiter: false,
             here_string: false,
             body: cmd.heredoc.clone(),
+            gather_line: cmd.heredoc_gather_line,
         }
     }
 

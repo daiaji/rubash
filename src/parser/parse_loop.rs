@@ -834,13 +834,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             push_compound_command(state, subshell_cmd);
             return Some(next_i);
         }
-        return Some(push_parse_error_until(
-            state,
-            tokens,
-            i,
-            ")",
-            "unexpected end of file",
-        ));
+        return Some(push_unclosed_paren_error(state, tokens, i));
     }
 
     if command_accepts_embedded_arithmetic_command(&state.current_cmd)
@@ -909,6 +903,84 @@ fn push_parse_error_until(
         .commands
         .push(std::mem::take(&mut state.current_cmd));
     next_i
+}
+
+/// GNU parse.y:6890-6901: reaching EOF inside an unclosed `(` compound
+/// command reports "unexpected end of file from `(' command on line N" from
+/// the compoundcmd_lineno stack, not the generic near-EOF message.  Heredocs
+/// still pending inside the failed region already issued their
+/// "delimited by end-of-file" warnings during the parse (make_cmd.c:626), so
+/// the details are carried to the executor on the error node.
+fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: usize) -> usize {
+    let paren_line = tokens.get(start).map(|token| token.position).unwrap_or(1);
+    // Pair each HereDocBody token with its `<<` delimiter word in emission
+    // order: each `<<` pushes the following word and each body pops it.
+    // The queue is fed from the whole token stream so a `<<` seen before
+    // the `(` (e.g. `cat <<EOF && (`) still pairs its deferred body.
+    let mut pending_delimiters: std::collections::VecDeque<String> =
+        std::collections::VecDeque::new();
+    let mut warned: Vec<(String, usize, usize)> = Vec::new();
+    let mut last_line = paren_line;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind == TokenKind::HereDoc {
+            let delimiter = tokens
+                .get(index + 1)
+                .map(|next| next.value.clone())
+                .unwrap_or_default();
+            pending_delimiters.push_back(delimiter);
+            continue;
+        }
+        if token.kind != TokenKind::HereDocBody {
+            if index > start {
+                last_line = last_line.max(token.position);
+            }
+            continue;
+        }
+        let delimiter = pending_delimiters.pop_front().unwrap_or_default();
+        if index <= start {
+            continue;
+        }
+        let gather_line = token.position;
+        let body = token
+            .value
+            .strip_prefix(crate::lexer::QUOTED_HEREDOC_MARKER)
+            .unwrap_or(token.value.as_str());
+        let unterminated = body.starts_with('\x1f');
+        let body = body
+            .strip_prefix('\x1f')
+            .or_else(|| body.strip_prefix('\x1e'))
+            .unwrap_or(body);
+        let body_lines = body.lines().count();
+        // A terminated or delimiter-prefixed `)` body also consumed the
+        // delimiter line; an unterminated body ended at EOF on its last
+        // body line.
+        let consumed_last = gather_line + body_lines + usize::from(!unterminated);
+        last_line = last_line.max(consumed_last);
+        if unterminated {
+            warned.push((delimiter, gather_line, consumed_last));
+        }
+    }
+    let eof_line = last_line + 1;
+    state.current_cmd.line = state.current_cmd.line.or(Some(paren_line));
+    state.current_cmd.insert_assignment(
+        "__RUBASH_PARSE_ERROR__".to_string(),
+        "unexpected end of file".to_string(),
+    );
+    state.current_cmd.insert_assignment(
+        "__RUBASH_PARSE_ERROR_EOF_SUBSHELL__".to_string(),
+        format!("{paren_line}\x1e{eof_line}"),
+    );
+    for (warn_index, (delimiter, at_line, warn_line)) in warned.iter().enumerate() {
+        state.current_cmd.insert_assignment(
+            format!("__RUBASH_PARSE_ERROR_HD_WARN_{warn_index}__"),
+            format!("{delimiter}\x1e{at_line}\x1e{warn_line}"),
+        );
+    }
+    state
+        .ast
+        .commands
+        .push(std::mem::take(&mut state.current_cmd));
+    tokens.len()
 }
 
 fn command_is_pending_inversion(command: &CommandNode) -> bool {

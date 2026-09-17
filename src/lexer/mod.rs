@@ -357,6 +357,14 @@ fn tokenize_with_heredocs(
         header_scan_from = 0;
 
         for delimiter in delimiters {
+            // GNU parse.y:3120-3135 gather_here_documents passes the parser's
+            // current line_number to make_here_document for each redirect: the
+            // physical line on which the logical command line ended (this
+            // line_number is already one past it), advanced by the body lines
+            // any earlier heredoc of the same command consumed.  The
+            // "here-document at line N" warning reports this gather line, not
+            // the `<<` line, so it must travel with the body token.
+            let gather_line = line_number.saturating_sub(1);
             // Alias reparsing must leave the caller's physical input available:
             // its heredoc body belongs to the outer parse, not this replacement.
             if input_origin == InputOrigin::AliasReplacementDeferredHeredoc {
@@ -365,7 +373,7 @@ fn tokenize_with_heredocs(
                 } else {
                     String::new()
                 };
-                output.push(Token::new(TokenKind::HereDocBody, &body, position));
+                output.push(Token::new(TokenKind::HereDocBody, &body, gather_line));
                 continue;
             }
             let mut body = String::new();
@@ -462,7 +470,7 @@ fn tokenize_with_heredocs(
             if delimiter.quoted {
                 body.insert_str(0, QUOTED_HEREDOC_MARKER);
             }
-            output.push(Token::new(TokenKind::HereDocBody, &body, position));
+            output.push(Token::new(TokenKind::HereDocBody, &body, gather_line));
         }
         let mut separator = Token::new(TokenKind::Semicolon, ";", logical_start_line);
         separator.line_break = true;

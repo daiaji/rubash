@@ -45,6 +45,11 @@ pub struct HereDocRedirect {
     pub quoted_delimiter: bool,
     pub here_string: bool,
     pub body: Option<String>,
+    /// Physical line where this heredoc's body scan began — the `line_number`
+    /// GNU passes to make_here_document from gather_here_documents
+    /// (parse.y:3130): the line on which the logical command line ended, plus
+    /// body lines already consumed by earlier heredocs of the same command.
+    pub gather_line: Option<usize>,
 }
 
 /// Represents a narrow `for` compound command.
@@ -1100,6 +1105,11 @@ pub struct CommandNode {
     pub coproc_command: Option<Box<CoprocCommand>>,
     /// Script line number where this command starts, when known.
     pub line: Option<usize>,
+    /// Physical line where the primary `<<` heredoc's body scan began
+    /// (mirrors the gather_line of the last fd-less heredoc redirect).
+    /// GNU reports "here-document at line N" against this gather line, not
+    /// the command start line (make_cmd.c:626-627, parse.y:3130).
+    pub heredoc_gather_line: Option<usize>,
 }
 
 impl CommandNode {
@@ -1175,6 +1185,7 @@ impl CommandNode {
             brace_group: None,
             coproc_command: None,
             line: None,
+            heredoc_gather_line: None,
         }
     }
 
