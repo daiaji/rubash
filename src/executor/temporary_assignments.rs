@@ -255,7 +255,11 @@ impl Executor {
                 let _ = std::io::stderr().write_all(line.as_bytes());
                 return false;
             }
-            NamerefResolution::NotNameref => base_name.to_string(),
+            // Unresolved cell: resolve to the nameref itself; the
+            // empty-cell binding block below assigns the new target.
+            NamerefResolution::Unresolved | NamerefResolution::NotNameref => {
+                base_name.to_string()
+            }
         };
         // GNU variables.c bind_variable_internal: when a nameref has an
         // empty cell (valueless, created by `declare -n name` without a

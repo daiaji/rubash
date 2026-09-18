@@ -292,6 +292,12 @@ enum NamerefResolution {
     /// NAMEREF_MAX (8) levels without resolving — reported as
     /// "maximum nameref depth (8) exceeded", not "circular".
     MaxDepth,
+    /// GNU variables.c:2023-2026 find_variable_nameref: a marked nameref
+    /// whose cell is missing, empty, or not a resolvable name resolves to
+    /// nothing — the variable reads as unset for value lookups, while
+    /// name-resolution contexts (assignment, unset) keep the variable
+    /// itself (find_variable_nameref_for_assignment returns the nameref).
+    Unresolved,
     NotNameref,
 }
 

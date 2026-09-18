@@ -142,7 +142,11 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             }
-            NamerefResolution::NotNameref => name.to_string(),
+            // Empty/unresolvable cell: the name resolves to the nameref
+            // variable itself (find_variable_nameref_for_assignment).
+            NamerefResolution::Unresolved | NamerefResolution::NotNameref => {
+                name.to_string()
+            }
         };
         let name = name.as_str();
         if name == "BASH_ALIASES" {

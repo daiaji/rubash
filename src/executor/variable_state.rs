@@ -36,6 +36,7 @@ impl Executor {
             NamerefResolution::Target(target) => Some(target),
             NamerefResolution::Circular
             | NamerefResolution::MaxDepth
+            | NamerefResolution::Unresolved
             | NamerefResolution::NotNameref => None,
         }
     }
@@ -44,7 +45,13 @@ impl Executor {
         match self.nameref_resolution(name) {
             NamerefResolution::Target(target) => Some(target),
             NamerefResolution::Circular | NamerefResolution::MaxDepth => None,
-            NamerefResolution::NotNameref => Some(name.to_string()),
+            // An unresolvable nameref cell still resolves the NAME to the
+            // variable itself: find_variable_nameref_for_assignment
+            // (variables.c:2210-2237) returns the nameref so `ref=x` binds
+            // the cell and `unset ref` unbinds the nameref.
+            NamerefResolution::Unresolved | NamerefResolution::NotNameref => {
+                Some(name.to_string())
+            }
         }
     }
 
@@ -69,10 +76,17 @@ impl Executor {
                 return NamerefResolution::MaxDepth;
             }
             let Some(target) = self.env_vars.get(&current) else {
-                return NamerefResolution::NotNameref;
+                // Marked nameref with no cell entry at all.
+                return NamerefResolution::Unresolved;
             };
-            if !is_shell_name(target) && parse_array_subscript(target).is_none() {
-                return NamerefResolution::NotNameref;
+            if target.is_empty()
+                || (!is_shell_name(target) && parse_array_subscript(target).is_none())
+            {
+                // GNU variables.c:2023-2026 find_variable_nameref: an empty
+                // or unresolvable cell returns NULL, so the nameref reads
+                // as unset (e.g. `typeset -n ref` -> ${ref-unset} yields
+                // "unset"), never as its own cell text.
+                return NamerefResolution::Unresolved;
             }
             if target == name || target == &current {
                 return NamerefResolution::Circular;
@@ -184,6 +198,9 @@ impl Executor {
                 );
                 return None;
             }
+            // GNU: find_variable on an unresolvable nameref returns NULL —
+            // the parameter is unset, not set-but-null (C3).
+            NamerefResolution::Unresolved => return None,
             NamerefResolution::NotNameref => name.to_string(),
         };
         if let Some(value) = self.array_element_parameter_value(&name) {
