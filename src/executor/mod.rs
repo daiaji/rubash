@@ -137,6 +137,9 @@ impl std::io::Write for WriteFileStderr {
 mod shift_echo_builtins;
 mod source_type_state;
 mod subscript_expansion;
+pub(in crate::executor) use subscript_expansion::{
+    IndexedSubscript, OperandSubscriptMode, SubscriptSource,
+};
 mod temporary_assignments;
 mod trap_exec;
 mod trap_stack_builtins;
@@ -512,6 +515,25 @@ pub struct Executor {
     /// expand_arith_string before evalexp, so diagnostics echo the
     /// post-expansion text (`$A` shows its value, not the literal).
     arithmetic_last_eval_input: std::cell::RefCell<String>,
+    /// GNU expr.c evalerror -> jump_to_top_level (DISCARD): an arithmetic
+    /// evaluation failure — including a failed array-subscript evaluation —
+    /// discards the rest of the command list that contained the failing
+    /// command (`a[$x]=v; echo after` never prints `after`). Rubash models
+    /// the discarded tail as the commands sharing the failing reader-level
+    /// command's source line (`CommandNode::line`).
+    pub(crate) evalerror_pending: Cell<bool>,
+    /// Source line of the reader-level command whose list tail is being
+    /// discarded; set lazily when the reader-level loop first observes
+    /// `evalerror_pending`.
+    evalerror_line: Cell<Option<usize>>,
+    /// Nesting depth of `execute_ast_inner`: a nested list (function body,
+    /// loop body, sourced text, ...) unwinds silently while an evalerror
+    /// abort is pending; only the reader-level loop skips to the next
+    /// source line.
+    evalerror_exec_depth: Cell<usize>,
+    /// Source line of the command currently executing at reader level —
+    /// becomes the abort boundary when `evalerror_pending` is observed.
+    reader_command_line: Cell<Option<usize>>,
     /// True while an if/elif condition list is executing: word-expansion
     /// failures must pierce function frames so the enclosing compound
     /// command can abandon itself entirely (GNU probe f4).

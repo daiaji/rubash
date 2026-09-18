@@ -169,21 +169,34 @@ impl Executor {
             // parse_array_integer_subscript / parse_array_numeric_subscript
             // only accept bare digit strings, so evaluate the subscript
             // here for scalar vars and indexed arrays alike.
-            let expr = raw_key
+            let index = if let Some(expr) = raw_key
                 .strip_prefix("$((")
                 .and_then(|e| e.strip_suffix("))"))
-                .map(|e| e.trim())
-                .unwrap_or(raw_key);
-            if let Some(index) = {
+            {
+                // `$((...))` keeps its own writes-capturing evaluation so
+                // `count++` side effects survive the cloned env.
                 let (result, writes) =
-                    eval_conditional_arith_value_with_writes(expr, &self.env_vars);
+                    eval_conditional_arith_value_with_writes(expr.trim(), &self.env_vars);
                 if !writes.is_empty() {
                     PENDING_SUBSCRIPT_WRITES.with(|w| {
                         w.borrow_mut().extend(writes);
                     });
                 }
                 result
-            } {
+            } else {
+                // GNU array_expand_index -> evalexp (arrayfunc.c:1353-1391):
+                // one expand_subscript_string pass (Raw), then no-expand
+                // evaluation — a surviving $name/$(...) is "operand
+                // expected" and evalerror aborts the command list.
+                match self.eval_indexed_subscript_deferred(SubscriptSource::Raw(raw_key)) {
+                    IndexedSubscript::Index(index) => Some(index),
+                    // Empty (${#a[]}) and Error both abandon the expansion;
+                    // GNU reports the error / drops the word and produces
+                    // empty output (bad substitution / operand expected).
+                    IndexedSubscript::Empty | IndexedSubscript::Error => None,
+                }
+            };
+            if let Some(index) = index {
                 if let Some(value) = self.env_vars.get(array_name) {
                     if let Some(resolved) = resolve_indexed_array_subscript(value, index) {
                         if let Some(element) = array_value_at(value, resolved) {

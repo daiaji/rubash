@@ -369,13 +369,26 @@ impl Executor {
         // time (subst.c/eval_arith_subscript): ${a[$(echo 42)]=x} lands at
         // index 42 instead of being dropped as an unparseable literal key.
         // The @ and * subscripts are expansion operators, not arithmetic
-        // operands, and keep their existing handling.
-        let subscript = self.expand_arithmetic_special_parameters(&key);
-        if matches!(subscript.as_str(), "@" | "*") || subscript.trim().is_empty() {
+        // operands, and keep their existing handling. The subscript here is
+        // the raw ${} inner text, so it receives its single
+        // expand_subscript_string pass (Raw) and the product is evaluated
+        // under no-expand rules — a surviving $name/$(...) is "operand
+        // expected" (expr.c evalerror), not a silent drop.
+        let resolved = self.resolve_array_subscript(SubscriptSource::Raw(&key));
+        if matches!(resolved.as_str(), "@" | "*") || resolved.trim().is_empty() {
             return false;
         }
-        let Some(index) = self.eval_arithmetic_expansion_value(&subscript) else {
-            return false;
+        let index = match self.eval_indexed_subscript_expression(&resolved) {
+            Some(index) => index,
+            None => {
+                self.report_indexed_subscript_error(&resolved);
+                // Runs during word expansion of a pending command: the
+                // evalerror DISCARDs the command itself
+                // (eval_indexed_subscript_deferred documents the model).
+                self.arithmetic_expansion_error.set(true);
+                self.arithmetic_fatal_error.set(true);
+                return false;
+            }
         };
         let Ok(index) = usize::try_from(index) else {
             return false;

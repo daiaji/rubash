@@ -116,10 +116,27 @@ impl Executor {
         value: &str,
         append: bool,
         integer: bool,
+        subscript_from_operand: bool,
     ) -> bool {
         let current = self.env_vars.get(elem_base).cloned().unwrap_or_default();
+        // GNU SET_VFLAGS provenance (builtins/common.h:277-289): a subscript
+        // arriving inside the builtin operand (`read a[$x]`) is ExpandedOnce
+        // data — verbatim with array_expand_once, one deferred
+        // expand_subscript_string pass without it. A subscript arriving via a
+        // nameref CELL (`declare -n r='a[$x]'; r=v`) is raw stored text that
+        // GNU expands at bind time (variables.c bind_variable ->
+        // assign_array_element -> expand_array_index), so it stays Raw.
+        let subscript_source = if subscript_from_operand {
+            SubscriptSource::ExpandedOnce(subscript)
+        } else {
+            SubscriptSource::Raw(subscript)
+        };
         if is_marked_var(&self.env_vars, ASSOC_VARS, elem_base) {
-            let key = self.assoc_subscript_key(subscript);
+            // Same \x1d bookkeeping trim assoc_subscript_key applies.
+            let key = self
+                .resolve_array_subscript(subscript_source)
+                .trim_matches('\x1d')
+                .to_string();
             let mut entries = assoc_entries(&current);
             let existing = entries
                 .iter()
@@ -170,13 +187,32 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        let Ok(index) = self
-            .eval_integer_assignment_value(subscript)
-            .to_string()
-            .parse::<usize>()
-        else {
-            self.exit_code = 1;
-            return false;
+        // arrayfunc.c array_expand_index -> evalexp under no_expand rules:
+        // a surviving $name/$(...) in an ExpandedOnce operand fails
+        // "operand expected" (diagnostic already printed) instead of
+        // executing a second time.
+        let index = match self.eval_indexed_subscript(subscript_source) {
+            IndexedSubscript::Index(index) => {
+                match resolve_indexed_array_subscript(&current, index) {
+                    Some(index) => index,
+                    // GNU assign_array_element_internal: an out-of-range
+                    // negative index is a bad subscript (arrayfunc.c).
+                    None => {
+                        self.report_bad_array_subscript(&format!("{elem_base}[{index}]"));
+                        self.exit_code = 1;
+                        return false;
+                    }
+                }
+            }
+            IndexedSubscript::Empty => {
+                self.report_bad_array_subscript(&format!("{elem_base}[]"));
+                self.exit_code = 1;
+                return false;
+            }
+            IndexedSubscript::Error => {
+                self.exit_code = 1;
+                return false;
+            }
         };
         let mut entries = indexed_array_entries(&current);
         let current_element = entries.get(&index).cloned().unwrap_or_default();
@@ -209,8 +245,12 @@ impl Executor {
         // separately on WORD_DESC/ASSIGNMENT_WORD. This narrow path handles
         // scalar `name+=value` until SHELL_VAR attributes and arrays own it.
         let (base_name, append) = assignment_name_and_append(name);
-        let target_name = match self.nameref_resolution(base_name) {
-            NamerefResolution::Target(target) => target,
+        // A subscript inside the operand itself (`read a[$x]`, `a[$x]=v`
+        // reaching this path) is ExpandedOnce argv data; a subscript that
+        // arrives via a nameref cell is raw stored text GNU expands at bind
+        // time.
+        let (target_name, subscript_from_operand) = match self.nameref_resolution(base_name) {
+            NamerefResolution::Target(target) => (target, false),
             NamerefResolution::Circular => {
                 // GNU writes each diagnostic with one write(2). eprintln!
                 // fragments the message into one syscall per format piece and
@@ -238,7 +278,7 @@ impl Executor {
                 self.exit_code = 0;
                 return true;
             }
-            NamerefResolution::NotNameref => base_name.to_string(),
+            NamerefResolution::NotNameref => (base_name.to_string(), true),
         };
         // GNU variables.c bind_variable_internal: when a nameref has an
         // empty cell (valueless, created by `declare -n name` without a
@@ -304,7 +344,12 @@ impl Executor {
                     let integer = is_marked_var(&self.env_vars, INTEGER_VARS, base_name)
                         || is_marked_var(&self.env_vars, INTEGER_VARS, elem_base);
                     return self.apply_nameref_array_element_assignment(
-                        elem_base, subscript, &value, append, integer,
+                        elem_base,
+                        subscript,
+                        &value,
+                        append,
+                        integer,
+                        subscript_from_operand,
                     );
                 }
                 // Variable not yet declared as an array: create it as an
@@ -329,7 +374,12 @@ impl Executor {
                     let integer = is_marked_var(&self.env_vars, INTEGER_VARS, base_name)
                         || is_marked_var(&self.env_vars, INTEGER_VARS, elem_base);
                     return self.apply_nameref_array_element_assignment(
-                        elem_base, subscript, &value, append, integer,
+                        elem_base,
+                        subscript,
+                        &value,
+                        append,
+                        integer,
+                        subscript_from_operand,
                     );
                 }
             }
@@ -392,6 +442,29 @@ impl Executor {
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(&value)
             .to_string();
+        // GNU assign_array_var_from_string (arrayfunc.c:910-924): each
+        // `[sub]=` element inside the stored compound text resolves under
+        // the ExpandedOnce rules — the element words already went through
+        // expand_words_no_vars during word expansion, and ASS_NOEXPAND (set
+        // when array_expand_once) makes array_expand_index consume the
+        // result verbatim; assoc keys take their expand_subscript_string
+        // pass at arrayfunc.c:817 on the already-expanded word text.
+        let value = if compound_assignment && value.starts_with('(') && value.ends_with(')') {
+            match self.rewrite_compound_element_subscripts(
+                base_name,
+                &value,
+                is_marked_var(&self.env_vars, ASSOC_VARS, base_name),
+                true,
+            ) {
+                Some(rewritten) => rewritten,
+                None => {
+                    self.exit_code = 1;
+                    return false;
+                }
+            }
+        } else {
+            value
+        };
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
             if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {

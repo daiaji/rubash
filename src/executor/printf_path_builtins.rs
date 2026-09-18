@@ -5,10 +5,43 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
+        // GNU builtins/printf.def: `printf -v name[sub]` resolves the
+        // operand's subscript under the ExpandedOnce argv rules — verbatim
+        // with array_expand_once, one deferred expand_subscript_string pass
+        // without it (SET_VFLAGS, builtins/common.h:277-289). A failed
+        // indexed subscript is an expr.c evalerror: diagnostic already
+        // printed, rest of the command list discarded, status 1.
+        let mut words = cmd.words[1..].to_vec();
+        let mut scan = 0usize;
+        while scan < words.len() {
+            let arg = &words[scan];
+            if arg == "--" || !arg.starts_with('-') || arg == "-" {
+                break;
+            }
+            if arg == "-v" {
+                if let Some(operand) = words.get(scan + 1).cloned() {
+                    match self.rewrite_operand_array_subscript(&operand) {
+                        Ok(rewritten) => words[scan + 1] = rewritten,
+                        Err(()) => return Ok(1),
+                    }
+                }
+                break;
+            }
+            if let Some(fused) = arg.strip_prefix("-v") {
+                if !fused.is_empty() {
+                    match self.rewrite_operand_array_subscript(fused) {
+                        Ok(rewritten) => words[scan] = format!("-v{rewritten}"),
+                        Err(()) => return Ok(1),
+                    }
+                    break;
+                }
+            }
+            scan += 1;
+        }
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let status = crate::builtins::printf::execute_with_io_and_store(
-            cmd.words[1..].iter().map(String::as_str),
+            words.iter().map(String::as_str),
             &mut self.env_vars,
             Some(&mut self.shell_state.variables),
             &mut stdout,

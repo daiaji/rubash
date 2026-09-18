@@ -15,10 +15,19 @@ impl Executor {
         }
         self.mark_posix_function_export_touches(&cmd.words[1..]);
 
+        // GNU export.def shares declare.def's operand handling: an
+        // `export name[sub]=value` subscript resolves under the same
+        // ExpandedOnce (W_ASSIGNMENT -> ASS_NOEXPAND) rules.
+        let args = match self
+            .rewrite_declare_operand_subscripts(&cmd.words[1..], &cmd.word_metadata)
+        {
+            Ok(args) => args,
+            Err(()) => return Ok(1),
+        };
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let status = crate::builtins::setattr::export_with_io(
-            cmd.words[1..].iter().map(String::as_str),
+            args.iter().map(String::as_str),
             &mut self.env_vars,
             &mut stdout,
             &mut stderr,

@@ -194,7 +194,20 @@ impl Executor {
             };
             return Ok(true);
         }
-        let tokens = crate::lexer::tokenize(inner);
+        // Re-tokenize the collapsed `{ ...; }` word at the group's own
+        // source line — GNU's parser kept the in-place line counter, so
+        // diagnostics inside the group report the script/eval line rather
+        // than restarting at 1.
+        let start_line = command
+            .line
+            .or_else(|| {
+                self.env_vars
+                    .get("__RUBASH_CURRENT_LINE")
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
+            .unwrap_or(1);
+        let tokens =
+            crate::lexer::tokenize_comsub_body(inner, self.posix_mode_enabled(), start_line, false);
         let ast = crate::parser::parse(&tokens);
         self.execute_ast(&ast)?;
         Ok(true)

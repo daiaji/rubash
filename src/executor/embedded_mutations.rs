@@ -887,13 +887,18 @@ impl Executor {
                 );
             }
         }
-        let result = if pipe_output {
-            // The seeded frame is already on the stack; run the body without
-            // pushing another one.
-            self.execute_ast(&ast)
-        } else {
-            self.execute_current_shell_body(&ast)
-        };
+        // Direct-stdout builtins inside the body consult the thread-local
+        // capture, which belongs to an enclosing pipeline stage when this
+        // substitution runs inside one; give the body its own capture.
+        let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
+            if pipe_output {
+                // The seeded frame is already on the stack; run the body
+                // without pushing another one.
+                self.execute_ast(&ast)
+            } else {
+                self.execute_current_shell_body(&ast)
+            }
+        });
         let body_reply = self.env_vars.get("REPLY").cloned();
         match saved_reply {
             Some(value) => {
@@ -903,7 +908,8 @@ impl Executor {
                 self.env_vars.remove("REPLY");
             }
         }
-        let captured = self.stdout_capture.take().unwrap_or_default();
+        let mut captured = self.stdout_capture.take().unwrap_or_default();
+        captured.extend_from_slice(&thread_captured);
         self.stdout_capture = saved_capture;
 
         // `exit N` inside the body aborts the enclosing (sub)shell with N
@@ -1090,12 +1096,18 @@ impl Executor {
         let posix_mode = self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
         let inherit_errexit =
             crate::builtins::shopt::option_enabled(&self.env_vars, "inherit_errexit");
-        let result = if posix_mode || inherit_errexit {
-            self.execute_ast(&ast)
-        } else {
-            self.with_errexit_suppressed(|executor| executor.execute_ast(&ast))
-        };
-        let output = self.stdout_capture.take().unwrap_or_default();
+        // Direct-stdout builtins inside the body consult the thread-local
+        // capture, which belongs to an enclosing pipeline stage when this
+        // substitution runs inside one; give the body its own capture.
+        let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
+            if posix_mode || inherit_errexit {
+                self.execute_ast(&ast)
+            } else {
+                self.with_errexit_suppressed(|executor| executor.execute_ast(&ast))
+            }
+        });
+        let mut output = self.stdout_capture.take().unwrap_or_default();
+        output.extend_from_slice(&thread_captured);
         self.stdout_capture = saved_capture;
 
         let status = match result {
@@ -1152,8 +1164,14 @@ impl Executor {
         let saved_exit_code = self.exit_code;
         let saved_capture = self.stdout_capture.take();
         self.stdout_capture = Some(Vec::new());
-        let result = self.execute_function(name, &args, &call);
-        let output = self.stdout_capture.take().unwrap_or_default();
+        // Direct-stdout builtins inside the function consult the thread-local
+        // capture, which belongs to an enclosing pipeline stage when this
+        // substitution runs inside one; give the call its own capture.
+        let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
+            self.execute_function(name, &args, &call)
+        });
+        let mut output = self.stdout_capture.take().unwrap_or_default();
+        output.extend_from_slice(&thread_captured);
         self.stdout_capture = saved_capture;
         let status = match result {
             Ok(()) => self.exit_code,

@@ -623,16 +623,26 @@ impl Executor {
         *subshell.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
         subshell.stdout_capture = Some(Vec::new());
 
-        let result = subshell.execute_ast(&ast);
-        let mut status = command_substitution_result_status(result, subshell.exit_code);
-        // Bash runs EXIT in the command-substitution child, so an EXIT trap
-        // installed by the body contributes its output to captured stdout.
-        if has_trap_command {
-            if let Ok(exit_status) = subshell.run_exit_trap_for_status(status) {
-                status = exit_status;
+        // Builtins inside the body that write the process stdout directly
+        // consult the thread-local capture — which belongs to an enclosing
+        // pipeline stage when this substitution runs inside one, leaking
+        // the substitution's output into the stage's pipe. Give the body
+        // its own thread-local capture and merge both buffers.
+        let (captured, status) = crate::executor::shell_options::capture_stdout(|| {
+            let result = subshell.execute_ast(&ast);
+            let mut status = command_substitution_result_status(result, subshell.exit_code);
+            // Bash runs EXIT in the command-substitution child, so an
+            // EXIT trap installed by the body contributes its output to
+            // captured stdout.
+            if has_trap_command {
+                if let Ok(exit_status) = subshell.run_exit_trap_for_status(status) {
+                    status = exit_status;
+                }
             }
-        }
-        let output = subshell.stdout_capture.take().unwrap_or_default();
+            status
+        });
+        let mut output = subshell.stdout_capture.take().unwrap_or_default();
+        output.extend_from_slice(&captured);
 
         if let Some(saved_dir) = saved_dir {
             let _ = env::set_current_dir(saved_dir);
@@ -698,6 +708,10 @@ impl Executor {
             arithmetic_last_error_category: Cell::new(None),
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),
+            evalerror_pending: Cell::new(false),
+            evalerror_line: Cell::new(None),
+            evalerror_exec_depth: Cell::new(0),
+            reader_command_line: Cell::new(None),
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             background_children: HashMap::new(),

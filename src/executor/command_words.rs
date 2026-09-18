@@ -47,6 +47,23 @@ impl Executor {
         {
             return false;
         }
+        // GNU parse.y:5366 read_token_word / general.c:480 assignment(): a
+        // declaration-builtin operand whose RAW token is assignment-shaped
+        // (`name[sub]=value`) carries W_ASSIGNMENT and is never field-split,
+        // even when the subscript expands to text containing IFS
+        // whitespace (`declare A[$k]=v` stays one word). The check must use
+        // the raw token — the expanded text has already lost the quoting
+        // that would prove it is not an assignment word.
+        if matches!(
+            cmd.words.first().map(String::as_str),
+            Some("export" | "readonly" | "declare" | "typeset" | "local")
+        ) && cmd
+            .word_metadata
+            .get(index)
+            .is_some_and(|metadata| Self::raw_word_is_assignment(&metadata.raw))
+        {
+            return false;
+        }
         // A word wrapped in quotes (e.g. `"$(cmd) extra"`) keeps its spaces
         // together: quote removal happens after field splitting in Bash, so
         // quoted words must not be split even when they expand to whitespace.

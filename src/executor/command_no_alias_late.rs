@@ -91,8 +91,7 @@ impl Executor {
                     return self.execute_external(cmd);
                 }
                 self.apply_no_output_builtin_redirects(cmd)?;
-                self.exit_code =
-                    crate::builtins::test::execute(&cmd.words[1..], false, &self.env_vars)?;
+                self.exit_code = self.execute_test_words(&cmd.words[1..], false)?;
                 Ok(())
             }
             "[" => {
@@ -100,8 +99,7 @@ impl Executor {
                     return self.execute_external(cmd);
                 }
                 self.apply_no_output_builtin_redirects(cmd)?;
-                self.exit_code =
-                    crate::builtins::test::execute(&cmd.words[1..], true, &self.env_vars)?;
+                self.exit_code = self.execute_test_words(&cmd.words[1..], true)?;
                 Ok(())
             }
             "dirname" => {

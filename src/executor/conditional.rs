@@ -10,7 +10,7 @@ use super::{
     is_marked_var, mark_env_name, parse_helpers::decode_ansi_c_escapes,
     unescape_remaining_shell_escapes, Executor, ARRAY_VARS, NAMEREF_VARS,
 };
-use crate::executor::arithmetic::eval_mutable_arith_value_with_random;
+use crate::executor::arithmetic::eval_mutable_arith_value_with_random_flags;
 use crate::executor::arrays::format_indexed_array_storage;
 use crate::parser::QuoteKind;
 
@@ -82,13 +82,21 @@ impl Executor {
 
         match args {
             [not, rest @ ..] if not == "!" => i32::from(self.execute_conditional(rest) == 0),
-            [op, operand, end] if op == "-v" && end == "]]" => i32::from(
-                !crate::builtins::test::variable_is_set(&self.expand_word(operand), &self.env_vars),
-            ),
-            [op, operand] if op == "-v" => i32::from(!crate::builtins::test::variable_is_set(
-                &self.expand_word(operand),
-                &self.env_vars,
-            )),
+            // GNU cond.c `[[ -v name[sub] ]]` -> test.c's -v machinery: the
+            // subscript of the already-expanded operand is evaluated under
+            // no-expand rules; a surviving $name/$(...) is "operand
+            // expected" and the evalerror discards the rest of the command
+            // list (rewrite_conditional_v_operand raises it).
+            [op, operand, end] if op == "-v" && end == "]]" => {
+                match self.conditional_dash_v(operand) {
+                    Ok(set) => i32::from(!set),
+                    Err(()) => 1,
+                }
+            }
+            [op, operand] if op == "-v" => match self.conditional_dash_v(operand) {
+                Ok(set) => i32::from(!set),
+                Err(()) => 1,
+            },
             [op, operand, end] if op == "-R" && end == "]]" => i32::from(!is_marked_var(
                 &self.env_vars,
                 NAMEREF_VARS,
@@ -371,6 +379,20 @@ impl Executor {
         }
         output
     }
+    /// GNU cond.c `[[ -v name[sub] ]]`: the operand's subscript is consumed
+    /// verbatim after the conditional word expansion (Protected) — a
+    /// surviving `$name`/`$(...)` fails "operand expected" and the evalerror
+    /// discards the rest of the command list. Err(()) means the diagnostic
+    /// was already printed.
+    fn conditional_dash_v(&mut self, operand: &str) -> Result<bool, ()> {
+        let operand = self.expand_word(operand);
+        let rewritten = self.rewrite_conditional_v_operand(&operand)?;
+        Ok(crate::builtins::test::variable_is_set(
+            &rewritten,
+            &self.env_vars,
+        ))
+    }
+
     pub(super) fn conditional_string_unary(&self, op: &str, operand: &str) -> bool {
         let value = self.expand_word(operand);
         match op {
@@ -571,18 +593,24 @@ impl Executor {
     ) -> i32 {
         let left_expanded = self.expand_word(left);
         let right_expanded = self.expand_word(right);
-        let (Some(left_val), _) = eval_mutable_arith_value_with_random(
+        // GNU conditional.c -> test.c arithcomp -> evalexp: the operands are
+        // already word-expanded, so a surviving `$name`/`$(...)` is data —
+        // expr.c readtok fails it "operand expected" rather than executing
+        // it again. Evaluate under the no-expand rules.
+        let (Some(left_val), _) = eval_mutable_arith_value_with_random_flags(
             &left_expanded,
             &mut self.env_vars,
             Some(&self.random_state),
+            true,
         ) else {
             self.report_conditional_arithmetic_error(&left_expanded);
             return 1;
         };
-        let (Some(right_val), _) = eval_mutable_arith_value_with_random(
+        let (Some(right_val), _) = eval_mutable_arith_value_with_random_flags(
             &right_expanded,
             &mut self.env_vars,
             Some(&self.random_state),
+            true,
         ) else {
             self.report_conditional_arithmetic_error(&right_expanded);
             return 1;

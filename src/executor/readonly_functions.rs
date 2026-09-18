@@ -16,6 +16,15 @@ impl Executor {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // GNU readonly.def shares declare.def's operand handling: a
+        // `readonly name[sub]=value` subscript resolves under the same
+        // ExpandedOnce (W_ASSIGNMENT -> ASS_NOEXPAND) rules.
+        let args = match self
+            .rewrite_declare_operand_subscripts(&cmd.words[1..], &cmd.word_metadata)
+        {
+            Ok(args) => args,
+            Err(()) => return Ok(1),
+        };
         // GNU builtin_error_prolog prefixes readonly reassignment diagnostics
         // with `this_command_name`; while a function body runs, that name is
         // the enclosing function (execute_cmd.c run_builtin sets it on the
@@ -23,7 +32,7 @@ impl Executor {
         // the builtin resets it).
         let context_name = self.function_name_stack.first().map(String::as_str);
         let status = crate::builtins::setattr::readonly_with_io(
-            cmd.words[1..].iter().map(String::as_str),
+            args.iter().map(String::as_str),
             &mut self.env_vars,
             &mut stdout,
             &mut stderr,

@@ -284,14 +284,12 @@ impl Executor {
             }
             "test" => {
                 self.apply_no_output_builtin_redirects(&builtin_cmd)?;
-                self.exit_code =
-                    crate::builtins::test::execute(&builtin_cmd.words[1..], false, &self.env_vars)?;
+                self.exit_code = self.execute_test_words(&builtin_cmd.words[1..], false)?;
                 Ok(())
             }
             "[" => {
                 self.apply_no_output_builtin_redirects(&builtin_cmd)?;
-                self.exit_code =
-                    crate::builtins::test::execute(&builtin_cmd.words[1..], true, &self.env_vars)?;
+                self.exit_code = self.execute_test_words(&builtin_cmd.words[1..], true)?;
                 Ok(())
             }
             "shift" => self.execute_shift_command(&builtin_cmd),

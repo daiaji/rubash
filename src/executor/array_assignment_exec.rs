@@ -20,10 +20,17 @@ impl Executor {
     ) -> Option<String> {
         let name = assignment.name.as_str();
         let raw_subscript = assignment.subscript_metadata.raw.as_str();
-        let key = self.expand_subscript_string(raw_subscript);
         let associative =
             is_marked_var(&self.env_vars, ASSOC_VARS, name) || self.is_assoc_parameter_array(name);
-        if !associative || !key.contains(['[', ']', '=']) {
+        if !associative {
+            return None;
+        }
+        // Expand only for the associative branch: expand_subscript_string
+        // runs command substitutions, and an indexed subscript must see its
+        // single expansion inside eval_indexed_subscript below — expanding
+        // here too would execute `a[$(echo INJ)]=v` twice.
+        let key = self.expand_subscript_string(raw_subscript);
+        if !key.contains(['[', ']', '=']) {
             return None;
         }
         // Dynamic arrays are consumed by name before the associative branch,
@@ -208,10 +215,16 @@ impl Executor {
             return true;
         }
         if is_marked_var(&self.env_vars, ASSOC_VARS, name) || self.is_assoc_parameter_array(name) {
-            // TODO(assoc.c/arrayfunc.c): Bash parses associative subscripts
-            // with quote removal and expansion. This stores the simple
-            // `A[key]=value` form exercised by upstream builtins5.sub.
-            let key = self.assoc_subscript_key(raw_subscript.unwrap_or(index));
+            // GNU arrayfunc.c:392-408 assign_array_element_internal: the
+            // subscript gets exactly one expand_subscript_string pass and
+            // the result is the literal key — a `$(...)` produced by that
+            // expansion is data, never re-scanned (audit C11). Rubash's one
+            // pass already ran inside expand_command_words, so the expanded
+            // subscript text in `index` is consumed verbatim; the synthetic
+            // word from prepare_array_element_assignment_word carries the
+            // resolved key hex-encoded behind ARITH_ASSOC_KEY_MARKER.
+            let key = super::arithmetic::decode_arithmetic_assoc_key(index)
+                .unwrap_or_else(|| self.resolve_array_subscript(SubscriptSource::Protected(index)));
             if key.is_empty() {
                 // An associative key is data, so nothing can fill in an empty
                 // one: GNU rejects `A[]`, `A[""]` and `A[$unset]` with the
@@ -288,32 +301,35 @@ impl Executor {
         // status 0, array25.sub), so only a truly EMPTY subscript is a bad
         // array subscript (`h[]=10`).
         if index.trim().is_empty() && raw_subscript.is_none_or(str::is_empty) {
-            eprintln!(
-                "{}{}: bad array subscript",
-                self.diagnostic_prefix(),
-                lhs_as_written
-            );
+            self.report_bad_array_subscript(&lhs_as_written);
             self.exit_code = 1;
             return true;
         }
         let index = if index.trim().is_empty() { "0" } else { index };
         if index.trim() == "*" {
-            eprintln!(
-                "{}{}: bad array subscript",
-                self.diagnostic_prefix(),
-                lhs_as_written
-            );
+            self.report_bad_array_subscript(&lhs_as_written);
             self.exit_code = 1;
             return true;
         }
-        let Some(computed_index) = self.eval_arithmetic_expansion_value(index) else {
-            eprintln!(
-                "{}{}: bad array subscript",
-                self.diagnostic_prefix(),
-                lhs_as_written
-            );
-            self.exit_code = 1;
-            return true;
+        // GNU arrayfunc.c:420-434 assign_array_element_internal ->
+        // array_expand_index (arrayfunc.c:1353-1391): the subscript's single
+        // expand_arith_string pass already ran inside expand_command_words
+        // (the word expansion IS that pass — re-expanding the syntactic raw
+        // here executed `a[$(echo INJ)]=v` twice), and the result feeds
+        // evalexp verbatim — a `$(...)` produced by the expansion is not
+        // valid arithmetic and fails "operand expected" instead of
+        // executing (audit C11).
+        let computed_index = match self.eval_indexed_subscript(SubscriptSource::Protected(index)) {
+            IndexedSubscript::Index(index) => index,
+            IndexedSubscript::Empty => {
+                self.report_bad_array_subscript(&lhs_as_written);
+                self.exit_code = 1;
+                return true;
+            }
+            IndexedSubscript::Error => {
+                self.exit_code = 1;
+                return true;
+            }
         };
         if computed_index < 0
             && resolve_indexed_array_subscript(

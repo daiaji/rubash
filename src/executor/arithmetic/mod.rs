@@ -177,6 +177,10 @@ impl Executor {
 
     fn eval_arithmetic_command_value_with_flags(&mut self, expression: &str, expand: bool) -> Option<i128> {
         self.arithmetic_last_error_category.set(None);
+        // Stale nested-subscript failure marker (lvalue.rs records the
+        // subscript text so evalerror reports it, GNU array_expand_index
+        // style); each new evaluation starts clean.
+        self.env_vars.remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
         // Associative subscripts are expanded first, in their own pass, and
         // replaced by an opaque literal (see expand_arithmetic_assoc_subscripts)
         // so the ordinary expansion below cannot expand them a second time and
@@ -211,13 +215,19 @@ impl Executor {
         if empty_quoted_operand_has_operator(&expression) {
             return None;
         }
+        // GNU expr.c: by the time evalexp parses, the expression text is
+        // already expanded (expand_arith_string at execute_cmd.c:3936 /
+        // subst.c for $((...))), so a surviving `$name`/`$(...)` is data
+        // that fails readtok's is_arithop check -> "operand expected"
+        // (expr.c:1503-1511), never a second command-substitution run.
+        // The parser must therefore run with no_expand in BOTH branches.
         // Save a snapshot of variable values before evaluation to detect changes.
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
             &mut self.env_vars,
             Some(&self.random_state),
-            !expand,
+            true,
         );
         self.arithmetic_last_error_category.set(category);
         self.report_arithmetic_readonly_error();
@@ -227,6 +237,82 @@ impl Executor {
         sync_arith_writes_to_shell_state(self);
 
         value
+    }
+
+    /// GNU arrayfunc.c:1353-1391 `array_expand_index` -> `evalexp`: evaluate
+    /// subscript text that has ALREADY been resolved by the caller — expanded
+    /// exactly once under `array_expand_once` (the AV_NOEXPAND branch passes
+    /// the text to `evalexp` unchanged) or expanded a second time through
+    /// `expand_arith_string` when the option is unset. The text reaches the
+    /// parser with no further shell expansion: a surviving `$(...)`, backquote
+    /// or `$name` is not a valid arithmetic token, so expr.c `readtok` /
+    /// `expr_streval` fails it as "operand expected" instead of executing it
+    /// (verified: GNU 5.3 `a[$x]=v` with `x='$(echo INJ; echo 0)'` under
+    /// `shopt -s array_expand_once` prints
+    /// `$(echo INJ; echo 0): arithmetic syntax error: operand expected` and
+    /// never runs the substitution). Variable names, operators and assignment
+    /// side effects (`a[i++]=v`) still evaluate normally and their writes
+    /// sync back to shell_state.
+    pub(in crate::executor) fn eval_indexed_subscript_expression(
+        &mut self,
+        resolved: &str,
+    ) -> Option<i128> {
+        self.arithmetic_last_error_category.set(None);
+        self.env_vars.remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
+        let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(resolved);
+        let expression = normalize_arithmetic_quotes(&with_assoc_keys);
+        *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
+        ARITH_WRITES.with(|log| log.borrow_mut().clear());
+        let (value, category) = eval_mutable_arith_value_with_random_flags(
+            &expression,
+            &mut self.env_vars,
+            Some(&self.random_state),
+            true,
+        );
+        self.arithmetic_last_error_category.set(category);
+        self.report_arithmetic_readonly_error();
+        sync_arith_writes_to_shell_state(self);
+        value
+    }
+
+    /// GNU expr.c `evalerror` -> `jump_to_top_level (DISCARD)`: an
+    /// arithmetic evaluation failure discards the rest of the command list
+    /// that contained the failing command — `a[$x]=v; echo after` never
+    /// prints `after` (verified GNU 5.3). The reader-level loop in
+    /// `execute_ast_inner` skips the commands sharing the failing command's
+    /// source line; nested lists unwind silently.
+    pub(in crate::executor) fn raise_evalerror_abort(&self) {
+        self.evalerror_pending.set(true);
+    }
+
+    /// GNU expr.c `evalerror` diagnostic for a subscript evaluated through
+    /// `array_expand_index`'s `evalexp` path (arrayfunc.c:1353-1391): the
+    /// parse stops at the first unparseable token and `lasttp` supplies the
+    /// error token verbatim, e.g.
+    /// `$x: arithmetic syntax error: operand expected (error token is "$x")`.
+    /// The token is located by re-parsing the resolved text under the same
+    /// no-expand rules with an empty env, so a surviving `$name`/`$(...)`
+    /// fails at the same byte position the real evaluation did.
+    pub(in crate::executor) fn report_indexed_subscript_error(&self, resolved: &str) {
+        // GNU evalerror prints once and longjmps DISCARD, so a word that is
+        // expanded more than once by our pipeline (eval re-parse, braced
+        // expansion retries, embedded-parameter passes) still reports only
+        // the first failure — later invocations are already dead code in
+        // GNU's model.
+        if self.evalerror_pending.get() {
+            self.raise_evalerror_abort();
+            return;
+        }
+        self.raise_evalerror_abort();
+        let token = indexed_noexpand_error_token(resolved);
+        eprintln!(
+            "{}{}: arithmetic syntax error: operand expected (error token is \"{}\")",
+            self.diagnostic_prefix(),
+            resolved,
+            token
+        );
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
     }
 
     /// Evaluate a `$(( ... ))` expansion embedded in a word. This is the
@@ -255,11 +341,14 @@ impl Executor {
         }
         // Save a snapshot to detect variable changes from arithmetic side effects
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
+        // GNU expr.c: the expansion pass above already ran, so the parser
+        // evaluates under evalexp's already-expanded rules — a surviving
+        // `$name`/`$(...)` is "operand expected" data, not a re-expansion.
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
             &mut self.env_vars,
             Some(&self.random_state),
-            false,
+            true,
         );
         self.arithmetic_last_error_category.set(category);
         self.report_arithmetic_readonly_error();
@@ -544,6 +633,31 @@ pub(in crate::executor) fn trailing_input_token(
     None
 }
 
+/// GNU expr.c `evalerror` "operand expected" token for a subscript
+/// evaluated through arrayfunc.c:1353-1391 `array_expand_index` ->
+/// `evalexp`: the parse runs under the AV_NOEXPAND rules (a surviving
+/// `$(...)`, backquote or `$name` is never expanded or executed), stops at
+/// the first unparseable token, and `lasttp` supplies the remainder of the
+/// expression verbatim as the error token. An empty env is used so a bare
+/// variable name also stops the parse at the same position it would during
+/// the real subscript evaluation.
+fn indexed_noexpand_error_token(resolved: &str) -> String {
+    let normalized = normalize_arithmetic_quotes(resolved);
+    let mut env_vars = HashMap::new();
+    let mut parser = ConditionalArithParser {
+        input: normalized.as_bytes(),
+        pos: 0,
+        env_vars: &mut env_vars,
+        resolving: Vec::new(),
+        random_state: None,
+        error_category: None,
+        no_expand: true,
+    };
+    let _ = parser.parse_comma();
+    parser.skip_ws();
+    normalized[parser.pos.min(normalized.len())..].to_string()
+}
+
 /// True when `token` starts with a character GNU's arithmetic tokenizer
 /// cannot begin a token with -- not a digit, not a `legal_variable_starter`
 /// (alpha/underscore), and not an `is_arithop` character
@@ -581,6 +695,7 @@ pub(crate) fn eval_conditional_arith_value_with_writes(
     let result = eval_mutable_arith_value(value, &mut cloned);
     let writes = cloned
         .iter()
+        .filter(|(name, _)| name.as_str() != "__RUBASH_ARITH_SUBSCRIPT_EXPR")
         .filter(|(name, new_value)| env_vars.get(name.as_str()) != Some(new_value))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
@@ -902,7 +1017,7 @@ pub(super) fn encode_arithmetic_assoc_key(key: &str) -> String {
 
 /// Decode a subscript produced by [`encode_arithmetic_assoc_key`]; `None` when
 /// `text` is ordinary user-written subscript text.
-pub(super) fn decode_arithmetic_assoc_key(text: &str) -> Option<String> {
+pub(crate) fn decode_arithmetic_assoc_key(text: &str) -> Option<String> {
     let hex = text.strip_prefix(ARITH_ASSOC_KEY_MARKER)?;
     let digits = hex.as_bytes();
     if digits.len() % 2 != 0 {

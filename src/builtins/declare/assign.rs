@@ -108,7 +108,16 @@ where
                         .get(base)
                         .cloned()
                         .unwrap_or_else(|| "()".to_string());
-                    let element = format!("([{index_expression}]={value})");
+                    // The executor pre-resolved the operand under
+                    // ExpandedOnce rules and marker-encoded the key so a
+                    // `]`/`=`/whitespace inside it cannot corrupt this
+                    // re-parse; decode it and re-quote for the compound
+                    // element text.
+                    let key =
+                        crate::executor::arithmetic::decode_arithmetic_assoc_key(index_expression)
+                            .unwrap_or_else(|| index_expression.to_string());
+                    let element =
+                        format!("([{}]={value})", super::storage::quote_assoc_key(&key));
                     variables.insert(
                         base.to_string(),
                         append_assoc_value(&current, &element, integer, variables),
