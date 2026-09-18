@@ -18,6 +18,11 @@ Key rules:
   the change unverified instead of guessing. See *GNU C source is the
   specification* below.
 - Fix by root-cause subsystem, not by individual expected-output lines.
+- **No whack-a-mole guards.** Do not extend blacklist predicates
+  (`contains`/`starts_with` admission lists) on word-level fast paths with
+  another symptom check; fix the wrong invariant or flip admission to a
+  whitelist that falls through to the real parser. See *No whack-a-mole
+  guards* below (rubash#117).
 - Keep raw suite artifacts under `target/issue-suites/results/`; keep durable
   interpretation in `docs/`.
 - Do not run full suites unbounded. Use per-test, per-file, or per-directory
@@ -114,6 +119,48 @@ Any change touching them must be justified against `parse.y:5694-5706`,
 `subst.c:1148 string_extract_verbatim()`, and validated with a full 83-suite
 ledger. A focused suite count is not enough: `$'...'`, PUA markers and carrier
 handling have regressed under edits that looked obviously safe.
+
+### No whack-a-mole guards on text-layer fast paths — converge to the real parser (rubash#117)
+
+This is a hard rule, established by rubash#117 after the quote/word-splitting
+bug family passed half of all engine bugs (#59/#60/#64/#68/#69/#70/#81/#82/
+#91/#95/#96/#97/#109/#116, niubash#119). Every one of those was produced by a
+handwritten word-level fast path that re-implements lexer semantics in text,
+and every previous fix added one more blacklist condition that missed the next
+case.
+
+**Forbidden:** "found a leak → add one more guard" fixes. If a shortcut's
+admission is decided by a growing list of `contains("X")` / `starts_with("Y")`
+conditions, do not add a sixth. Two sanctioned moves only:
+
+1. **Fix a wrong invariant.** When an existing predicate's contract is simply
+   false (example: `command_substitution_quotes_are_semantic` claimed
+   "top-level quotes only group words", but a quote wrapping `$`/`` ` ``/glob
+   also suppresses field splitting and pathname expansion), correct the
+   predicate so it covers the class — one check for the whole class, not one
+   per symptom.
+2. **Invert admission to a whitelist, or delete the shortcut.** The fast path
+   may run only when the body is provably trivial (pure literal, no quoting,
+   no expansion, no operators). Everything else goes to the real
+   parser/executor. A false positive in a whitelist only costs speed; a false
+   negative in a blacklist is a silent semantic bug.
+
+**Justification is GNU C source, not symmetry.** Before editing any
+`split_shell_words*`/`expand_aliases`-fed shortcut, open the owning GNU
+function (`subst.c:7143 command_substitute()` → `parse_and_execute`,
+`parse.y:4451 parse_comsub`, `subst.c:11229 expand_word_internal`) and state in
+the commit/PR: what GNU does here, why the shortcut is or is not equivalent.
+GNU has *no* word-level substitution shortcuts at all — the only sanctioned
+short-circuit is `parse_string_to_command`'s empty-command check. If a rubash
+shortcut exists anyway, its comment must name which GNU behavior it preserves
+and which inputs disqualify it.
+
+**Verification bar:** a diff matrix against WSL GNU Bash 5.3.0 covering the
+whole class — assignment RHS / argument position × literal / variable /
+substitution / arithmetic × with-and-without spaces — not just the new
+reproducer. A green 19/20 matrix has already shipped wrong "fixes" here
+(see the worked counter-example above); match GNU byte-for-byte on the class
+or mark the change unverified.
 
 ### Keep the measurement honest
 
