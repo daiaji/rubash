@@ -60,8 +60,7 @@ impl Executor {
         let variable_only = args.iter().any(|arg| arg == "-v");
         // GNU builtins/set.def:866-867: `unset -f` cancels -n, and -n is
         // only meaningful for variables anyway.
-        let nameref_only =
-            args.iter().any(|arg| arg == "-n") && !function_only;
+        let nameref_only = args.iter().any(|arg| arg == "-n") && !function_only;
         let names: Vec<String> = args
             .iter()
             .filter(|arg| !arg.starts_with('-'))
@@ -203,6 +202,18 @@ impl Executor {
         for name in variable_args.iter().filter(|a| !a.starts_with('-')) {
             self.shell_state.variables.remove(name);
         }
+        // GNU variables.c:6205-6217 sv_ignoreeof: unbinding the IGNOREEOF
+        // variable turns the ignoreeof option off (the option tracks
+        // "the variable is set").
+        for name in variable_args.iter().filter(|a| !a.starts_with('-')) {
+            if matches!(name.as_str(), "IGNOREEOF" | "ignoreeof") {
+                crate::builtins::set::sync_shell_option_flag(
+                    &mut self.env_vars,
+                    "ignoreeof",
+                    false,
+                );
+            }
+        }
         let raw_status = if nameref_status != 0 {
             nameref_status
         } else if function_status != 0 {
@@ -288,8 +299,7 @@ impl Executor {
                 let Some(cell) = self.env_vars.get(&last).cloned() else {
                     break;
                 };
-                if !is_marked_var(&self.env_vars, NAMEREF_VARS, &cell)
-                    || !seen.insert(cell.clone())
+                if !is_marked_var(&self.env_vars, NAMEREF_VARS, &cell) || !seen.insert(cell.clone())
                 {
                     break;
                 }
@@ -372,6 +382,15 @@ impl Executor {
             // GNU resets the attributes (att_local + att_invisible; exported
             // kept only for tempvars) — clear the live attribute marks.
             set_var_attrs(&mut self.env_vars, name, VarAttrs::default());
+            // GNU variables.c:6205-6217 sv_ignoreeof: unbinding the variable
+            // drives the ignoreeof option off.
+            if matches!(name, "IGNOREEOF" | "ignoreeof") {
+                crate::builtins::set::sync_shell_option_flag(
+                    &mut self.env_vars,
+                    "ignoreeof",
+                    false,
+                );
+            }
             return true;
         }
         let previous = self.local_var_scopes[scope_index].remove(name);
@@ -393,6 +412,10 @@ impl Executor {
             let _ = self.shell_state.variables.set(name.to_string(), variable);
         }
         set_var_attrs(&mut self.env_vars, name, attrs);
+        // Same sv_ignoreeof hook as the invisible-local branch above.
+        if matches!(name, "IGNOREEOF" | "ignoreeof") {
+            crate::builtins::set::sync_shell_option_flag(&mut self.env_vars, "ignoreeof", false);
+        }
         true
     }
 

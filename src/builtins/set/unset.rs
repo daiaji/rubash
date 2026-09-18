@@ -218,10 +218,7 @@ where
     // under -n the variable is removed only when it is itself a nameref;
     // other names are a silent no-op (the readonly/non-unsettable checks
     // above still apply to them).
-    if options.nameref
-        && !options.functions
-        && !is_marked_variable(env_vars, NAMEREF_VARS, name)
-    {
+    if options.nameref && !options.functions && !is_marked_variable(env_vars, NAMEREF_VARS, name) {
         return Ok(EXECUTION_SUCCESS);
     }
 

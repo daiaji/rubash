@@ -184,10 +184,68 @@ impl Executor {
         }
     }
 
+    /// GNU set.def:330-352 get_current_options: a bitmap over every `set -o`
+    /// option (letter flags and binary options alike). Serialized as
+    /// `name=0|1` pairs for the `-` local's value.
+    pub(in crate::executor) fn current_options_bitmap(&self) -> String {
+        crate::builtins::set::shell_option_names()
+            .map(|name| {
+                format!(
+                    "{name}={}",
+                    crate::builtins::set::shell_option_enabled(&self.env_vars, name) as u8
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\x1f")
+    }
+
+    /// GNU set.def:358-386 set_current_options: apply the bitmap saved by a
+    /// `-` local — only options whose state differs are flipped, and the
+    /// binary-option side effects run with them (set.def:388-399
+    /// set_ignoreeof binds IGNOREEOF=10 / unbinds it).
+    fn apply_options_bitmap(&mut self, bitmap: &str) {
+        for entry in bitmap.split('\x1f') {
+            let Some((name, state)) = entry.split_once('=') else {
+                continue;
+            };
+            let enabled = state == "1";
+            if crate::builtins::set::shell_option_enabled(&self.env_vars, name) == enabled {
+                continue;
+            }
+            crate::builtins::set::set_shell_option(&mut self.env_vars, name, enabled);
+            if name == "ignoreeof" {
+                // Same typed-owner mirror as the `set -o ignoreeof` path —
+                // set.def:388-399 binds IGNOREEOF=10 or unbinds it.
+                if enabled {
+                    let _ = self
+                        .shell_state
+                        .variables
+                        .set_scalar("IGNOREEOF", "10".to_string());
+                } else {
+                    self.shell_state.variables.remove("IGNOREEOF");
+                }
+            }
+            if name == "posix" {
+                self.env_vars.insert(
+                    "__RUBASH_POSIX_MODE".to_string(),
+                    if enabled { "1" } else { "0" }.to_string(),
+                );
+            }
+        }
+    }
+
     pub(in crate::executor) fn restore_function_locals(&mut self) -> HashSet<String> {
         let Some(scope) = self.local_var_scopes.pop() else {
             return HashSet::new();
         };
+        // GNU variables.c:5271-5275 (push_posix_tempvar_internal, reached via
+        // pop_var_context -> hash_flush -> push_func_var): a local `-`
+        // restores the saved `set -o` options when its frame pops.
+        if scope.contains_key("-") {
+            if let Some(bitmap) = self.env_vars.get("-").cloned() {
+                self.apply_options_bitmap(&bitmap);
+            }
+        }
         let attr_scope = self.local_attr_scopes.pop().unwrap_or_default();
         let typed_scope = self.local_typed_scopes.pop().unwrap_or_default();
         let mut names = HashSet::new();

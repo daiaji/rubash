@@ -24,7 +24,9 @@ impl Executor {
             Some(FdReadEndpoint::File(path)) => File::open(&path)
                 .map_err(|e| crate::posix_errors::path_error(&path.to_string_lossy(), e)),
             Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
-                let bytes = self.virtual_fd_stdin_remaining_bytes(fd).unwrap_or_default();
+                let bytes = self
+                    .virtual_fd_stdin_remaining_bytes(fd)
+                    .unwrap_or_default();
                 let path = self
                     .write_process_substitution_temp_bytes(&bytes)
                     .map_err(|_| {
@@ -428,6 +430,19 @@ impl Executor {
                 }
                 let enabled = prefix == '-';
                 crate::builtins::set::set_shell_option(&mut self.env_vars, option_name, enabled);
+                if option_name == "ignoreeof" {
+                    // set.def:388-399 set_ignoreeof binds/unbinds IGNOREEOF —
+                    // mirror the env write into the typed owner expansion
+                    // reads first.
+                    if enabled {
+                        let _ = self
+                            .shell_state
+                            .variables
+                            .set_scalar("IGNOREEOF", "10".to_string());
+                    } else {
+                        self.shell_state.variables.remove("IGNOREEOF");
+                    }
+                }
                 if option_name == "posix" {
                     self.env_vars.insert(
                         "__RUBASH_POSIX_MODE".to_string(),

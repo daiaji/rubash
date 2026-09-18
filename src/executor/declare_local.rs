@@ -250,9 +250,7 @@ impl Executor {
                         return false;
                     };
                     index = sub_end + 1;
-                    if bytes.get(index) == Some(&b'+')
-                        && bytes.get(index + 1) == Some(&b'=')
-                    {
+                    if bytes.get(index) == Some(&b'+') && bytes.get(index + 1) == Some(&b'=') {
                         return true;
                     }
                     return bytes.get(index) == Some(&b'=');
@@ -310,8 +308,7 @@ impl Executor {
                 let compound = value
                     .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
                     .unwrap_or(value);
-                let is_compound =
-                    compound.starts_with('(') && compound.ends_with(')');
+                let is_compound = compound.starts_with('(') && compound.ends_with(')');
                 if lhs.contains('[') {
                     // GNU subst.c:3599-3605: `name[sub]=(list)` fails
                     // "cannot assign list to array member" before the
@@ -345,11 +342,8 @@ impl Executor {
                     } else {
                         OperandSubscriptMode::AlwaysExpand
                     };
-                    let rewritten = self.rewrite_operand_subscript_typed(
-                        lhs,
-                        mode,
-                        Some(operand_assoc),
-                    )?;
+                    let rewritten =
+                        self.rewrite_operand_subscript_typed(lhs, mode, Some(operand_assoc))?;
                     return Ok(format!(
                         "{rewritten}{}={value}",
                         if append { "+" } else { "" }
@@ -365,8 +359,7 @@ impl Executor {
                 // declare argument text was not pre-expanded by assignment
                 // word expansion on this path, so the resolver runs its
                 // non-preexpanded (declare) model.
-                let assoc = assoc_hint
-                    || is_marked_var(&self.env_vars, ASSOC_VARS, lhs);
+                let assoc = assoc_hint || is_marked_var(&self.env_vars, ASSOC_VARS, lhs);
                 let rewritten = self
                     .rewrite_compound_element_subscripts(lhs, compound, assoc, false)
                     .ok_or(())?;
@@ -395,9 +388,7 @@ impl Executor {
             self.sync_dirstack_cell();
         }
         let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
-        let mut args = match self
-            .rewrite_declare_operand_subscripts(&args, &cmd.word_metadata)
-        {
+        let mut args = match self.rewrite_declare_operand_subscripts(&args, &cmd.word_metadata) {
             Ok(args) => args,
             // array_expand_index -> evalexp failure: diagnostic + evalerror
             // abort already raised; GNU discards the rest of the list.
@@ -493,10 +484,9 @@ impl Executor {
             // take the same transform: the resolved name is localized before
             // the attribute pass marks it.
             if !nameref_flag {
-                for target in crate::builtins::declare::nameref_resolved_operand_names(
-                    &args,
-                    &self.env_vars,
-                ) {
+                for target in
+                    crate::builtins::declare::nameref_resolved_operand_names(&args, &self.env_vars)
+                {
                     let local_name = target.split('[').next().unwrap_or(&target);
                     if !local_name.is_empty() {
                         self.save_frame_local_name(local_name);
@@ -637,8 +627,7 @@ impl Executor {
             2
         } else {
             let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
-            let mut args = match self
-                .rewrite_declare_operand_subscripts(&args, &cmd.word_metadata)
+            let mut args = match self.rewrite_declare_operand_subscripts(&args, &cmd.word_metadata)
             {
                 Ok(args) => args,
                 Err(()) => return Ok(1),
@@ -646,11 +635,35 @@ impl Executor {
             if declare_args_request_integer(&args) {
                 args = self.evaluate_declare_integer_assignment_args(&args);
             }
+            // GNU declare.def:443-455: a bare `-` operand creates a local `-`
+            // variable whose value is the current `set -o` option bitmap;
+            // pop_var_context applies it through set_current_options
+            // (variables.c:5271-5275). Outside -p mode the operand is handled
+            // here and stripped — the declare parser would treat it as a flag
+            // bundle. In -p mode it stays for show_localname_attributes.
+            let mut had_dash_operand = false;
+            if !declare_args_request_print(&args) && args.iter().any(|arg| arg == "-") {
+                had_dash_operand = true;
+                // "no duplicate instances" (declare.def:451): a second
+                // `local -` in the same frame keeps the first snapshot.
+                if self
+                    .local_var_scopes
+                    .last()
+                    .is_none_or(|scope| !scope.contains_key("-"))
+                {
+                    self.save_frame_local_name("-");
+                    let bitmap = self.current_options_bitmap();
+                    self.env_vars.insert("-".to_string(), bitmap.clone());
+                    let _ = self.shell_state.variables.set_scalar("-", bitmap);
+                }
+                args.retain(|arg| arg != "-");
+            }
+            let mut dash_printed = false;
             // GNU local / local -p with no name arguments prints ONLY the
             // variables declared local to the current function frame (sorted,
             // declare -- form) -- never the whole variable table. Rewrite
             // the args so the shared declare printer renders just those names.
-            if local_names(&args).is_empty() {
+            if !had_dash_operand && local_names(&args).is_empty() {
                 let local_names: Vec<String> = self
                     .local_var_scopes
                     .last()
@@ -672,9 +685,21 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                     return Ok(0);
                 }
-                args.clear();
-                args.push("-p".to_string());
-                args.extend(local_names);
+                // GNU setattr.def:375-378: the `-` local prints as `local -`,
+                // not a declare-style assignment line.
+                let mut local_names = local_names;
+                if let Some(position) = local_names.iter().position(|name| name == "-") {
+                    local_names.remove(position);
+                    writeln!(stdout, "local -")?;
+                    dash_printed = true;
+                }
+                if !local_names.is_empty() {
+                    args.clear();
+                    args.push("-p".to_string());
+                    args.extend(local_names);
+                } else {
+                    args.clear();
+                }
             }
             // GNU setattr.def:555-570 show_localname_attributes:
             // `local -p name` reports the operand only when it is a local at
@@ -687,6 +712,19 @@ impl Executor {
             if declare_args_request_print(&args) && !local_names(&args).is_empty() {
                 let innermost = self.local_var_scopes.last();
                 args.retain(|arg| {
+                    // GNU setattr.def:564-568: a `-` operand to `local -p`
+                    // prints `local -` when the frame holds the option-snapshot
+                    // local (created by `local -` above).
+                    if arg == "-" {
+                        let found = innermost.is_some_and(|scope| scope.contains_key("-"));
+                        if found {
+                            writeln!(stdout, "local -").ok();
+                            dash_printed = true;
+                        } else {
+                            print_missing.push("-".to_string());
+                        }
+                        return false;
+                    }
                     if arg.starts_with('-') || arg.starts_with('+') {
                         return true;
                     }
@@ -737,7 +775,11 @@ impl Executor {
                 pre_existing.extend(self.tempenv_names.iter().cloned());
                 frame_locals.clone_from(&pre_existing);
                 self.save_local_names(&args);
-                self.promote_tempenv_locals(&args, &prefix_assignment_names, &scope_keys_before_save);
+                self.promote_tempenv_locals(
+                    &args,
+                    &prefix_assignment_names,
+                    &scope_keys_before_save,
+                );
                 if !local_args_request_inherit(&args) {
                     self.initialize_non_inherited_locals(
                         &args,
@@ -758,29 +800,37 @@ impl Executor {
                     self.diagnostic_prefix()
                 )?;
             }
-            let (status, builtin_status) =
-                if (!local_blocked.is_empty() || !print_missing.is_empty())
-                    && local_names(&args).is_empty()
-                {
-                    (1, 0)
-                } else {
-                    let builtin_status =
-                        crate::builtins::declare::execute_with_io_named_in_context(
-                            "local",
-                            &args,
-                            &mut self.env_vars,
-                            &mut stdout,
-                            &mut stderr,
-                            true,
-                            &frame_locals,
-                        )?;
-                    let status = if local_blocked.is_empty() && print_missing.is_empty() {
-                        builtin_status
+            let (status, builtin_status) = if local_names(&args).is_empty()
+                && (had_dash_operand
+                    || dash_printed
+                    || !local_blocked.is_empty()
+                    || !print_missing.is_empty())
+            {
+                (
+                    if local_blocked.is_empty() && print_missing.is_empty() {
+                        0
                     } else {
-                        builtin_status.max(1)
-                    };
-                    (status, builtin_status)
+                        1
+                    },
+                    0,
+                )
+            } else {
+                let builtin_status = crate::builtins::declare::execute_with_io_named_in_context(
+                    "local",
+                    &args,
+                    &mut self.env_vars,
+                    &mut stdout,
+                    &mut stderr,
+                    true,
+                    &frame_locals,
+                )?;
+                let status = if local_blocked.is_empty() && print_missing.is_empty() {
+                    builtin_status
+                } else {
+                    builtin_status.max(1)
                 };
+                (status, builtin_status)
+            };
             if builtin_status == 0 {
                 // Plain scalar locals must shadow the outer value in the typed
                 // owner as well: parameter expansion reads shell_state.variables
@@ -881,7 +931,11 @@ impl Executor {
             if !self.env_vars.contains_key(&name) {
                 continue;
             }
-            if !self.tempenv_promoted_names.iter().any(|saved| saved == &name) {
+            if !self
+                .tempenv_promoted_names
+                .iter()
+                .any(|saved| saved == &name)
+            {
                 self.tempenv_promoted_names.push(name.clone());
             }
             // A name that was already a frame local keeps the snapshot its
@@ -890,8 +944,7 @@ impl Executor {
             if scope_keys_before_save.iter().any(|saved| saved == &name) {
                 continue;
             }
-            if let Some((env_value, typed_value, attrs)) =
-                self.tempenv_previous.get(&name).cloned()
+            if let Some((env_value, typed_value, attrs)) = self.tempenv_previous.get(&name).cloned()
             {
                 if let Some(scope) = self.local_var_scopes.last_mut() {
                     scope.insert(name.clone(), env_value);

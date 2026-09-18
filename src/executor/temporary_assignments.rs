@@ -153,9 +153,7 @@ impl Executor {
             // (nameref11.sub: `declare -n r; r=/ f` shows `declare -x r="/"`
             // inside f and restores the empty nameref afterwards). A readonly
             // original still rejects the binding via ASSIGN_DISALLOWED.
-            if resolved_target.is_none()
-                && is_marked_var(&self.env_vars, NAMEREF_VARS, base_name)
-            {
+            if resolved_target.is_none() && is_marked_var(&self.env_vars, NAMEREF_VARS, base_name) {
                 if is_marked_var(&self.env_vars, READONLY_VARS, base_name) {
                     let line = format!(
                         "{}{base_name}: readonly variable
@@ -167,10 +165,10 @@ impl Executor {
                 }
                 self.env_vars
                     .insert(base_name.to_string(), expanded_value.clone());
-                let _ = self
-                    .shell_state
-                    .variables
-                    .set(base_name.to_string(), crate::shell::Variable::scalar(expanded_value.clone()));
+                let _ = self.shell_state.variables.set(
+                    base_name.to_string(),
+                    crate::shell::Variable::scalar(expanded_value.clone()),
+                );
                 unmark_env_name(&mut self.env_vars, NAMEREF_VARS, base_name);
                 self.tempenv_names.push(base_name.to_string());
                 self.mark_exported(base_name);
@@ -194,10 +192,10 @@ impl Executor {
                 }
                 self.env_vars
                     .insert(base_name.to_string(), compound.to_string());
-                let _ = self
-                    .shell_state
-                    .variables
-                    .set(base_name.to_string(), crate::shell::Variable::scalar(compound.to_string()));
+                let _ = self.shell_state.variables.set(
+                    base_name.to_string(),
+                    crate::shell::Variable::scalar(compound.to_string()),
+                );
                 self.tempenv_names.push(base_name.to_string());
                 self.mark_exported(base_name);
                 continue;
@@ -253,13 +251,7 @@ impl Executor {
                 return false;
             }
             return self.apply_nameref_array_element_assignment(
-                &cell,
-                subscript,
-                value,
-                append,
-                integer,
-                false,
-                false,
+                &cell, subscript, value, append, integer, false, false,
             );
         }
         // GNU variables.c:3241-3280 bind_variable walks function contexts
@@ -738,6 +730,13 @@ impl Executor {
         }
         if base_name == "OPTIND" && !append {
             self.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
+        }
+        // GNU variables.c:6205-6217 sv_ignoreeof (the IGNOREEOF/ignoreeof
+        // special-variable hook): assigning the variable turns the
+        // ignoreeof option on — the option is "the variable is set", so
+        // even `IGNOREEOF=` enables it.
+        if matches!(base_name, "IGNOREEOF" | "ignoreeof") && !append {
+            crate::builtins::set::sync_shell_option_flag(&mut self.env_vars, "ignoreeof", true);
         }
         if base_name == "SECONDS" && !append {
             let assigned = value.trim().parse::<i64>().unwrap_or(0);

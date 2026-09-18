@@ -8,7 +8,8 @@ mod unset;
 
 pub(crate) use options::{
     is_shell_option, print_shell_option, print_shell_options, print_shell_options_by_state,
-    set_shell_option, shell_option_enabled, shellopts_value,
+    set_shell_option, shell_option_enabled, shell_option_names, shellopts_value,
+    sync_shell_option_flag, SET_O_PRINT_WIDTH, SHOPT_O_PRINT_WIDTH,
 };
 pub use unset::unset;
 pub(crate) use unset::unset_with_stderr;
@@ -131,7 +132,7 @@ where
                         set_shell_option(env_vars, name, prefix == '-');
                         index += 1;
                     }
-                    _ => print_shell_options(env_vars, prefix == '+', stdout)?,
+                    _ => print_shell_options(env_vars, prefix == '+', SET_O_PRINT_WIDTH, stdout)?,
                 }
                 break;
             }

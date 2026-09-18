@@ -192,15 +192,38 @@ where
     if names.is_empty() {
         match mode {
             ShoptMode::Set if print => {
-                crate::builtins::set::print_shell_options_by_state(env_vars, true, true, stdout)?;
+                crate::builtins::set::print_shell_options_by_state(
+                    env_vars,
+                    true,
+                    true,
+                    crate::builtins::set::SHOPT_O_PRINT_WIDTH,
+                    stdout,
+                )?;
             }
             ShoptMode::Unset if print => {
-                crate::builtins::set::print_shell_options_by_state(env_vars, false, true, stdout)?;
+                crate::builtins::set::print_shell_options_by_state(
+                    env_vars,
+                    false,
+                    true,
+                    crate::builtins::set::SHOPT_O_PRINT_WIDTH,
+                    stdout,
+                )?;
             }
             ShoptMode::Unset => {
-                crate::builtins::set::print_shell_options_by_state(env_vars, false, false, stdout)?;
+                crate::builtins::set::print_shell_options_by_state(
+                    env_vars,
+                    false,
+                    false,
+                    crate::builtins::set::SHOPT_O_PRINT_WIDTH,
+                    stdout,
+                )?;
             }
-            _ => crate::builtins::set::print_shell_options(env_vars, print, stdout)?,
+            _ => crate::builtins::set::print_shell_options(
+                env_vars,
+                print,
+                crate::builtins::set::SHOPT_O_PRINT_WIDTH,
+                stdout,
+            )?,
         }
         return Ok(status);
     }
@@ -228,7 +251,13 @@ where
                 {
                     status = EXECUTION_FAILURE;
                 }
-                crate::builtins::set::print_shell_option(env_vars, name, print, stdout)?;
+                crate::builtins::set::print_shell_option(
+                    env_vars,
+                    name,
+                    print,
+                    crate::builtins::set::SHOPT_O_PRINT_WIDTH,
+                    stdout,
+                )?;
             }
             ShoptMode::Query if !crate::builtins::set::shell_option_enabled(env_vars, name) => {
                 status = EXECUTION_FAILURE;

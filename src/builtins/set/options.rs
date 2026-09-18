@@ -129,9 +129,16 @@ const SHELL_OPTIONS: &[ShellOption] = &[
     },
 ];
 
+// GNU prints `set -o` listings with MINUS_O_FORMAT "%-15s\t%s\n"
+// (builtins/set.def:281) and `shopt -o` listings with OPTFMT "%-20s\t%s\n"
+// (builtins/shopt.def:73) — the caller supplies the column width.
+pub(crate) const SET_O_PRINT_WIDTH: usize = 15;
+pub(crate) const SHOPT_O_PRINT_WIDTH: usize = 20;
+
 pub(crate) fn print_shell_options<W>(
     env_vars: &HashMap<String, String>,
     recreate: bool,
+    width: usize,
     stdout: &mut W,
 ) -> io::Result<()>
 where
@@ -149,9 +156,10 @@ where
         } else {
             writeln!(
                 stdout,
-                "{:<15}\t{}",
+                "{:<width$}\t{}",
                 option,
-                if enabled { "on" } else { "off" }
+                if enabled { "on" } else { "off" },
+                width = width
             )?;
         }
     }
@@ -163,6 +171,7 @@ pub(crate) fn print_shell_options_by_state<W>(
     env_vars: &HashMap<String, String>,
     enabled_state: bool,
     recreate: bool,
+    width: usize,
     stdout: &mut W,
 ) -> io::Result<()>
 where
@@ -182,9 +191,10 @@ where
         } else {
             writeln!(
                 stdout,
-                "{:<15}\t{}",
+                "{:<width$}\t{}",
                 option,
-                if enabled_state { "on" } else { "off" }
+                if enabled_state { "on" } else { "off" },
+                width = width
             )?;
         }
     }
@@ -195,6 +205,7 @@ pub(crate) fn print_shell_option<W>(
     env_vars: &HashMap<String, String>,
     name: &str,
     recreate: bool,
+    width: usize,
     stdout: &mut W,
 ) -> io::Result<Option<()>>
 where
@@ -209,9 +220,10 @@ where
     } else {
         writeln!(
             stdout,
-            "{:<15}\t{}",
+            "{:<width$}\t{}",
             name,
-            if enabled { "on" } else { "off" }
+            if enabled { "on" } else { "off" },
+            width = width
         )?;
     }
     Ok(Some(()))
@@ -252,12 +264,37 @@ pub(crate) fn shellopts_value(env_vars: &HashMap<String, String>) -> String {
         .join(":")
 }
 
+/// GNU variables.c:6205-6217 sv_ignoreeof direction: set only the option
+/// flag (+ SHELLOPTS) without running the binary-option side effects —
+/// used when the VARIABLE was assigned/unset rather than the option.
+pub(crate) fn sync_shell_option_flag(
+    env_vars: &mut HashMap<String, String>,
+    name: &str,
+    enabled: bool,
+) {
+    env_vars.insert(
+        shell_option_key(name),
+        if enabled { "1" } else { "0" }.to_string(),
+    );
+    env_vars.insert("SHELLOPTS".to_string(), shellopts_value(env_vars));
+}
+
 pub(crate) fn set_shell_option(env_vars: &mut HashMap<String, String>, name: &str, enabled: bool) {
     env_vars.insert(
         shell_option_key(name),
         if enabled { "1" } else { "0" }.to_string(),
     );
     env_vars.insert("SHELLOPTS".to_string(), shellopts_value(env_vars));
+    // GNU builtins/set.def:388-399 set_ignoreeof: `set -o ignoreeof` binds
+    // IGNOREEOF=10 (which sv_ignoreeof then reads back); `set +o` unbinds
+    // the variable entirely.
+    if name == "ignoreeof" {
+        if enabled {
+            env_vars.insert("IGNOREEOF".to_string(), "10".to_string());
+        } else {
+            env_vars.remove("IGNOREEOF");
+        }
+    }
     if name == "restricted" && enabled {
         // GNU shell.c maybe_make_restricted (shell.c:1278-1299): PATH, SHELL,
         // ENV, BASH_ENV and HISTFILE become read-only; CDPATH is untouched.
