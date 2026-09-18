@@ -93,6 +93,85 @@ impl Executor {
         let mut subshell_variables = None;
         let mut subshell_positional: Option<Vec<String>> = None;
         let mut subshell_loop_depth: Option<usize> = None;
+        // GNU execute_cmd.c: `exit` and an errexit trigger unwind the shell
+        // via jump_to_top_level (exit.def:152 EXITBLTIN, execute_cmd.c:1174
+        // ERREXIT) — they are never a plain command status. The jump stops
+        // only at a shell boundary. A flat `( )` region (f() ( list ) bodies
+        // mark commands with `subshell`/`subshell_end`) is a boundary this
+        // frame owns: absorb the status there, restore the parent state
+        // saved at region entry, and resume past the region. Everywhere
+        // else the jump keeps unwinding to the caller — an enclosing `( )`
+        // command node (execute_subshell_command_with_redirects), pipeline
+        // stage, command substitution, or the process top level.
+        macro_rules! handle_exit_code {
+            ($code:expr, $command:expr) => {{
+                let code = $code;
+                if self.parse_error_occurred || subshell_env.is_none() {
+                    return Err(ExecuteError::ExitCode(code));
+                }
+                self.exit_code = code;
+                // The region is dead: fast-forward to its closing command.
+                // If none exists the region is malformed — keep unwinding.
+                while index + 1 < ast.commands.len()
+                    && !ast.commands[index + 1].subshell_end
+                {
+                    index += 1;
+                }
+                if index + 1 < ast.commands.len() {
+                    index += 1;
+                } else if !$command.subshell_end {
+                    return Err(ExecuteError::ExitCode(code));
+                }
+                if let Some((old_stdin, old_offset)) = subshell_stdin.take() {
+                    if old_stdin.is_empty() {
+                        self.env_vars.remove(FUNCTION_STDIN);
+                        self.env_vars.remove(FUNCTION_STDIN_OFFSET);
+                    } else {
+                        self.env_vars.insert(FUNCTION_STDIN.to_string(), old_stdin);
+                        self.env_vars
+                            .insert(FUNCTION_STDIN_OFFSET.to_string(), old_offset);
+                    }
+                }
+                if let Some(saved_env) = subshell_env.take() {
+                    self.restore_shell_env(saved_env);
+                }
+                if let Some(saved_pipestatus) = subshell_pipestatus.take() {
+                    self.pipestatus = saved_pipestatus;
+                }
+                if let Some(saved_depth) = subshell_depth.take() {
+                    self.subshell_depth.set(saved_depth);
+                }
+                if let Some(saved_dir) = subshell_cwd.take() {
+                    let _ = env::set_current_dir(saved_dir);
+                }
+                if let Some(saved_variables) = subshell_variables.take() {
+                    self.shell_state.variables = saved_variables;
+                }
+                if let Some(saved_positional) = subshell_positional.take() {
+                    self.set_positional_params(saved_positional);
+                }
+                if let Some(saved_loop_depth) = subshell_loop_depth.take() {
+                    self.loop_depth = saved_loop_depth;
+                }
+                // The dead subshell's status is a failing command status in
+                // the parent: under `set -e` it exits the script unless the
+                // command sits in a suppressing `!`/&&/|| context
+                // (execute_cmd.c:1170-1175, set-e1.sub `(exit 17)`).
+                if self.exit_code != 0
+                    && crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit")
+                    && self.suppress_errexit == 0
+                    && !$command.inverted
+                    && $command.and_or().is_none()
+                {
+                    return Err(ExecuteError::ExitCode(self.exit_code));
+                }
+                // Resume past the region's closing command — the subshell
+                // died at the exit, so its tail must not run.
+                index += 1;
+                continue;
+            }};
+        }
+
         while index < ast.commands.len() {
             let command = &ast.commands[index];
             // GNU expr.c evalerror -> jump_to_top_level (DISCARD): while an
@@ -220,6 +299,41 @@ impl Executor {
                 }
                 index += 1;
                 continue;
+            }
+
+            // A `subshell`-flagged command opens this frame's flat `( )`
+            // region (f() ( list ) bodies): save the parent state BEFORE any
+            // dispatch runs it, so compound commands inside the region get
+            // the same isolation as the simple-command path below — GNU
+            // executes the whole list in the forked subshell
+            // (execute_cmd.c:1576 execute_in_subshell).
+            if command.subshell && subshell_env.is_none() {
+                subshell_env = Some(self.env_vars.clone());
+                subshell_cwd = env::current_dir().ok();
+                subshell_variables = Some(self.shell_state.variables.clone());
+                subshell_positional = Some(self.positional_params.clone());
+                subshell_loop_depth = Some(self.loop_depth);
+                self.loop_depth = 0;
+                crate::builtins::trap::reset_for_subshell(&mut self.env_vars);
+                subshell_pipestatus = Some(self.pipestatus.clone());
+                let old_depth = self.subshell_depth.get();
+                subshell_depth = Some(old_depth);
+                self.subshell_depth.set(old_depth + 1);
+                // Feed subshell group stdin redirect to all body commands
+                let old_fn = self.env_vars.get(FUNCTION_STDIN).cloned();
+                let old_fno = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+                subshell_stdin = Some((old_fn.unwrap_or_default(), old_fno.unwrap_or_default()));
+                for fwd in index + 1..ast.commands.len() {
+                    let c = &ast.commands[fwd];
+                    if c.subshell_end {
+                        if let Some(input) = self.command_input_redirect(c) {
+                            self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+                            self.env_vars
+                                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+                        }
+                        break;
+                    }
+                }
             }
 
             // Execute DEBUG trap before each command, mirroring Bash:
@@ -412,11 +526,7 @@ impl Executor {
                         self.exit_code = 1;
                     }
                     Err(ExecuteError::ExitCode(code)) => {
-                        if self.parse_error_occurred {
-                            // Syntax error - terminate script (GNU Bash behavior)
-                            return Err(ExecuteError::ExitCode(code));
-                        }
-                        self.exit_code = code;
+                        handle_exit_code!(code, command)
                     }
                     Err(error) => return Err(error),
                 }
@@ -474,11 +584,7 @@ impl Executor {
                         self.exit_code = 1;
                     }
                     Err(ExecuteError::ExitCode(code)) => {
-                        if self.parse_error_occurred {
-                            // Syntax error - terminate script (GNU Bash behavior)
-                            return Err(ExecuteError::ExitCode(code));
-                        }
-                        self.exit_code = code;
+                        handle_exit_code!(code, command)
                     }
                     Err(error) => return Err(error),
                 }
@@ -522,11 +628,7 @@ impl Executor {
                         self.exit_code = 1;
                     }
                     Err(ExecuteError::ExitCode(code)) => {
-                        if self.parse_error_occurred {
-                            // Syntax error - terminate script (GNU Bash behavior)
-                            return Err(ExecuteError::ExitCode(code));
-                        }
-                        self.exit_code = code;
+                        handle_exit_code!(code, command)
                     }
                     Err(error) => return Err(error),
                 }
@@ -574,11 +676,7 @@ impl Executor {
                         self.exit_code = 1;
                     }
                     Err(ExecuteError::ExitCode(code)) => {
-                        if self.parse_error_occurred {
-                            // Syntax error - terminate script (GNU Bash behavior)
-                            return Err(ExecuteError::ExitCode(code));
-                        }
-                        self.exit_code = code;
+                        handle_exit_code!(code, command)
                     }
                     Err(error) => return Err(error),
                 }
@@ -642,11 +740,7 @@ impl Executor {
                         self.exit_code = 1;
                     }
                     Err(ExecuteError::ExitCode(code)) => {
-                        if self.parse_error_occurred {
-                            // Syntax error - terminate script (GNU Bash behavior)
-                            return Err(ExecuteError::ExitCode(code));
-                        }
-                        self.exit_code = code;
+                        handle_exit_code!(code, command)
                     }
                     Err(ExecuteError::LastpipeExit(code)) => {
                         // Issue #74 (G2): `exit N` in a lastpipe stage runs in
@@ -722,24 +816,7 @@ impl Executor {
                         self.exit_code = 1;
                     }
                     Err(ExecuteError::ExitCode(code)) => {
-                        if self.parse_error_occurred {
-                            // Syntax error - terminate script (GNU Bash behavior)
-                            return Err(ExecuteError::ExitCode(code));
-                        }
-                        self.exit_code = code;
-                        // GNU execute_cmd.c:1170-1175 (cm_group path) and
-                        // execute_connection (execute_cmd.c:2300+) for the
-                        // final command in an &&/|| list: if errexit is
-                        // active and the list's exit status is non-zero,
-                        // jump_to_top_level (ERREXIT) exits the shell.
-                        if self.errexit_enabled()
-                            && self.errexit_is_active()
-                            && self.suppress_errexit == 0
-                            && self.exit_code != 0
-                            && !command.inverted
-                        {
-                            return Err(ExecuteError::ExitCode(self.exit_code));
-                        }
+                        handle_exit_code!(code, command)
                     }
                     Err(error) => return Err(error),
                 }
@@ -792,11 +869,7 @@ impl Executor {
                     self.exit_code = 1;
                 }
                 Err(ExecuteError::ExitCode(code)) => {
-                    if self.parse_error_occurred {
-                        // Syntax error - terminate script (GNU Bash behavior)
-                        return Err(ExecuteError::ExitCode(code));
-                    }
-                    self.exit_code = code;
+                    handle_exit_code!(code, command)
                 }
                 Err(error) => return Err(error),
             }
@@ -842,35 +915,6 @@ impl Executor {
                     self.exit_code = 1;
                 }
                 Err(error) => return Err(error),
-            }
-
-            if command.subshell && subshell_env.is_none() {
-                subshell_env = Some(self.env_vars.clone());
-                subshell_cwd = env::current_dir().ok();
-                subshell_variables = Some(self.shell_state.variables.clone());
-                subshell_positional = Some(self.positional_params.clone());
-                subshell_loop_depth = Some(self.loop_depth);
-                self.loop_depth = 0;
-                crate::builtins::trap::reset_for_subshell(&mut self.env_vars);
-                subshell_pipestatus = Some(self.pipestatus.clone());
-                let old_depth = self.subshell_depth.get();
-                subshell_depth = Some(old_depth);
-                self.subshell_depth.set(old_depth + 1);
-                // Feed subshell group stdin redirect to all body commands
-                let old_fn = self.env_vars.get(FUNCTION_STDIN).cloned();
-                let old_fno = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-                subshell_stdin = Some((old_fn.unwrap_or_default(), old_fno.unwrap_or_default()));
-                for fwd in index + 1..ast.commands.len() {
-                    let c = &ast.commands[fwd];
-                    if c.subshell_end {
-                        if let Some(input) = self.command_input_redirect(c) {
-                            self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-                            self.env_vars
-                                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
-                        }
-                        break;
-                    }
-                }
             }
 
             drop(_t_chain);
@@ -949,11 +993,14 @@ impl Executor {
                         return Err(ExecuteError::ExitCode(1));
                     }
                 }
+                Err(ExecuteError::ExitCode(code)) => {
+                    handle_exit_code!(code, command)
+                }
                 // Bash runs a subshell with errexit active; when a command
                 // fails inside the subshell the subshell exits with that
                 // status but the parent script continues. Catch the error at
                 // the subshell boundary instead of propagating it.
-                Err(ExecuteError::ExitCode(code)) | Err(ExecuteError::ExpansionFailure(code))
+                Err(ExecuteError::ExpansionFailure(code))
                     if subshell_env.is_some() =>
                 {
                     self.exit_code = code;
