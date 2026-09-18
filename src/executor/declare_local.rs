@@ -406,6 +406,10 @@ impl Executor {
         if declare_args_request_integer(&args) {
             args = self.evaluate_declare_integer_assignment_args(&args);
         }
+        // Names that were already local at this frame BEFORE this command's
+        // save_local_names ran -- the `var->context == variable_context` test
+        // in declare.def:655/850. Empty at global scope.
+        let mut frame_locals: Vec<String> = Vec::new();
         if self.function_depth > 0
             && !declare_args_force_global(&args)
             && !declare_args_request_print(&args)
@@ -426,6 +430,7 @@ impl Executor {
             // the candidate cell and is validated) rather than resetting a
             // fresh empty local.
             pre_existing.extend(self.tempenv_names.iter().cloned());
+            frame_locals.clone_from(&pre_existing);
             self.save_local_names(&args);
             if !local_args_request_inherit(&args) {
                 self.initialize_non_inherited_locals(
@@ -451,6 +456,33 @@ impl Executor {
         } else {
             crate::builtins::declare::nameref_assignment_targets(&args, &self.env_vars)
         };
+        // GNU declare.def:623-660 declare_transform_name +
+        // make_local_variable: at function scope an assignment operand that
+        // resolves through a nameref binds a LOCAL variable at the current
+        // context -- `declare r=/` on r->x creates local x and the global x
+        // is restored when the frame returns (nameref20.sub f() cases).
+        if self.function_depth > 0 && !declare_args_force_global(&args) {
+            for (_, target) in &nameref_assign_targets {
+                let local_name = target.split('[').next().unwrap_or(target);
+                if !local_name.is_empty() {
+                    self.save_frame_local_name(local_name);
+                }
+            }
+            // Attribute-only operands (`declare -a ref`, bare `declare ref`)
+            // take the same transform: the resolved name is localized before
+            // the attribute pass marks it.
+            if !nameref_flag {
+                for target in crate::builtins::declare::nameref_resolved_operand_names(
+                    &args,
+                    &self.env_vars,
+                ) {
+                    let local_name = target.split('[').next().unwrap_or(&target);
+                    if !local_name.is_empty() {
+                        self.save_frame_local_name(local_name);
+                    }
+                }
+            }
+        }
 
         let result = (|| -> Result<i32, ExecuteError> {
             let mut stdout = Vec::new();
@@ -462,6 +494,7 @@ impl Executor {
                 &mut stdout,
                 &mut stderr,
                 self.function_depth > 0,
+                &frame_locals,
             )?;
             let stderr = if self.stdout_capture.is_some()
                 && declare_args_request_print(&args)
@@ -604,6 +637,7 @@ impl Executor {
                 args.push("-p".to_string());
                 args.extend(local_names);
             }
+            let mut frame_locals: Vec<String> = Vec::new();
             if !declare_args_request_print(&args) {
                 let prefix_assignment_names = cmd
                     .assignment_keys()
@@ -617,6 +651,7 @@ impl Executor {
                 // Same tempenv visibility as the declare path above: names
                 // bound by `name=value cmd` are live at this context.
                 pre_existing.extend(self.tempenv_names.iter().cloned());
+                frame_locals.clone_from(&pre_existing);
                 self.save_local_names(&args);
                 if !local_args_request_inherit(&args) {
                     self.initialize_non_inherited_locals(
@@ -638,6 +673,7 @@ impl Executor {
                 &mut stdout,
                 &mut stderr,
                 true,
+                &frame_locals,
             )?;
             if status == 0 {
                 // Plain scalar locals must shadow the outer value in the typed

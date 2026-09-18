@@ -330,6 +330,26 @@ impl Executor {
                 {
                     return arg.clone();
                 }
+                // GNU variables.c bind_variable_internal: the nameref cell
+                // check runs on the RAW operand text before
+                // bind_variable_value applies the integer evaluation, so
+                // `declare -i foo=7*6` on a valueless nameref reports
+                // `` `7*6': not a valid identifier `` — not `` `42' ``
+                // (nameref12.sub:58). Only a chain that resolves keeps the
+                // early evaluation; an unusable cell (Unresolved/MaxDepth)
+                // must reach declare.rs's valid_nameref_value check raw.
+                let base = name
+                    .strip_suffix('+')
+                    .unwrap_or(name)
+                    .split('[')
+                    .next()
+                    .unwrap_or(name);
+                if matches!(
+                    self.nameref_resolution(base),
+                    NamerefResolution::Unresolved | NamerefResolution::MaxDepth
+                ) {
+                    return arg.clone();
+                }
                 format!("{name}={}", self.eval_integer_assignment_value(value))
             })
             .collect()

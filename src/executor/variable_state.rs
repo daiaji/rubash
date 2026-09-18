@@ -96,6 +96,30 @@ impl Executor {
         NamerefResolution::MaxDepth
     }
 
+    /// GNU variables.c:2182 find_variable_nameref_for_create: returns the
+    /// cell text of the LAST nameref in the chain when the chain stops on
+    /// a missing/empty/invalid cell — the value `sh_invalidid` reports for
+    /// `ref[k]=v` on an unassigned nameref (`': not a valid identifier`).
+    pub(in crate::executor) fn last_nameref_cell(&self, name: &str) -> Option<String> {
+        let mut current = name.to_string();
+        for _ in 0..9 {
+            if !is_marked_var(&self.env_vars, NAMEREF_VARS, &current) {
+                return None;
+            }
+            let cell = self.env_vars.get(&current).cloned().unwrap_or_default();
+            if cell.is_empty()
+                || (!is_shell_name(&cell) && parse_array_subscript(&cell).is_none())
+            {
+                return Some(cell);
+            }
+            if cell == current || cell == name {
+                return None;
+            }
+            current = cell;
+        }
+        None
+    }
+
     /// GNU variables.c:2011 find_variable_nameref: when a nameref chain
     /// resolves back onto itself, the fallback is the GLOBAL variable of the
     /// name that closed the loop, searched without following namerefs
@@ -133,6 +157,24 @@ impl Executor {
     /// shadowed global value.
     pub(in crate::executor) fn circular_fallback_value(&self, name: &str) -> Option<String> {
         let fallback = self.nameref_circular_fallback_name(name)?;
+        // GNU find_global_variable_noref reads the binding at the GLOBAL
+        // context. In rubash a shadowed global is the saved entry in the
+        // OUTERMOST local scope that captured the name — a deeper scope's
+        // snapshot holds an intervening local, and the live store slot is
+        // the shadowing local itself (e.g. the `ref -> ref` cell, which is
+        // why reading the live slot yields "ref" instead of the global).
+        for typed_scope in &self.local_typed_scopes {
+            if let Some(saved) = typed_scope.get(&fallback) {
+                return match saved {
+                    Some(crate::shell::Variable {
+                        value: crate::shell::ShellValue::Scalar(value),
+                        ..
+                    }) => Some(value.clone()),
+                    _ => None,
+                };
+            }
+        }
+        // No scope shadowed the name: the live entry is the global binding.
         match self.shell_state.variables.get(&fallback) {
             Some(crate::shell::Variable {
                 value: crate::shell::ShellValue::Scalar(value),
@@ -145,32 +187,124 @@ impl Executor {
     /// GNU variables.c bind_variable: assigning through a circular nameref
     /// inside a function writes the global namesake (bind_global_variable on
     /// the maxloop path) while the local nameref keeps its cell. rubash
-    /// models the global value in the typed owner plus the frame snapshots
-    /// that restore it when the function returns.
-    pub(in crate::executor) fn assign_circular_fallback(&mut self, name: &str, value: String) {
+    /// models the global binding as the OUTERMOST local-scope snapshot that
+    /// captured the name (see circular_fallback_value); when no scope
+    /// shadowed it the live store entry is the global one.
+    pub(in crate::executor) fn assign_circular_fallback(&mut self, name: &str, value: String, append: bool) {
         let Some(fallback) = self.nameref_circular_fallback_name(name) else {
             return;
         };
-        let mut variable = match self.shell_state.variables.get(&fallback) {
-            Some(existing) => existing.clone(),
+        // GNU variables.c bind_global_variable -> bind_variable_internal:
+        // the write goes through the variable's assign_func, so an array or
+        // assoc namesake takes the value at element/key 0 rather than
+        // collapsing to a scalar (nameref15.sub: local `a -> a`, `a=X`
+        // leaves `declare -a a=([0]="X")`).
+        // The marker sets are name-flat, so they describe the LOCAL shadow
+        // (`local -n a` clears -a on `a`). The global namesake's attributes
+        // are the saved VarAttrs in the outermost frame that localized the
+        // name — the same frame holding its saved value.
+        let saved_attrs = self
+            .local_var_scopes
+            .iter()
+            .position(|scope| scope.contains_key(&fallback))
+            .and_then(|index| {
+                self.local_attr_scopes
+                    .get(index)
+                    .and_then(|scope| scope.get(&fallback))
+                    .copied()
+                    .map(|attrs| (index, attrs))
+            });
+        if let Some((scope_index, attrs)) = saved_attrs.filter(|(_, attrs)| attrs.array || attrs.assoc)
+        {
+            let saved = self.local_var_scopes[scope_index]
+                .get(&fallback)
+                .cloned()
+                .flatten()
+                .unwrap_or_default();
+            let integer = attrs.integer;
+            let updated = if attrs.assoc {
+                let mut entries =
+                    crate::executor::assignment_helpers::assoc_entries(&saved);
+                let existing = entries
+                    .iter()
+                    .rev()
+                    .find_map(|(key, entry)| (key == "0").then_some(entry.clone()))
+                    .unwrap_or_default();
+                let element = if append && integer {
+                    (self.eval_integer_assignment_value(&existing)
+                        + self.eval_integer_assignment_value(&value))
+                    .to_string()
+                } else if append {
+                    format!("{existing}{value}")
+                } else if integer {
+                    self.eval_integer_assignment_value(&value).to_string()
+                } else {
+                    value.clone()
+                };
+                match entries.iter_mut().rev().find(|(key, _)| key == "0") {
+                    Some((_, entry)) => *entry = element,
+                    None => entries.push(("0".to_string(), element)),
+                }
+                format!(
+                    "({})",
+                    entries
+                        .into_iter()
+                        .map(|(key, entry)| format!(
+                            "[{}]={}",
+                            crate::executor::assignment_helpers::quote_assoc_key(&key),
+                            crate::executor::assignment_helpers::quote_assoc_storage_value(&entry)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            } else {
+                let mut entries =
+                    super::arrays::indexed_array_entries(&saved);
+                let existing = entries.get(&0).cloned().unwrap_or_default();
+                let element = if append && integer {
+                    (self.eval_integer_assignment_value(&existing)
+                        + self.eval_integer_assignment_value(&value))
+                    .to_string()
+                } else if append {
+                    format!("{existing}{value}")
+                } else if integer {
+                    self.eval_integer_assignment_value(&value).to_string()
+                } else {
+                    value.clone()
+                };
+                entries.insert(0, element);
+                super::arrays::format_indexed_array_storage(entries)
+            };
+            self.local_var_scopes[scope_index].insert(fallback.clone(), Some(updated));
+            return;
+        }
+        let mut variable = match self.circular_fallback_value(name) {
+            Some(existing) => crate::shell::Variable::scalar(existing),
             None => crate::shell::Variable::scalar(String::new()),
         };
-        variable.value = crate::shell::ShellValue::Scalar(value.clone());
-        let _ = self
-            .shell_state
-            .variables
-            .set(fallback.clone(), variable.clone());
-        // Update the frame snapshots so the global value survives the
-        // local-variable restore when the function returns.
-        if let Some(typed_scope) = self.local_typed_scopes.last_mut() {
+        let scalar = if append {
+            let existing = self.circular_fallback_value(name).unwrap_or_default();
+            format!("{existing}{value}")
+        } else {
+            value.clone()
+        };
+        variable.value = crate::shell::ShellValue::Scalar(scalar.clone());
+        let mut wrote_snapshot = false;
+        for typed_scope in &mut self.local_typed_scopes {
             if typed_scope.contains_key(&fallback) {
-                typed_scope.insert(fallback.clone(), Some(variable));
+                typed_scope.insert(fallback.clone(), Some(variable.clone()));
+                wrote_snapshot = true;
+                break;
             }
         }
-        if let Some(scope) = self.local_var_scopes.last_mut() {
+        for scope in &mut self.local_var_scopes {
             if scope.contains_key(&fallback) {
-                scope.insert(fallback.clone(), Some(value));
+                scope.insert(fallback.clone(), Some(scalar));
+                break;
             }
+        }
+        if !wrote_snapshot {
+            let _ = self.shell_state.variables.set(fallback, variable);
         }
     }
 
@@ -203,6 +337,23 @@ impl Executor {
             NamerefResolution::Unresolved => return None,
             NamerefResolution::NotNameref => name.to_string(),
         };
+        // GNU find_variable_nameref -> find_variable_internal resolves an
+        // `arr[@]`/`arr[*]` cell to the array; scalar `${ref}` then reads
+        // array_value's all-elements join (nameref18.sub `s=${ref}` yields
+        // "1 2 3").
+        if let Some(array_name) = name
+            .strip_suffix("[@]")
+            .or_else(|| name.strip_suffix("[*]"))
+        {
+            if let Some(storage) = self.parameter_array_storage(array_name) {
+                let values = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                    assoc_hash_ordered_values(&storage)
+                } else {
+                    array_values(&storage)
+                };
+                return Some(values.join(&self.ifs_first_char_separator()));
+            }
+        }
         if let Some(value) = self.array_element_parameter_value(&name) {
             return Some(value);
         }

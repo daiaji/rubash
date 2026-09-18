@@ -19,10 +19,14 @@ pub(super) fn assign_declare_names<W>(
     command_name: &str,
     names: &[&str],
     variables: &mut HashMap<String, String>,
+    frame_locals: &[String],
+    nameref: bool,
+    in_function: bool,
     array: bool,
     assoc: bool,
     integer: bool,
     mark_unset_declarations: bool,
+    deleted_names: &mut std::collections::HashSet<String>,
     stderr: &mut W,
 ) -> io::Result<i32>
 where
@@ -61,7 +65,16 @@ where
                     }
                 }
             }
-            if mark_unset_declarations && !variables.contains_key(bare) {
+            // GNU declare.def:810-823: att_invisible is (re)set only when the
+            // create path's bind_variable actually returns a variable. A
+            // visible empty-cell nameref makes that bind return NULL
+            // (variables.c:3061-3069), so the operand is skipped without
+            // touching visibility; only a truly absent name gets marked
+            // declared-unset here.
+            if mark_unset_declarations
+                && !variables.contains_key(bare)
+                && !marked_vars(variables, NAMEREF_VARS).contains(bare)
+            {
                 mark_typed(variables, DECLARED_UNSET_VARS, bare);
             }
             continue;
@@ -137,6 +150,22 @@ where
                 // when foo already exists without -a, while `declare -a
                 // e[10]='(test)'` (with -a, creating_array=1) discards the
                 // subscript and stores [0]="test".
+                // GNU arrayfunc.c:464-475 find_or_make_array_variable: an
+                // element assignment that lands on a nameref (declare a=v
+                // where a -> b -> a[1] rewrites the operand to a[1]=v)
+                // removes the attribute with a warning and drops the cell --
+                // it never becomes element 0 (nameref15.sub).
+                if marked_vars(variables, NAMEREF_VARS).contains(base) {
+                    writeln!(
+                        stderr,
+                        "{}warning: {base}: removing nameref attribute",
+                        diagnostic_prefix(variables)
+                    )?;
+                    unmark_typed(variables, NAMEREF_VARS, base);
+                    // Removing the cell entirely keeps the scalar-to-array
+                    // conversion below from seeding it at element 0.
+                    variables.remove(base);
+                }
                 let array_exists = variables.get(base).is_some_and(|v| {
                     v.starts_with('\x1d') || (v.starts_with('(') && v.ends_with(')'))
                 });
@@ -205,6 +234,30 @@ where
             .strip_suffix('+')
             .map(|base| (base, true))
             .unwrap_or((var_name, false));
+        // GNU declare.def:806-825 -> variables.c bind_variable_internal: a
+        // `name=value` operand naming a nameref with an unresolvable (empty)
+        // cell resolves to NULL through find_variable_nameref, so it takes
+        // the created_var path whose bind_variable(name, NULL, ASS_FORCE)
+        // materializes the variable BEFORE the assignment is attempted. For
+        // an invisible nameref the variables.c:3074-3081 first clause clears
+        // att_invisible (declare.def:821-822 re-sets it only when offset==0),
+        // so a later readonly failure leaves a VISIBLE empty-cell nameref.
+        // For an already-visible nameref the variables.c:3061-3069
+        // global-table clause resolves the chain, finds nothing, returns
+        // NULL, and declare.def:816 silently skips the operand
+        // (nameref17.sub: `typeset foo1=bar` errors but materializes foo1;
+        // a later `typeset foo1=bar2` is a silent no-op).
+        if !append
+            && !var_name.contains('[')
+            && marked_vars(variables, NAMEREF_VARS).contains(var_name)
+            && variables.get(var_name).map_or(true, |cell| cell.is_empty())
+        {
+            if marked_vars(variables, DECLARED_UNSET_VARS).contains(var_name) {
+                unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
+            } else if !in_function {
+                continue;
+            }
+        }
         if is_noassign_bash_array(var_name) {
             continue;
         }
@@ -231,12 +284,48 @@ where
             let current = variables.get(var_name).cloned().unwrap_or_default();
             if !append && !valid_nameref_value(&current) {
                 if !valid_nameref_value(value) {
+                    // GNU declare.def:849-854: inside a function,
+                    // declare_transform_name keeps the same-context local
+                    // nameref as VAR (an empty cell fails
+                    // nameref_transform_name's valid_nameref_value check), so
+                    // the invalid value is rejected by the operand-level
+                    // nameref check -- `invalid variable name for name
+                    // reference` -- and the variable survives (nameref13.sub:
+                    // `typeset -n foo; typeset foo=12345` keeps foo).
+                    if frame_locals.iter().any(|local| local == var_name) {
+                        writeln!(
+                            stderr,
+                            "{}{command_name}: `{value}': invalid variable name for name reference",
+                            diagnostic_prefix(variables)
+                        )?;
+                        status = EXECUTION_FAILURE;
+                        continue;
+                    }
                     writeln!(
                         stderr,
                         "{}{command_name}: `{value}': not a valid identifier",
                         diagnostic_prefix(variables)
                     )?;
                     status = EXECUTION_FAILURE;
+                    // GNU declare.def:1031-1034: when the variable was
+                    // created by THIS declare invocation — an unusable-cell
+                    // nameref reads as not-found to find_variable, so the
+                    // declare path created it fresh (created_var) — a failed
+                    // ASS_NAMEREF bind deletes the variable outright
+                    // (nameref12.sub: `declare -n x; declare x=42` leaves x
+                    // fully gone, not valueless).
+                    variables.remove(var_name);
+                    deleted_names.insert(var_name.to_string());
+                    for marker in [
+                        NAMEREF_VARS,
+                        DECLARED_UNSET_VARS,
+                        INTEGER_VARS,
+                        ARRAY_VARS,
+                        ASSOC_VARS,
+                        READONLY_VARS,
+                    ] {
+                        unmark_typed(variables, marker, var_name);
+                    }
                     continue;
                 }
                 variables.insert(var_name.to_string(), value.to_string());
@@ -244,18 +333,27 @@ where
                 continue;
             }
         }
-        let value = if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
-            compound
+        // GNU subst.c:13084 expand_declaration_argument: a parser-marked
+        // compound list (COMPOUND_ASSIGNMENT_MARKER, the W_COMPASSIGN flag)
+        // is always an array assignment regardless of -a/-A flags; a bare
+        // parenthesized STRING is only an array value when the variable is
+        // (or is being made) an array (nameref20.sub: `declare ref=(X)`
+        // creates `declare -a var`, nameref22.sub: `declare
+        // array='(one two three)'` stays scalar).
+        let (value, compound_marked) = if let Some(compound) =
+            value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
+        {
+            (compound, true)
         } else if value.is_empty() && var_name == "assoc" {
             // TODO(parse.y/array.c): The current parser can split compound
             // assignment words after `declare -A`. Preserve builtins5.sub's
             // declaration shape until compound assignments remain atomic.
-            "([one]=one [two]=two [three]=three)"
+            ("([one]=one [two]=two [three]=three)", true)
         } else if value.is_empty() && var_name == "array" {
             // TODO(parse.y/array.c): Same narrow bridge for `declare -a`.
-            "(one two three)"
+            ("(one two three)", true)
         } else {
-            value
+            (value, false)
         };
         let value = if append {
             let current = variables.get(var_name).cloned().unwrap_or_default();
@@ -274,7 +372,8 @@ where
                     }
                 }
                 append_assoc_value(&current, value, integer, variables)
-            } else if array
+            } else if compound_marked
+                || array
                 || marked_vars(variables, ARRAY_VARS).contains(var_name)
                 || current.starts_with('\x1d')
                 || current.starts_with('(') && current.ends_with(')')
@@ -317,15 +416,56 @@ where
             } else {
                 eval_arith_value(value).to_string()
             }
-        } else if value.starts_with('(') && value.ends_with(')') {
+        } else if value.starts_with('(') && value.ends_with(')')
+            && (compound_marked
+                || array
+                || marked_vars(variables, ARRAY_VARS).contains(var_name)
+                || variables.get(var_name).is_some_and(|current| {
+                    current.starts_with('\x1d')
+                        || (current.starts_with('(') && current.ends_with(')'))
+                }))
+        {
             // GNU arrayfunc.c:557 expand_compound_array_assignment:
             // re-parse and expand the compound value (array.tests:115
-            // declare -a f='("${d[@]}")' expands d into f).
+            // declare -a f='("${d[@]}")' expands d into f). A quoted
+            // parenthesized value only becomes an array assignment when the
+            // variable is (or is being made) an array -- otherwise it is a
+            // literal scalar (nameref22.sub: declare array='(one two three)'
+            // prints `declare -- array="(one two three)"`).
             let expanded_value = expand_compound_array_value(value, variables);
             append_array_value("()", &expanded_value, false)
         } else {
             value.to_string()
         };
+        // GNU variables.c:3341-3358 bind_variable_value: an ASS_NAMEREF
+        // assignment runs check_selfref on the RESULTING cell, so
+        // `typeset -n ref=re ref+=f` -- whose operand-level check on "f"
+        // passed (declare.def:562) -- is still rejected once the append
+        // produces "ref". Global scope errors and keeps the old cell;
+        // function scope warns and keeps it (nameref15.sub).
+        if nameref
+            && append
+            && (value == var_name
+                || declare_indexed_element(&value)
+                    .is_some_and(|(base, _)| base == var_name))
+        {
+            let line = if in_function {
+                format!(
+                    "{}warning: {var_name}: circular name reference
+",
+                    diagnostic_prefix(variables)
+                )
+            } else {
+                format!(
+                    "{}{var_name}: nameref variable self references not allowed
+",
+                    diagnostic_prefix(variables)
+                )
+            };
+            write!(stderr, "{line}")?;
+            status = EXECUTION_FAILURE;
+            continue;
+        }
         variables.insert(var_name.to_string(), value.clone());
         unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
     }

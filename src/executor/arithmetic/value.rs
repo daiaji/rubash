@@ -6,9 +6,10 @@ use crate::executor::arithmetic::{
 use crate::executor::{
     array_value_at, assoc_entries, assoc_value_at, current_epoch_seconds,
     env_derived_dynamic_parameter_value, format_assoc_storage, format_indexed_array_storage,
-    indexed_array_entries, is_marked_var, is_noassign_bash_array, mark_env_name,
-    next_random_from_state, next_srandom_from_state, resolve_indexed_array_subscript,
-    set_process_env, ARRAY_VARS, ASSOC_VARS, READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH,
+    indexed_array_entries, is_marked_var, is_noassign_bash_array, is_shell_name,
+    mark_env_name, next_random_from_state, next_srandom_from_state, resolve_indexed_array_subscript,
+    parse_array_subscript, set_process_env, ARRAY_VARS, ASSOC_VARS, NAMEREF_VARS,
+    READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH,
 };
 
 impl ConditionalArithParser<'_> {
@@ -278,6 +279,72 @@ impl ConditionalArithParser<'_> {
             }
         }
         if name == "SRANDOM" {
+            return;
+        }
+        // GNU expr.c assigns through bind_variable: a nameref lvalue resolves
+        // to its cell — an empty cell adopts the assigned text after
+        // valid_nameref_value (invalid -> sh_invalidid via the marker below),
+        // an already-invalid cell stays unchanged, and a valid cell forwards
+        // the write to the referenced variable or element.
+        if is_marked_var(self.env_vars, NAMEREF_VARS, name) {
+            let cell = self.env_vars.get(name).cloned().unwrap_or_default();
+            let cell_valid = is_shell_name(&cell)
+                || parse_array_subscript(&cell).is_some();
+            if !cell_valid {
+                if cell.is_empty() {
+                    if is_shell_name(&value)
+                        || parse_array_subscript(&value).is_some()
+                    {
+                        let old_value = self.env_vars.get(name).cloned();
+                        self.env_vars.insert(name.to_string(), value.clone());
+                        super::super::record_arith_write(name, old_value);
+                        set_process_env(name, value);
+                    } else {
+                        self.env_vars.insert(
+                            "__RUBASH_ARITH_NAMEREF_ERROR".to_string(),
+                            value,
+                        );
+                    }
+                }
+                return;
+            }
+            // Follow the chain to the last resolvable cell (NAMEREF_MAX=8).
+            let mut target = cell;
+            for _ in 0..8 {
+                let base = target.split('[').next().unwrap_or(target.as_str());
+                if !is_marked_var(self.env_vars, NAMEREF_VARS, base) {
+                    break;
+                }
+                let next = self.env_vars.get(base).cloned().unwrap_or_default();
+                if next.is_empty() || next == target {
+                    break;
+                }
+                target = next;
+            }
+            if let Some((elem_base, subscript)) = target.split_once('[') {
+                if let Some(subscript) = subscript.strip_suffix(']') {
+                    let stripped = strip_arith_double_quotes(subscript);
+                    let (index, _cat) = eval_mutable_arith_value_with_random(
+                        &stripped,
+                        self.env_vars,
+                        self.random_state,
+                    );
+                    if let Some(index) = index {
+                        self.set_array_element(elem_base, index, value.parse::<i128>().unwrap_or(0));
+                        return;
+                    }
+                }
+            }
+            let base_target = target.split('[').next().unwrap_or(target.as_str());
+            if is_marked_var(self.env_vars, READONLY_VARS, base_target) {
+                self.env_vars.insert(
+                    "__RUBASH_ARITH_READONLY_ERROR".to_string(),
+                    base_target.to_string(),
+                );
+                return;
+            }
+            let numeric = value.parse::<i128>().unwrap_or(0);
+            self.set_variable(&base_target.to_string(), numeric);
             return;
         }
         let old_value = self.env_vars.get(name).cloned();

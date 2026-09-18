@@ -130,7 +130,22 @@ impl Executor {
                 && assignment.word_quotes.is_empty()
         });
         let name = match self.nameref_resolution(name) {
-            NamerefResolution::Target(target) => target,
+            NamerefResolution::Target(target) => {
+                // GNU assign_array_element -> find_variable_nameref_for_create
+                // (variables.c:2199-2203) requires a bare identifier:
+                // `ref[k]=v` where ref -> `XXX[0]` fails sh_invalidid, while
+                // a scalar `ref=v` forwards to the element. The caller raises
+                // evalerror on nonzero exit_code, discarding the list.
+                if parse_array_subscript(&target).is_some() {
+                    eprintln!(
+                        "{}`{target}': not a valid identifier",
+                        self.diagnostic_prefix()
+                    );
+                    self.exit_code = 1;
+                    return true;
+                }
+                target
+            }
             NamerefResolution::Circular => {
                 eprintln!(
                     "{}warning: {}: circular name reference",
@@ -149,11 +164,23 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             }
-            // Empty/unresolvable cell: the name resolves to the nameref
-            // variable itself (find_variable_nameref_for_assignment).
-            NamerefResolution::Unresolved | NamerefResolution::NotNameref => {
-                name.to_string()
+            // GNU arrayfunc.c:270-275 bind_array_variable ->
+            // variables.c:2182 find_variable_nameref_for_create: an element
+            // assignment whose operand base resolves to an uncreated nameref
+            // target fails sh_invalidid on the last nameref's cell text and
+            // leaves the nameref untouched (`typeset -n ref; ref[0]=foo`
+            // reports `': not a valid identifier`, ref stays `declare -n ref`
+            // rather than becoming an array).
+            NamerefResolution::Unresolved => {
+                let cell = self.last_nameref_cell(name).unwrap_or_default();
+                eprintln!(
+                    "{}`{cell}': not a valid identifier",
+                    self.diagnostic_prefix()
+                );
+                self.exit_code = 1;
+                return true;
             }
+            NamerefResolution::NotNameref => name.to_string(),
         };
         let name = name.as_str();
         if name == "BASH_ALIASES" {

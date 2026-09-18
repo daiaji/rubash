@@ -1847,6 +1847,58 @@ impl Executor {
             }
         }
 
+        // GNU builtins/common.c:988 builtin_find_indexed_array ->
+        // arrayfunc.c:454 find_or_make_array_variable: `read -a` resolves a
+        // nameref operand through find_variable_last_nameref — an empty cell
+        // is invisible so the attribute is stripped and the name itself
+        // becomes the array, a valid bare-name cell redirects the bind to
+        // the target, and an element/invalid cell fails sh_invalidid
+        // (nameref18.sub `read -a ref` where ref -> `XXX[0]`).
+        if let Some(name) = array_name.clone() {
+            if is_marked_var(&self.env_vars, NAMEREF_VARS, &name) {
+                match self.nameref_resolution(&name) {
+                    NamerefResolution::Target(target) => {
+                        if parse_array_subscript(&target).is_some() {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: `{target}': not a valid identifier",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                        array_name = Some(target);
+                    }
+                    NamerefResolution::Unresolved => {
+                        let cell = self.env_vars.get(&name).cloned().unwrap_or_default();
+                        if cell.is_empty() {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}warning: {name}: removing nameref attribute",
+                                self.diagnostic_prefix()
+                            );
+                            unmark_env_name(&mut self.env_vars, NAMEREF_VARS, &name);
+                            // The buffered stderr is only emitted on the
+                            // error path; GNU writes the warning at once, so
+                            // flush it before continuing to a successful read.
+                            let _ = self.write_buffered_builtin_output(cmd, &[], &stderr);
+                            stderr.clear();
+                        } else {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: `{cell}': not a valid identifier",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    }
+                    // Circular/over-depth chains: find_variable_last_nameref
+                    // returns NULL and the array binds to the name itself.
+                    NamerefResolution::Circular | NamerefResolution::MaxDepth
+                    | NamerefResolution::NotNameref => {}
+                }
+            }
+        }
+
         if timeout_zero {
             let status = self.read_timeout_zero_status(cmd, read_fd);
             if let Some(name) = array_name {

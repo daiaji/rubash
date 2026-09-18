@@ -215,6 +215,30 @@ impl Executor {
         self.loop_depth = 0;
         self.function_depth = 0;
         self.inside_compound_condition.set(false);
+        // The child is a separate process in GNU: an evalerror/DISCARD
+        // abort pending at child exit dies with it and must not leak back
+        // into the parent's reader (nameref18.sub `ref[foo]=bar` under
+        // ${THIS_SH} discarded the parent's remaining same-line commands).
+        let saved_evalerror_pending = self.evalerror_pending.get();
+        let saved_evalerror_line = self.evalerror_line.get();
+        let saved_reader_command_line = self.reader_command_line.get();
+        let saved_parameter_assignment_failure =
+            self.parameter_assignment_failure.get();
+        // evalerror_exec_depth counts execute_ast_inner nesting: the child
+        // is a fresh reader (its own process in GNU), so a pending abort
+        // inside it discards only same-line commands rather than unwinding
+        // the whole child AST as a nested list.
+        let saved_evalerror_exec_depth = self.evalerror_exec_depth.get();
+        self.evalerror_exec_depth.set(0);
+        self.evalerror_pending.set(false);
+        self.evalerror_line.set(None);
+        self.parameter_assignment_failure.set(false);
+        // GNU's this_command_name belongs to the executing command only;
+        // the in-process ${THIS_SH} child is a fresh shell whose own
+        // commands set their own command name, so the parent's word (the
+        // expanded shell path) must not leak into child diagnostics
+        // (nameref8.sub warnings reported `rubash.exe:` prologs).
+        let saved_assignment_command_name = self.assignment_command_name.take();
 
         if let Some(input) = self.function_call_stdin(cmd)? {
             self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
@@ -307,6 +331,12 @@ impl Executor {
         self.loop_depth = saved_loop_depth;
         self.function_depth = saved_function_depth;
         self.inside_compound_condition.set(saved_inside_compound_condition);
+        self.evalerror_pending.set(saved_evalerror_pending);
+        self.evalerror_line.set(saved_evalerror_line);
+        self.reader_command_line.set(saved_reader_command_line);
+        self.parameter_assignment_failure.set(saved_parameter_assignment_failure);
+        self.evalerror_exec_depth.set(saved_evalerror_exec_depth);
+        self.assignment_command_name = saved_assignment_command_name;
         if let Some(cwd) = saved_cwd {
             let _ = env::set_current_dir(cwd);
         }

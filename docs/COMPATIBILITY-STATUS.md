@@ -1002,3 +1002,40 @@ braces(1), arith-for(1)
 `$'\302\200'`（UTF-8 编码的 U+0080）被存为两个独立的载体标记（U+E000 系列），
 而非 Unicode 码点 U+0080。字符串比较时 U+E000 ≠ U+0080，导致 1192/1318 个
 unicode1.sub 测试失败。修复需重构 ANSI-C 解码器对多字节序列的处理。
+
+## 第二十三节：2026-09-16 nameref 审计批次（readonly nameref 状态机 + 物化语义）
+
+**口径**：`scripts/true-baseline.sh`，WSL GNU Bash 5.3.0。
+
+**nameref 套件**：93 → **7 行**残余。
+
+**本次 GNU C 源码驱动的修复**（均在 `third_party/bash` 定位属主函数后改动）：
+
+- `src/builtins/declare.rs` / `declare/assign.rs` / `declare/attrs.rs` —
+  readonly 空-cell nameref 的"物化"状态机。GNU `declare.def:806-825` 的
+  created_var 路径先 `bind_variable(name, NULL, ASS_FORCE)`，经
+  `variables.c:3074-3081`（invisible nameref 子句）清除 `att_invisible` 再尝试
+  赋值——`typeset -n foo1; typeset -r foo1; typeset foo1=bar` 报 readonly 错误但
+  留下**可见**空-cell nameref。此后任何非 `-n` 操作数经
+  `variables.c:3061-3069`（visible nameref 全局表解析失败 → bind 返回 NULL）
+  → `declare.def:816 NEXT_VARIABLE` 静默跳过：`typeset +r/+n foo1` 成为静默
+  no-op 且属性保留（nameref17.sub:38）。
+- `declare/assign.rs` — 无 `=` 操作数不再把已物化的 nameref 重标
+  DECLARED_UNSET（GNU 仅在 create-bind 真正返回变量时才设 att_invisible）。
+
+**已确认的残余**（nameref 7 行）：
+
+1. `nameref11.sub:52` `RO_PID` — coproc 退出传播时序：GNU 的 SIGCHLD reap
+   在下一命令边界前完成（jobs.c:1342 → coproc_reap → coproc_unsetvars），
+   RB 的 `try_wait` 轮询在 rubash.exe coproc 启动较慢时滞后。隔离复现
+   （插入 `sleep 0.2`）两侧字节一致，属平台时序差异。
+2. `nameref18.sub:83` `"${!indir}$ref"` — 复合带引号词内嵌入式 `[@]` 的
+   场边界融合（GNU subst.c `expand_word_internal` 的 W_ARRAYQUOTED 分词：
+   前缀融首元素、后缀融末元素）尚未实现；RB 需要 `${}`/`$name` 级 span
+   扫描器 + 场边界载体字节，属独立子系统特性，留待专项。
+
+**相邻套件抽查**（无回归）：dstack 0、builtins 0、func 0、errors 3、
+trap 1、exp 8、coproc 6、more-exp 6、cond 19、read 44、array 116、assoc 175、
+varenv 80、new-exp 59。函数体诊断行号修复（function_command.rs 不再把
+body 命令压成定义行）带来 errors 164→3、exp 134→8、func 58→0、trap 61→1
+的全局收益。

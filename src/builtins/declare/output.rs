@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use super::storage::{
-    format_array_value, format_assoc_value, parse_single_element_array, quote_declare_value,
+    format_array_value, format_assoc_value, quote_declare_value,
 };
 
 #[derive(Clone, Copy)]
@@ -68,15 +68,6 @@ where
             stdout,
             "declare {attrs} {name}={}",
             format_array_value(value)
-        )
-    } else if let Some(array_value) = parse_single_element_array(value) {
-        let attrs = declaration_array_attrs(attrs);
-        writeln!(
-            stdout,
-            "declare {} {}=([0]={})",
-            attrs,
-            name,
-            quote_declare_value(array_value)
         )
     } else if let Some(attrs) = declaration_scalar_attrs(attrs) {
         writeln!(

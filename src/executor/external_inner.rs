@@ -453,8 +453,16 @@ impl Executor {
         for (var_name, var_value) in &cmd.assignments {
             let (base_name, _) = assignment_name_and_append(var_name);
             let expanded_value = self.expand_assignment_value(var_value);
-            if is_valid_process_env(base_name, &expanded_value) {
-                env_vars.insert(base_name.to_string(), expanded_value);
+            // GNU variables.c:3564-3578 assign_in_env -> bind_variable: a
+            // prefix assignment to a nameref binds the referenced variable,
+            // so the child env carries the TARGET name and the nameref's
+            // own env slot (its cell text) is unchanged (nameref14.sub:
+            // `ref=$ref$str printenv ref` still prints "var").
+            let Some(env_name) = self.tempenv_export_name(base_name) else {
+                continue;
+            };
+            if is_valid_process_env(&env_name, &expanded_value) {
+                env_vars.insert(env_name, expanded_value);
             }
         }
         self.host_external_command_handler
@@ -588,9 +596,32 @@ impl Executor {
                 continue;
             }
             let expanded_value = self.expand_assignment_value(var_value);
-            if is_valid_process_env(base_name, &expanded_value) {
-                process.env(base_name, expanded_value);
+            let Some(env_name) = self.tempenv_export_name(base_name) else {
+                continue;
+            };
+            if is_valid_process_env(&env_name, &expanded_value) {
+                process.env(env_name, expanded_value);
             }
+        }
+    }
+
+    /// GNU variables.c:3564-3578 assign_in_env -> bind_variable (ASS_NAMEREF):
+    /// a tempenv `name=value` whose name resolves through a nameref binds the
+    /// final target, so the child environment exports the target name while
+    /// the nameref keeps its cell text. A cell resolving to an array element
+    /// (`ref -> a[1]`) has no env representation, so nothing is exported.
+    /// Unresolvable namerefs keep the literal name (nameref11.sub `r=/ f`
+    /// exports `r` as a plain variable).
+    fn tempenv_export_name(&self, base_name: &str) -> Option<String> {
+        match self.nameref_resolution(base_name) {
+            NamerefResolution::Target(target) => {
+                if target.contains('[') {
+                    None
+                } else {
+                    Some(target)
+                }
+            }
+            _ => Some(base_name.to_string()),
         }
     }
 

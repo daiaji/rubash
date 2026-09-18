@@ -194,6 +194,31 @@ impl Executor {
         self.report_arithmetic_error_with_label("let", expression, true);
     }
 
+    // GNU expr.c assignments route through bind_variable; an invalid
+    // nameref-cell value fails via sh_invalidid with this_command_name as
+    // the label (`((`, `let`), or no label inside $(( )) expansion.
+    pub(in crate::executor) fn report_arithmetic_nameref_error(
+        &mut self,
+        label: Option<&str>,
+    ) -> bool {
+        let Some(value) = self.env_vars.remove("__RUBASH_ARITH_NAMEREF_ERROR") else {
+            return false;
+        };
+        match label {
+            Some(label) => eprintln!(
+                "{}{label}: `{value}': not a valid identifier",
+                self.diagnostic_prefix()
+            ),
+            None => eprintln!(
+                "{}`{value}': not a valid identifier",
+                self.diagnostic_prefix()
+            ),
+        }
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+        true
+    }
+
     pub(in crate::executor) fn report_conditional_arithmetic_error(&self, expression: &str) {
         if self.report_subscript_eval_failure() {
             return;
@@ -219,7 +244,13 @@ impl Executor {
         // preserve original whitespace.
         let xtrace_expr = raw_expression.unwrap_or(expression);
         self.xtrace_print_arith_cmd(xtrace_expr);
-        match self.eval_arithmetic_command_value(expression) {
+        let eval_result = self.eval_arithmetic_command_value(expression);
+        // An invalid nameref-cell assignment inside `((` fails the command
+        // with status 1 even though the expression itself evaluated.
+        if self.report_arithmetic_nameref_error(Some("((")) {
+            return 1;
+        }
+        match eval_result {
             Some(0) => 1,
             Some(_) => 0,
             None => {
@@ -389,6 +420,9 @@ impl Executor {
             };
             if value.is_none() {
                 self.report_let_arithmetic_error(&expression);
+                return 1;
+            }
+            if self.report_arithmetic_nameref_error(Some("let")) {
                 return 1;
             }
             index += 1;

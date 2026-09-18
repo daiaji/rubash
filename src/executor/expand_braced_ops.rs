@@ -194,14 +194,20 @@ impl Executor {
 /// at the top level of the braced parameter body; an `=` inside a subscript
 /// like `${_ENV[(_=1)]}` is an arithmetic assignment, not a `${var=word}`
 /// operator (new-exp.tests line 45).
-fn split_once_outside_subscript<'a>(name: &'a str, op: char) -> Option<(&'a str, &'a str)> {
+pub(in crate::executor) fn split_once_outside_subscript<'a>(
+    name: &'a str,
+    op: char,
+) -> Option<(&'a str, &'a str)> {
     let op_byte = op as u8;
     split_once_outside_subscript_impl(name, &[op_byte])
 }
 
 /// Split on a two-character operator (e.g. `:=`, `:-`, `:+`, `:?`) at the top
 /// level, skipping `[...]` subscripts and `${...}` nested expansions.
-fn split_once_outside_subscript_str<'a>(name: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
+pub(in crate::executor) fn split_once_outside_subscript_str<'a>(
+    name: &'a str,
+    op: &str,
+) -> Option<(&'a str, &'a str)> {
     let op_bytes: Vec<u8> = op.bytes().collect();
     split_once_outside_subscript_impl(name, &op_bytes)
 }

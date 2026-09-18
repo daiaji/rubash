@@ -20,6 +20,25 @@ fn parse_special_assignment_operator(inner: &str) -> Option<(&str, bool)> {
     None
 }
 
+/// Split a leading `name[subscript]` array-element reference out of a
+/// `${...}` parameter body, returning `(base_name, subscript)`; text after
+/// the closing `]` (an operator suffix) is ignored because GNU
+/// parameter_brace_expand evaluates the subscript before the operator.
+/// Nested subscripts are left to the real evaluator.
+fn split_leading_array_ref(name: &str) -> Option<(&str, &str)> {
+    let open = name.find('[')?;
+    let base = &name[..open];
+    if !is_shell_name(base) {
+        return None;
+    }
+    let close = name[open..].find(']')? + open;
+    let subscript = &name[open + 1..close];
+    if subscript.contains('[') {
+        return None;
+    }
+    Some((base, subscript))
+}
+
 /// Byte index of the next `${` in `text` that starts a parameter expansion
 /// of the word itself, skipping spans whose contents belong to another
 /// expansion layer (GNU subst.c: string_extract_double_quoted copies a
@@ -853,15 +872,8 @@ impl Executor {
                         }
                         name.push(name_ch);
                     }
-                    if self.nounset_braced_parameter_is_unbound(&name) {
-                        // GNU reports the transform target without the @a/@A
-                        // suffix, and a nameref target as the `!ref`
-                        // expression (new-exp15: `!bar: unbound variable`).
-                        let reported = name
-                            .strip_suffix("@a")
-                            .or_else(|| name.strip_suffix("@A"))
-                            .unwrap_or(&name);
-                        return Some(reported.to_string());
+                    if let Some(reported) = self.nounset_braced_parameter_is_unbound(&name) {
+                        return Some(reported);
                     }
                 }
                 Some(first) if first.is_ascii_digit() => {
@@ -883,8 +895,8 @@ impl Executor {
                     // Route through the braced check so the nounset test
                     // follows nameref chains to their final target
                     // (nameref25.sub: $r0 with r0->b unset is unbound).
-                    if self.nounset_braced_parameter_is_unbound(&name) {
-                        return Some(name);
+                    if let Some(reported) = self.nounset_braced_parameter_is_unbound(&name) {
+                        return Some(reported);
                     }
                 }
                 Some('?') | Some('$') | Some('@') | Some('*') | Some('#') | Some('-') => {
@@ -908,13 +920,43 @@ impl Executor {
         None
     }
 
-    pub(in crate::executor) fn nounset_braced_parameter_is_unbound(&self, name: &str) -> bool {
+    /// GNU subst.c check_unbound_variable / parameter_brace_expand: under
+    /// nounset, decide whether the parameter inside `${...}` (or a bare
+    /// `$name`) is unbound and, if so, which name GNU reports in the
+    /// `unbound variable` diagnostic. An array-element reference evaluates
+    /// its subscript arithmetically before the element check, so an unset
+    /// name inside the subscript reports that name even when the array
+    /// itself is unset (nameref25.sub ok 4 reports `k`, not `r` or `a[k]`).
+    pub(in crate::executor) fn nounset_braced_parameter_is_unbound(
+        &self,
+        name: &str,
+    ) -> Option<String> {
         if name == "!" {
             // GNU subst.c: the last-background-pid parameter is unset until a
             // background job runs; under nounset it reports an unbound
             // variable (posixexp1).
-            return self.last_background_pid.is_none();
+            return self
+                .last_background_pid
+                .is_none()
+                .then(|| String::from("!"));
         }
+
+        // GNU subst.c parameter_brace_expand: an indexed-array element
+        // reference `a[sub]` evaluates `sub` arithmetically before any
+        // operator or element test, so under nounset an unset name inside
+        // the subscript reports that name (nameref25.sub: `${a[k]}` and
+        // `r->a[k]` with k unset both report `k: unbound variable`, even
+        // behind a `:-` operator). Associative subscripts are literal keys
+        // and are not evaluated.
+        if let Some((abase, sub)) = split_leading_array_ref(name.strip_prefix('#').unwrap_or(name))
+        {
+            if !self.is_assoc_parameter_array(abase) {
+                if let Some(unset) = self.nounset_subscript_unset_name(sub) {
+                    return Some(unset);
+                }
+            }
+        }
+
         if name.is_empty()
             || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
             || name.starts_with('!')
@@ -926,7 +968,7 @@ impl Executor {
             || name.contains('=')
             || name.contains('+')
         {
-            return false;
+            return None;
         }
 
         // GNU subst.c parameter_brace_expand: under nounset the attribute
@@ -939,12 +981,13 @@ impl Executor {
             let resolved = self
                 .resolved_variable_name(target)
                 .unwrap_or_else(|| target.to_string());
-            return !self.dynamic_parameter_is_set(&resolved)
-                && !self.env_vars.contains_key(&resolved);
+            return (!self.dynamic_parameter_is_set(&resolved)
+                && !self.env_vars.contains_key(&resolved))
+            .then(|| stripped.to_string());
         }
 
         if name.contains('@') {
-            return false;
+            return None;
         }
 
         // GNU subst.c parameter_brace_expand / parameter_brace_expand_length:
@@ -961,18 +1004,28 @@ impl Executor {
         let base = &core[..base_len];
         if base.len() < core.len() || core.len() != name.len() {
             if let Ok(index) = base.parse::<usize>() {
-                return index > 0 && self.positional_params.get(index - 1).is_none();
+                return (index > 0 && self.positional_params.get(index - 1).is_none())
+                    .then(|| name.to_string());
             }
             if is_shell_name(base) {
-                return !self.dynamic_parameter_is_set(base)
+                // GNU subst.c: `${a[k]}` (and the `#a[k]` length form) is
+                // unbound when the element itself does not exist, reporting
+                // the full `a[k]` reference (nameref25.sub ok 1 reports
+                // `a[k]: unbound variable` for an empty array).
+                if let Some((abase, sub)) = parse_array_subscript(core) {
+                    return self.nounset_array_element_unbound(abase, sub, name);
+                }
+                return (!self.dynamic_parameter_is_set(base)
                     && !self.env_vars.contains_key(base)
-                    && std::env::var(base).is_err();
+                    && std::env::var(base).is_err())
+                .then(|| name.to_string());
             }
-            return false;
+            return None;
         }
 
         if let Ok(index) = name.parse::<usize>() {
-            return index > 0 && self.positional_params.get(index - 1).is_none();
+            return (index > 0 && self.positional_params.get(index - 1).is_none())
+                .then(|| name.to_string());
         }
 
         if is_shell_name(name) {
@@ -983,7 +1036,7 @@ impl Executor {
             if is_marked_var(&self.env_vars, NAMEREF_VARS, name) {
                 let cell = self.env_vars.get(name).cloned().unwrap_or_default();
                 if cell.ends_with("[@]") || cell.ends_with("[*]") {
-                    return false;
+                    return None;
                 }
                 if let Some((base, key)) = parse_array_subscript(&cell) {
                     if self.is_assoc_parameter_array(base) {
@@ -991,31 +1044,116 @@ impl Executor {
                         return self
                             .parameter_array_storage(base)
                             .and_then(|storage| assoc_value_at(&storage, &assoc_key))
-                            .is_none();
+                            .is_none()
+                            .then(|| name.to_string());
                     }
-                    let index = self.eval_integer_assignment_value(key);
+                    // GNU evaluates the cell's subscript first; an unset
+                    // subscript name reports itself rather than the nameref
+                    // (nameref25.sub ok 4 reports `k: unbound variable`).
+                    if let Some(unset) = self.nounset_subscript_unset_name(key) {
+                        return Some(unset);
+                    }
                     return self
-                        .env_vars
-                        .get(base)
-                        .and_then(|storage| array_value_at(storage, index as usize))
-                        .is_none();
+                        .nounset_indexed_element_absent(base, key)
+                        .then(|| name.to_string());
                 }
                 if is_shell_name(&cell) {
                     let target = self
                         .resolved_variable_name(&cell)
                         .unwrap_or_else(|| cell.clone());
-                    return !self.dynamic_parameter_is_set(&target)
+                    return (!self.dynamic_parameter_is_set(&target)
                         && !self.env_vars.contains_key(&target)
-                        && std::env::var(&target).is_err();
+                        && std::env::var(&target).is_err())
+                    .then(|| name.to_string());
                 }
-                return false;
+                return None;
             }
-            return !self.dynamic_parameter_is_set(name)
+            return (!self.dynamic_parameter_is_set(name)
                 && !self.env_vars.contains_key(name)
-                && std::env::var(name).is_err();
+                && std::env::var(name).is_err())
+            .then(|| name.to_string());
         }
 
-        false
+        None
+    }
+
+    /// GNU subst.c check_unbound_variable: whether an `a[sub]` element
+    /// reference is unbound -- `[@]`/`[*]` are never unbound, an absent
+    /// element reports the whole `a[k]` reference text.
+    fn nounset_array_element_unbound(
+        &self,
+        base: &str,
+        sub: &str,
+        reported: &str,
+    ) -> Option<String> {
+        if sub == "@" || sub == "*" {
+            return None;
+        }
+        if self.is_assoc_parameter_array(base) {
+            let key = self.assoc_subscript_key(sub);
+            return self
+                .parameter_array_storage(base)
+                .and_then(|storage| assoc_value_at(&storage, &key))
+                .is_none()
+                .then(|| reported.to_string());
+        }
+        // Scalar (or unset) base: only element 0 exists, and only when the
+        // variable itself is set. Array storage consults the element table.
+        match self.env_vars.get(base) {
+            Some(storage) if storage.starts_with('\x1d') || storage.starts_with('(') => self
+                .nounset_indexed_element_absent(base, sub)
+                .then(|| reported.to_string()),
+            Some(_) => (self.eval_integer_assignment_value(sub) != 0)
+                .then(|| reported.to_string()),
+            None => (!self.dynamic_parameter_is_set(base)
+                && std::env::var(base).is_err()
+                || self.eval_integer_assignment_value(sub) != 0)
+                .then(|| reported.to_string()),
+        }
+    }
+
+    /// GNU arrayfunc.c valid_array_reference + variables.c array_value:
+    /// element existence for an indexed-array `a[sub]` reference. `sub` has
+    /// already been screened for unset names by the caller.
+    fn nounset_indexed_element_absent(&self, base: &str, sub: &str) -> bool {
+        let index = self.eval_integer_assignment_value(sub);
+        self.env_vars
+            .get(base)
+            .and_then(|storage| {
+                resolve_indexed_array_subscript(storage, index)
+                    .and_then(|i| array_value_at(storage, i))
+            })
+            .is_none()
+    }
+
+    /// GNU arith.c: while evaluating an indexed-array subscript under
+    /// nounset, the first unset variable name in the expression is the one
+    /// reported as unbound (nameref25.sub ok 4).
+    fn nounset_subscript_unset_name(&self, subscript: &str) -> Option<String> {
+        if subscript.contains('"') || subscript.contains('\'') {
+            return None;
+        }
+        let mut chars = subscript.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if !is_shell_name_start(ch) {
+                continue;
+            }
+            let mut token = String::from(ch);
+            while let Some(&next) = chars.peek() {
+                if !is_shell_name_char(next) {
+                    break;
+                }
+                token.push(next);
+                chars.next();
+            }
+            if !self.dynamic_parameter_is_set(&token)
+                && !self.env_vars.contains_key(&token)
+                && std::env::var(&token).is_err()
+            {
+                return Some(token);
+            }
+        }
+        None
     }
 
     pub(in crate::executor) fn parameter_error_value(&self, name: &str) -> Option<String> {

@@ -4,9 +4,6 @@ use std::io::{self, Write};
 
 use super::diagnostic::diagnostic_prefix;
 use super::marks::{mark_array, mark_assoc, mark_exported, mark_typed, marked_vars, unmark_typed};
-use super::storage::{
-    eval_arith_value, format_indexed_array_storage, indexed_array_entries, parse_array_words,
-};
 use super::{
     ARRAY_VARS, ASSOC_VARS, CAPCASE_VARS, EXECUTION_FAILURE, EXPORTED_VARS, INTEGER_VARS,
     LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, TRACE_VARS, UPPERCASE_VARS,
@@ -42,11 +39,32 @@ pub(super) fn apply_declare_attrs<W>(
     variables: &mut HashMap<String, String>,
     options: DeclareOptions,
     mut attr_status: i32,
+    deleted_names: &std::collections::HashSet<String>,
+    in_function: bool,
     stderr: &mut W,
 ) -> io::Result<i32>
 where
     W: Write,
 {
+    // GNU declare.def:1031-1034 delete_var: names deleted by a failed
+    // created-var assignment must not be resurrected by attribute marking.
+    let names: Vec<&str> = if deleted_names.is_empty() {
+        names.to_vec()
+    } else {
+        names
+            .iter()
+            .copied()
+            .filter(|name| {
+                let base = name
+                    .split_once('=')
+                    .map(|(base, _)| base)
+                    .unwrap_or(name)
+                    .trim_end_matches('+');
+                !deleted_names.contains(base)
+            })
+            .collect()
+    };
+    let names = &names[..];
     let DeclareOptions {
         export,
         array,
@@ -102,7 +120,36 @@ where
     } else {
         attr_targets.iter().map(|(name, _)| name.clone()).collect()
     };
-    let names: Vec<&str> = attr_names_owned.iter().map(String::as_str).collect();
+    // GNU declare.def:764-816 -> variables.c:3061-3069: every attribute
+    // operand naming a VISIBLE empty-cell nameref resolves to NULL through
+    // find_variable_nameref, and the create-path bind_variable returns NULL
+    // for a visible nameref in the global table -- NEXT_VARIABLE silently
+    // skips it, leaving all attributes intact (nameref17.sub: `typeset +r
+    // foo1` and `typeset +n foo1` after the failed `typeset foo1=bar` keep
+    // `declare -nr foo1`). `-n` is exempt: declare.def:684-702 looks the
+    // operand up with find_variable_noref and operates on the nameref
+    // itself. Function scope binds a different table, where the
+    // variables.c:3061 global-table clause does not fire.
+    let declared_unset = marked_vars(variables, super::DECLARED_UNSET_VARS);
+    let nameref_set = marked_vars(variables, NAMEREF_VARS);
+    let names: Vec<&str> = if nameref || in_function {
+        attr_names_owned.iter().map(String::as_str).collect()
+    } else {
+        attr_names_owned
+            .iter()
+            .map(String::as_str)
+            .filter(|name| {
+                let base = name
+                    .split_once('=')
+                    .map(|(base, _)| base)
+                    .unwrap_or(name)
+                    .trim_end_matches('+');
+                !(nameref_set.contains(base)
+                    && !declared_unset.contains(base)
+                    && variables.get(base).map_or(true, |cell| cell.is_empty()))
+            })
+            .collect()
+    };
     let names = &names[..];
     if unset_export
         || unset_array
@@ -211,48 +258,33 @@ where
         }
         variables.entry(name.to_string()).or_default();
     }
+    if nameref {
+        // GNU declare.def:967-968 (ksh93 compat): turning on the nameref
+        // attribute clears -i/-u/-l/-c ALREADY on the variable
+        // (`declare -i ivar` then `declare -n ivar=foo` lists `declare -n`,
+        // nameref19.sub:73). The clear runs before the per-flag mark loops
+        // because GNU VUNSETATTR precedes VSETATTR: `-i` given in the same
+        // command still lands (`declare -in b` keeps -in, nameref23.sub:28).
+        for name in names {
+            let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
+            let name = name.strip_suffix('+').unwrap_or(name);
+            unmark_typed(variables, INTEGER_VARS, name);
+            unmark_typed(variables, UPPERCASE_VARS, name);
+            unmark_typed(variables, LOWERCASE_VARS, name);
+            unmark_typed(variables, CAPCASE_VARS, name);
+        }
+    }
     if integer {
-        for (name_index, name) in names.iter().enumerate() {
+        for name in names.iter() {
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             let name = name.strip_suffix('+').unwrap_or(name);
             mark_typed(variables, INTEGER_VARS, name);
-            // GNU declare.def:667-671 applies att_integer without touching the
-            // stored value; for a nameref the stored value is a variable NAME,
-            // so evaluating it would destroy the reference
-            // (nameref23.sub:48 `declare -ni b` must keep b's cell "a[0]").
-            // The empty cell created by array marking above is NOT a value:
-            // an attribute-only operand (no name=value) must stay empty so
-            // `declare -ai c` lists `declare -ai c` without a phantom
-            // ([0]="0"). An explicit `name=` still evaluates ([0]="0"), and
-            // pre-existing non-empty values keep evaluating.
-            let has_assignment = attr_names_owned[name_index].contains('=');
-            let marking_cell_empty = variables.get(name).map(String::is_empty).unwrap_or(true);
-            if has_assignment || !marking_cell_empty {
-                if !marked_vars(variables, NAMEREF_VARS).contains(name) {
-                    if let Some(value) = variables.get(name).cloned() {
-                        let value = if value.starts_with('\x1d') {
-                            let mut entries = indexed_array_entries(&value);
-                            for element in entries.values_mut() {
-                                *element = eval_arith_value(element).to_string();
-                            }
-                            format_indexed_array_storage(entries)
-                        } else if value.starts_with('(') && value.ends_with(')') {
-                            format!(
-                                "({})",
-                                parse_array_words(&value)
-                                    .into_iter()
-                                    .map(|value| eval_arith_value(&value).to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            )
-                        } else {
-                            eval_arith_value(&value).to_string()
-                        };
-                        variables.insert(name.to_string(), value.clone());
-                        env::set_var(name, value);
-                    }
-                }
-            }
+            // GNU declare.def:988 VSETATTR applies att_integer without
+            // touching the stored value -- evaluation happens only when a
+            // value is later assigned through bind_variable_value
+            // (variables.c:3358-3360). `x=abc; declare -i x` keeps "abc",
+            // and scalar-to-array conversion keeps [0]="one" verbatim
+            // (nameref22.sub:84 `declare -i array[64]` on array=one).
         }
     }
     if uppercase || lowercase || capcase {

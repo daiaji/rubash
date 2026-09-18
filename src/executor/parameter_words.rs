@@ -652,7 +652,15 @@ impl Executor {
         if self.parameter_assignment_failure.get() {
             return;
         }
-        if let Some((name, value)) = inner.split_once(":=") {
+        // GNU subst.c param_expand: `=`/`:=` are parameter operators only at
+        // the top level of the `${...}` body; inside `[...]` they belong to
+        // the array subscript's arithmetic (nameref10.sub:
+        // `${x[i=0$(...)]}` expands element i=0 -- it does not assign
+        // through `x[i` and does not expand the subscript text as the
+        // operator word, which would run the embedded $(...) twice).
+        if let Some((name, value)) =
+            super::expand_braced_ops::split_once_outside_subscript_str(inner, ":=")
+        {
             if self
                 .parameter_operator_value(name)
                 .is_some_and(|value| !value.is_empty())
@@ -675,7 +683,9 @@ impl Executor {
             return;
         }
 
-        if let Some((name, value)) = inner.split_once('=') {
+        if let Some((name, value)) =
+            super::expand_braced_ops::split_once_outside_subscript(inner, '=')
+        {
             if self.parameter_operator_value(name).is_some() {
                 return;
             }

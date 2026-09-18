@@ -147,7 +147,7 @@ impl Executor {
     /// referenced array carries the integer attribute) is written to that
     /// element of the referenced array (nameref23.sub: declare -in b="a[0]";
     /// b+=1 increments a[0]).
-    fn apply_nameref_array_element_assignment(
+    pub(in crate::executor) fn apply_nameref_array_element_assignment(
         &mut self,
         elem_base: &str,
         subscript: &str,
@@ -155,6 +155,7 @@ impl Executor {
         append: bool,
         integer: bool,
         subscript_from_operand: bool,
+        operand_is_funcenv_nameref: bool,
     ) -> bool {
         // GNU arrayfunc.c:268-275 bind_array_variable ->
         // variables.c:2182 find_variable_nameref_for_create: an element
@@ -183,7 +184,28 @@ impl Executor {
                 append,
                 integer,
                 false,
+                false,
             );
+        }
+        // GNU variables.c:3241-3280 bind_variable walks function contexts
+        // first: a cell array-reference reached through a funcenv nameref
+        // goes straight to assign_array_element, whose bind_array_variable
+        // -> find_variable_nameref_for_create (variables.c:2182) requires
+        // the last nameref's cell to be a bare identifier. `a[0]` is not,
+        // so `f() { local -n a=a[0]; a=X; }` fails sh_invalidid and keeps
+        // the local nameref (nameref15.sub:14). Only the global-table path
+        // (bind_variable_internal, variables.c:3085) removes the attribute.
+        if !subscript_from_operand
+            && operand_is_funcenv_nameref
+            && is_marked_var(&self.env_vars, NAMEREF_VARS, elem_base)
+        {
+            let line = format!(
+                "{}`{elem_base}[{subscript}]': not a valid identifier\n",
+                self.assignment_diagnostic_prefix()
+            );
+            self.emit_assignment_diag(line);
+            self.exit_code = 1;
+            return false;
         }
         // GNU arrayfunc.c:464-475 find_or_make_array_variable: when the
         // variable being array-ified is itself a nameref, the attribute is
@@ -387,14 +409,7 @@ impl Executor {
                         base_name
                     );
                     self.emit_assignment_diag(line);
-                    let circular_value = if append {
-                        let current =
-                            self.circular_fallback_value(base_name).unwrap_or_default();
-                        format!("{current}{value}")
-                    } else {
-                        value.clone()
-                    };
-                    self.assign_circular_fallback(base_name, circular_value);
+                    self.assign_circular_fallback(base_name, value.clone(), append);
                     return true;
                 }
                 // At global scope find_variable_nameref's circular branch
@@ -479,8 +494,21 @@ impl Executor {
                 return false;
             }
         }
+        // GNU variables.c:3241 bind_variable: a SCALAR operand whose name
+        // is a nameref in a live function context resolves through
+        // find_variable_nameref_context, whose array-reference cell then
+        // goes straight to assign_array_element (no attribute strip --
+        // unlike the global bind_variable_internal path).
+        let operand_is_funcenv_nameref = is_marked_var(&self.env_vars, NAMEREF_VARS, base_name)
+            && self
+                .local_var_scopes
+                .iter()
+                .any(|scope| scope.contains_key(base_name));
         let base_name = target_name.as_str();
         // GNU arrayfunc.c/variables.c: a nameref whose cell is an array
+        // element (declare -in b="a[0]"; b+=1) binds through to that element
+        // of the referenced array instead of creating a variable literally
+        // named a[0] (nameref23.sub).
         // element (declare -in b="a[0]"; b+=1) binds through to that element
         // of the referenced array instead of creating a variable literally
         // named a[0] (nameref23.sub).
@@ -515,16 +543,37 @@ impl Executor {
                         append,
                         integer,
                         subscript_from_operand,
+                        operand_is_funcenv_nameref,
                     );
                 }
-                // Variable not yet declared as an array: create it as an
-                // indexed array on demand (GNU find_or_make_array_variable
-                // at arrayfunc.c:453). Skip empty subscripts and [@]/[*]
-                // which are not valid for element assignment.
-                if !subscript.is_empty()
-                    && subscript != "@"
-                    && subscript != "*"
-                    && is_shell_name(elem_base)
+                // GNU arrayfunc.c:334-360 assign_array_element: the element
+                // reference must be name[subscript] with a non-empty,
+                // non-@/* subscript and a valid base -- otherwise
+                // err_badarraysub (`var[@]': bad array subscript for a
+                // nameref cell like `var[@]`, nameref15.sub:78) or
+                // sh_invalidid on the cell text (`a-b[0]').
+                if !is_shell_name(elem_base) {
+                    let line = format!(
+                        "{}`{}': not a valid identifier
+",
+                        self.assignment_diagnostic_prefix(),
+                        base_name
+                    );
+                    self.emit_assignment_diag(line);
+                    self.exit_code = 1;
+                    return false;
+                }
+                if subscript.is_empty() || subscript == "@" || subscript == "*" {
+                    let line = format!(
+                        "{}{}: bad array subscript
+",
+                        self.assignment_diagnostic_prefix(),
+                        base_name
+                    );
+                    self.emit_assignment_diag(line);
+                    self.exit_code = 1;
+                    return false;
+                }
                 {
                     if is_marked_var(&self.env_vars, "__RUBASH_READONLY_VARS", elem_base) {
                         let line = format!(
@@ -545,6 +594,7 @@ impl Executor {
                         append,
                         integer,
                         subscript_from_operand,
+                        operand_is_funcenv_nameref,
                     );
                 }
             }

@@ -983,6 +983,18 @@ impl Executor {
                     if can_bind {
                     match self.nameref_resolution(&array_name) {
                         NamerefResolution::Target(target) => {
+                            // GNU execute_cmd.c coproc_bind ->
+                            // find_variable_nameref_for_create: the cell must
+                            // be a bare identifier — `coproc ref` with ref ->
+                            // `XXX[0]` fails sh_invalidid and binds nothing
+                            // (nameref18.sub line 51).
+                            if parse_array_subscript(&target).is_some() {
+                                eprintln!(
+                                    "{}`{target}': not a valid identifier",
+                                    self.diagnostic_prefix()
+                                );
+                                can_bind = false;
+                            } else {
                             let target_base =
                                 target.split('[').next().unwrap_or(target.as_str());
                             let target_exists = self.env_vars.contains_key(target_base)
@@ -1012,6 +1024,7 @@ impl Executor {
                                 // c_name rewritten to the nameref cell
                                 // (execute_cmd.c:2401-2404).
                                 c_name = target_base.to_string();
+                            }
                             }
                         }
                         NamerefResolution::Unresolved => {

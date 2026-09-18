@@ -48,6 +48,41 @@ impl Executor {
         }
     }
 
+    /// GNU make_local_variable bookkeeping for one name: snapshot the env
+    /// value, attribute set, and typed slot into the current frame so the
+    /// frame restore returns them to the caller. No-op outside a function or
+    /// when the name is already local at this frame.
+    pub(in crate::executor) fn save_frame_local_name(&mut self, name: &str) {
+        if self
+            .local_var_scopes
+            .last()
+            .is_none_or(|scope| scope.contains_key(name))
+        {
+            return;
+        }
+        let env_value = self.env_vars.get(name).cloned();
+        let attrs = capture_var_attrs(&self.env_vars, name);
+        let typed = self.shell_state.variables.get(name).cloned();
+        if let Some(scope) = self.local_var_scopes.last_mut() {
+            scope.insert(name.to_string(), env_value);
+        }
+        if let Some(attr_scope) = self.local_attr_scopes.last_mut() {
+            attr_scope.insert(name.to_string(), attrs);
+        }
+        if let Some(typed_scope) = self.local_typed_scopes.last_mut() {
+            typed_scope.insert(name.to_string(), typed);
+        }
+        if name == "OPTIND" {
+            if let Some(scope) = self.local_var_scopes.last_mut() {
+                if !scope.contains_key("__RUBASH_GETOPTS_OFFSET") {
+                    let saved = self.env_vars.get("__RUBASH_GETOPTS_OFFSET").cloned();
+                    scope.insert("__RUBASH_GETOPTS_OFFSET".to_string(), saved);
+                }
+            }
+            self.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
+        }
+    }
+
     pub(in crate::executor) fn save_assignment_local_names(
         &mut self,
         assignments: &[(String, String)],

@@ -352,6 +352,9 @@ impl Executor {
         );
         self.arithmetic_last_error_category.set(category);
         self.report_arithmetic_readonly_error();
+        // GNU $((r=0)) with an empty nameref cell still yields the assigned
+        // value while reporting the failed bind without a command label.
+        self.report_arithmetic_nameref_error(None);
 
         // Sync any variable changes from env_vars to shell_state.variables
         // so that subsequent parameter expansions see arithmetic side effects

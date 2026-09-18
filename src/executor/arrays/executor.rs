@@ -5,6 +5,7 @@ use crate::executor::{
     eval_conditional_arith_value_with_writes, IndexedSubscript, SubscriptSource,
     DECLARED_UNSET_VARS, NAMEREF_VARS,
 };
+use crate::executor::NamerefResolution;
 
 impl Executor {
     pub(in crate::executor) fn indexed_array_stack(&self, name: &str) -> Vec<String> {
@@ -333,6 +334,46 @@ impl Executor {
             return Some(vec![self
                 .groups_words()
                 .join(&self.ifs_first_char_separator())]);
+        }
+        // GNU variables.c find_variable_nameref: an unbraced `$ref` word
+        // whose nameref cell is an array-at reference (`arr[@]`) expands the
+        // referenced array's elements -- quoted `[@]` yields one word per
+        // element and `[*]` a single joined word (nameref18.sub
+        // `recho "$ref"` yields argv[1..3] = <1> <2> <3>). A BRACED
+        // `"${ref}"` stays scalar (parameter_brace_expand reads it through
+        // the scalar name path), so only the unbraced form qualifies. A
+        // trailing PARAM_NAME_END_MARKER is the quote-boundary marker the
+        // lexer leaves on a quoted unbraced `$name` (`"$ref"` arrives as
+        // `$ref\x13`), and it counts as quoting for the [*] join.
+        let quoted_array_word = quoted_array_word || word.ends_with('\u{13}');
+        let bare_name = word
+            .strip_prefix('$')
+            .filter(|name| !name.starts_with('{'))
+            .map(|name| name.trim_end_matches('\u{13}'))
+            .filter(|name| is_shell_name(name));
+        if let Some(name) = bare_name {
+            if let NamerefResolution::Target(target) = self.nameref_resolution(name) {
+                if let Some(array_name) = target.strip_suffix("[@]") {
+                    if let Some(storage) = self.parameter_array_storage(array_name) {
+                        if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                            return Some(assoc_hash_ordered_values(&storage));
+                        }
+                        return Some(array_values(&storage));
+                    }
+                } else if let Some(array_name) = target.strip_suffix("[*]") {
+                    if let Some(storage) = self.parameter_array_storage(array_name) {
+                        let values = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                            assoc_hash_ordered_values(&storage)
+                        } else {
+                            array_values(&storage)
+                        };
+                        if quoted_array_word {
+                            return Some(vec![values.join(&self.ifs_first_char_separator())]);
+                        }
+                        return Some(values);
+                    }
+                }
+            }
         }
         let name = word.strip_prefix("${").and_then(|word| {
             if quoted_array_word {

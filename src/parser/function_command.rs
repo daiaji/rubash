@@ -89,11 +89,24 @@ pub(super) fn parse_function_command(
         // as one token. Recognize it as a function body for `name() { ...; }`
         // until the parser owns brace groups structurally.
         let inner = group.trim_start_matches('{').trim_end_matches('}').trim();
-        let body_tokens = crate::lexer::tokenize(inner);
-        let mut body = parse(&body_tokens).commands;
-        if let Some(line) = tokens.get(start).map(|token| token.position) {
-            set_body_line(&mut body, line);
+        let mut body_tokens = crate::lexer::tokenize(inner);
+        // GNU parse.y keeps absolute source lines inside function bodies:
+        // `typeset -n v=$1` under a multi-line `function f1 { ... }` reports
+        // its own line (nameref8.sub: line 16, not the `function` line 14).
+        // The re-lexed tokens are relative to `inner`; inner line 1 is the
+        // first non-whitespace byte after the group token's open brace.
+        if let Some(group_token) = tokens.get(i) {
+            let raw = group_token.raw.as_str();
+            let open = raw.find('{').map(|at| at + 1).unwrap_or(0);
+            let close = raw.rfind('}').unwrap_or(raw.len());
+            let span = raw.get(open..close).unwrap_or("");
+            let lead = span.len() - span.trim_start().len();
+            let base = group_token.position + raw[..open + lead].matches('\n').count();
+            for token in &mut body_tokens {
+                token.position += base - 1;
+            }
         }
+        let mut body = parse(&body_tokens).commands;
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.function_command = Some(function_command(
@@ -118,8 +131,8 @@ pub(super) fn parse_function_command(
         return Some(finish_function_command(command, tokens, i + 1));
     }
     if let Some((mut body_command, body_end)) = parse_function_compound_body(tokens, i) {
-        if let Some(line) = tokens.get(start).map(|token| token.position) {
-            body_command.line = Some(line);
+        if body_command.line.is_none() {
+            body_command.line = tokens.get(start).map(|token| token.position);
         }
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
@@ -153,9 +166,6 @@ pub(super) fn parse_function_command(
             let command = unclosed_paren_eof_node(tokens, i);
             return Some((command, tokens.len()));
         };
-        if let Some(line) = tokens.get(start).map(|token| token.position) {
-            set_body_line(&mut body, line);
-        }
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.function_command = Some(function_command(
@@ -179,9 +189,6 @@ pub(super) fn parse_function_command(
     }
 
     if let Some((mut body, body_end)) = parse_function_command_sequence_body(tokens, i) {
-        if let Some(line) = tokens.get(start).map(|token| token.position) {
-            set_body_line(&mut body, line);
-        }
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.function_command = Some(function_command(

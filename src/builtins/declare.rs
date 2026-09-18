@@ -22,7 +22,7 @@ use diagnostic::diagnostic_prefix;
 use marks::{marked_vars, unmark_typed};
 use names::{
     check_selfref, declare_base_name, valid_array_reference, valid_declare_name,
-    valid_nameref_value,
+    valid_identifier, valid_nameref_value,
 };
 use storage::{format_array_value, format_assoc_value, indexed_array_entries, parse_assoc_words};
 
@@ -262,6 +262,35 @@ fn declare_nameref_chain(
     Some((last, current))
 }
 
+/// GNU declare.def:623-640 declare_transform_name: at function scope every
+/// operand (bare or `name=value`) resolves through namerefs to the name that
+/// make_local_variable actually localizes -- `declare -a ref` on ref->var
+/// creates a local array `var`, and a bare `declare ref` creates local `var`.
+/// Returns the resolved operand names (bare names of `x[i]` cells included).
+pub(crate) fn nameref_resolved_operand_names(
+    args: &[String],
+    variables: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut resolved = Vec::new();
+    for arg in args {
+        if arg == "--" || arg == "-" || arg == "+" {
+            continue;
+        }
+        if arg.starts_with('-') || arg.starts_with('+') {
+            continue;
+        }
+        let (raw_lhs, _) = arg.split_once('=').unwrap_or((arg.as_str(), ""));
+        let lhs = raw_lhs.strip_suffix('+').unwrap_or(raw_lhs);
+        let Some(base) = declare_base_name(lhs) else {
+            continue;
+        };
+        if let Some((_, target)) = declare_nameref_chain(variables, base) {
+            resolved.push(target);
+        }
+    }
+    resolved
+}
+
 pub(crate) fn execute_with_io<W, E>(
     args: &[String],
     variables: &mut HashMap<String, String>,
@@ -286,7 +315,7 @@ where
     W: Write,
     E: Write,
 {
-    execute_with_io_named_in_context(command_name, args, variables, stdout, stderr, false)
+    execute_with_io_named_in_context(command_name, args, variables, stdout, stderr, false, &[])
 }
 
 /// GNU builtins/declare.def decides between the global-scope self-reference
@@ -301,6 +330,7 @@ pub(crate) fn execute_with_io_named_in_context<W, E>(
     stdout: &mut W,
     stderr: &mut E,
     in_function: bool,
+    frame_locals: &[String],
 ) -> io::Result<i32>
 where
     W: Write,
@@ -428,6 +458,7 @@ where
         }
     }
     let mut assign_names = Vec::new();
+    let mut drop_nameref_attrs: Vec<String> = Vec::new();
     let mut attr_status = EXECUTION_SUCCESS;
     let arrays = marked_vars(variables, ARRAY_VARS);
     let assocs = marked_vars(variables, ASSOC_VARS);
@@ -451,6 +482,24 @@ where
         if nameref && integer && !value.is_empty() {
             continue;
         }
+        // GNU declare.def:554-558 + 966-980: a real compound assignment
+        // operand under -n reports `name: reference variable cannot be an
+        // array`, the array attribute wins so the compound still assigns,
+        // and onref is dropped so the nameref attribute is never set
+        // (nameref22.sub:74 `declare -n array=(one two three)` errors yet
+        // leaves `declare -a array=([0]="one" ...)`).
+        if nameref && value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+            writeln!(
+                stderr,
+                "{}{command_name}: {}: reference variable cannot be an array",
+                diagnostic_prefix(variables),
+                lhs
+            )?;
+            attr_status = EXECUTION_FAILURE;
+            drop_nameref_attrs.push(lhs.to_string());
+            assign_names.push(*name);
+            continue;
+        }
         if nameref {
             // declare.def:554: a nameref cannot be declared as an array
             // reference name (x[3]).
@@ -471,6 +520,16 @@ where
                     writeln!(
                         stderr,
                         "{}{command_name}: warning: {}: circular name reference",
+                        diagnostic_prefix(variables),
+                        lhs
+                    )?;
+                    // bind_variable_value's ASS_NAMEREF check_selfref
+                    // (variables.c:3324) reports the same self-reference via
+                    // internal_warning — a second, unqualified diagnostic —
+                    // then still stores the cell.
+                    writeln!(
+                        stderr,
+                        "{}warning: {}: circular name reference",
                         diagnostic_prefix(variables),
                         lhs
                     )?;
@@ -538,6 +597,21 @@ where
                     "{}{command_name}: {}: reference variable cannot be an array",
                     diagnostic_prefix(variables),
                     lhs
+                )?;
+                attr_status = EXECUTION_FAILURE;
+                continue;
+            }
+            // GNU variables.c bind_variable_value ASS_NAMEREF path: an
+            // explicit `declare -n name=` assignment binds "" as the cell,
+            // which fails valid_nameref_value and reports
+            // `` `': not a valid identifier `` -- the variable is not
+            // created, and an existing nameref keeps its cell
+            // (nameref24.sub:24 `declare -n name3=`).
+            if !append && name.contains('=') && value.is_empty() {
+                writeln!(
+                    stderr,
+                    "{}{command_name}: `': not a valid identifier",
+                    diagnostic_prefix(variables)
                 )?;
                 attr_status = EXECUTION_FAILURE;
                 continue;
@@ -660,6 +734,40 @@ where
             let chain = declare_nameref_chain(variables, lhs);
             if let Some((last_nameref, target)) = chain {
                 if unset_nameref {
+                    // GNU declare.def:678-682/716-724 (ksh93 compat): the
+                    // nameref attribute cannot be removed from a readonly
+                    // nameref that carries a cell. At global scope the
+                    // last-nameref lookup always lands on the nameref, so
+                    // any non-empty cell errors. Inside a function the
+                    // operand is first resolved to a local var; when the
+                    // cell's target exists the same readonly check fires,
+                    // but when the target is missing the rewrite silently
+                    // keeps the nameref (nameref17.sub: typeset +n foo4 with
+                    // cell -> existing bar4 errors, cell -> missing stays).
+                    let cell = variables
+                        .get(&last_nameref)
+                        .cloned()
+                        .unwrap_or_default();
+                    let readonly_with_cell =
+                        marked_vars(variables, READONLY_VARS).contains(last_nameref.as_str())
+                            && !cell.is_empty();
+                    if readonly_with_cell {
+                        let cell_base = cell.split('[').next().unwrap_or(cell.as_str());
+                        let target_exists = !in_function
+                            || variables.contains_key(cell_base)
+                            || marked_vars(variables, ARRAY_VARS).contains(cell_base)
+                            || marked_vars(variables, ASSOC_VARS).contains(cell_base);
+                        if target_exists {
+                            writeln!(
+                                stderr,
+                                "{}{command_name}: {}: readonly variable",
+                                diagnostic_prefix(variables),
+                                last_nameref
+                            )?;
+                            attr_status = EXECUTION_FAILURE;
+                        }
+                        continue;
+                    }
                     if let Some(value) = value {
                         effective_assign_names.push(if append {
                             format!("{target}+={value}")
@@ -676,6 +784,35 @@ where
                     continue;
                 }
                 if !nameref {
+                    // GNU arrayfunc.c:454 find_or_make_array_variable ->
+                    // variables.c:2201 find_variable_nameref_for_create: a
+                    // compound `=(...)` value through a nameref requires a
+                    // bare-identifier cell; an element cell like `D[2]`
+                    // fails sh_invalidid. An attribute-only `declare -a/-A`
+                    // instead applies the flag to the cell's array BASE
+                    // name (nameref18.sub: `declare -A r` with r -> `A[0]`
+                    // yields `declare -A A`).
+                    let compound_value = value.is_some_and(|v| {
+                        v.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+                    });
+                    if compound_value && !valid_identifier(&target) {
+                        writeln!(
+                            stderr,
+                            "{}`{target}': not a valid identifier",
+                            diagnostic_prefix(variables)
+                        )?;
+                        attr_status = EXECUTION_FAILURE;
+                        continue;
+                    }
+                    let target = if value.is_none() && (array || assoc) {
+                        target
+                            .split('[')
+                            .next()
+                            .unwrap_or(target.as_str())
+                            .to_string()
+                    } else {
+                        target
+                    };
                     match value {
                         Some(value) => effective_assign_names.push(if append {
                             format!("{target}+={value}")
@@ -693,14 +830,22 @@ where
         effective_assign_names.extend(assign_names.iter().map(|name| (*name).to_string()));
     }
     let attr_names: Vec<&str> = effective_assign_names.iter().map(String::as_str).collect();
+    // GNU declare.def:1031-1034: a failed ASS_NAMEREF assignment to a
+    // freshly-created (invisible/empty-cell) variable deletes it outright;
+    // the attribute pass must not resurrect the name.
+    let mut deleted_names = std::collections::HashSet::new();
     if assign_declare_names(
         command_name,
         &attr_names,
         variables,
+        frame_locals,
+        nameref,
+        in_function,
         array,
         assoc,
         integer,
         !print,
+        &mut deleted_names,
         stderr,
     )? != EXECUTION_SUCCESS
     {
@@ -749,8 +894,14 @@ where
             variables,
             options,
             attr_status,
+            &deleted_names,
+            in_function,
             stderr,
         )?;
+        // declare.def:978-981: array/compound operands drop the deferred -n.
+        for name in &drop_nameref_attrs {
+            unmark_typed(variables, NAMEREF_VARS, name);
+        }
     }
 
     let plain = names.is_empty() && !had_name_args && !print && !saw_option;
