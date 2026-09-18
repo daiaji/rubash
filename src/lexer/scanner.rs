@@ -337,6 +337,33 @@ impl<'a> Lexer<'a> {
                 }
                 let scan = self.skip_brace();
                 if !scan.closed {
+                    // GNU parse.y read_token: `{` is an ordinary word
+                    // character (it is not in shell_break_chars,
+                    // syntax.h:30); it becomes the reserved word '{' only
+                    // when the whole token is `{' and the grammar is in
+                    // command position (reserved_word_acceptable,
+                    // parse.y:5899). A group whose `}' is not on this
+                    // logical line must not be folded into one token: emit
+                    // just the opener and rescan the rest of the line as
+                    // ordinary tokens, so the parser pairs the `{` with a
+                    // `}' from a later logical line
+                    // (matching_brace_group_end) -- the path multiline
+                    // `f() {' bodies already take. Without this,
+                    // `f() { echo x;' + `}' and `f() { echo x; # note' + `}'
+                    // died as "unexpected end of file from `{' command"
+                    // even though GNU reads on to the close brace
+                    // (niubash#130). Only a standalone `{' qualifies: the
+                    // byte after the brace must end the word the way GNU's
+                    // break set ends a token, because `{a,b'/`{#note' are
+                    // single words there.
+                    if self.input[start + 1..]
+                        .chars()
+                        .next()
+                        .map_or(true, |ch| "()<>;&| \t\n\r".contains(ch))
+                    {
+                        self.position = start + 1;
+                        return Some(Token::new(TokenKind::Keyword, "{", start));
+                    }
                     if let Some(comment_start) = scan.comment_start {
                         // A word-initial `#' at the group's top level is a
                         // comment, not group text (parse.y read_token ->
