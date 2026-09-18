@@ -252,18 +252,16 @@ impl Executor {
             self.pending_scalar_assignment =
                 expanded_value.starts_with('\x1d') && value.contains(['$', '`']);
             if !self.apply_shell_assignment(name, expanded_value) {
-                status = 1;
-                let (base_name, _) = assignment_name_and_append(name);
-                if is_marked_var(&self.env_vars, READONLY_VARS, base_name)
-                    && !special_readonly_assignment_is_recoverable(base_name)
-                {
-                    self.exit_code = 1;
-                    let script_mode_nonfatal = self.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
-                        && (!self.errexit_enabled() || !self.errexit_is_active());
-                    if !script_mode_nonfatal {
-                        return Err(ExecuteError::ExitCode(1));
-                    }
-                }
+                // GNU subst.c:8153-8165 + 11169 bash_variable_assignment_error:
+                // a failed standalone assignment (readonly violation, invalid
+                // nameref value, ...) prints its diagnostic and then
+                // exp_jump_to_top_level(DISCARD) in a noninteractive shell —
+                // the rest of the current command list is abandoned, the
+                // script continues on the next line with status 1.
+                // ExpansionFailure carries exactly that contract at top level
+                // (ast_exec.rs skips the remaining same-line commands).
+                self.exit_code = 1;
+                return Err(ExecuteError::ExpansionFailure(1));
             }
             // GNU variables.c make_variable_value: an integer-attribute
             // assignment that fails arithmetic evaluation (e.g. `i=0#4`
@@ -1459,13 +1457,6 @@ impl Executor {
         eprintln!("{}no match: {pattern}", self.diagnostic_prefix());
         self.exit_code = 1;
     }
-}
-
-fn special_readonly_assignment_is_recoverable(name: &str) -> bool {
-    matches!(
-        name,
-        "BASHOPTS" | "BASH_VERSINFO" | "EUID" | "PPID" | "SHELLOPTS" | "UID"
-    )
 }
 
 fn assignment_builtin_receives_assignment_word(

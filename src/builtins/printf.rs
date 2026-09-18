@@ -186,8 +186,15 @@ where
     };
 
     let rendered = render(format, &args[index + 1..], env_vars);
+    let mut assign_status = None;
     if let Some(name) = output_var {
-        assign_printf_output(env_vars, name, rendered.output, variables.as_deref_mut());
+        assign_status = assign_printf_output(
+            env_vars,
+            name,
+            rendered.output,
+            variables.as_deref_mut(),
+            stderr,
+        )?;
     } else {
         stdout.write_all(&escape::raw_bytes(&rendered.output))?;
     }
@@ -196,7 +203,7 @@ where
         writeln!(stderr, "{error}")?;
     }
 
-    Ok(rendered.status)
+    Ok(assign_status.unwrap_or(rendered.status))
 }
 
 /// GNU printf.c diagnostics go through builtin_error -> error_prolog, which
@@ -222,12 +229,59 @@ fn valid_printf_array_target(name: &str, env_vars: &HashMap<String, String>) -> 
     resolve_printf_indexed_subscript(env_vars, base, subscript).is_some()
 }
 
+/// GNU builtins/common.c:949 builtin_bind_variable -> bind_variable:
+/// a `-v` operand that is a nameref assigns through the resolved target
+/// (variables.c find_variable_nameref_for_assignment). An empty nameref
+/// cell assigns the cell itself (the nameref value), matching
+/// `declare -n er; printf -v er z` -> `declare -n er="z"`.
+fn resolve_printf_bind_name(env_vars: &HashMap<String, String>, name: &str) -> String {
+    if !valid_identifier(name) || !is_marked(env_vars, "__RUBASH_NAMEREF_VARS", name) {
+        return name.to_string();
+    }
+    let mut current = name.to_string();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..8 {
+        if !seen.insert(current.clone()) {
+            return name.to_string();
+        }
+        let cell = env_vars.get(&current).cloned().unwrap_or_default();
+        if cell.is_empty() {
+            return current;
+        }
+        if !valid_identifier(cell.as_str())
+            || !is_marked(env_vars, "__RUBASH_NAMEREF_VARS", cell.as_str())
+        {
+            return cell;
+        }
+        current = cell;
+    }
+    name.to_string()
+}
+
 fn assign_printf_output(
     env_vars: &mut HashMap<String, String>,
     name: &str,
     output: String,
     mut variables: Option<&mut VariableStore>,
-) {
+    stderr: &mut dyn Write,
+) -> io::Result<Option<i32>> {
+    let resolved = resolve_printf_bind_name(env_vars, name);
+    let name = resolved.as_str();
+    // GNU printf.def:114 `v == 0 || ASSIGN_DISALLOWED(v, 0)` ->
+    // EXECUTION_FAILURE; bind_variable prints the readonly diagnostic
+    // naming the resolved variable (variables.c assign_readonly).
+    let readonly_name = parse_printf_array_target(name)
+        .map(|(base, _)| base)
+        .unwrap_or(name);
+    if is_marked(env_vars, "__RUBASH_READONLY_VARS", readonly_name) {
+        writeln!(
+            stderr,
+            "{}{}: readonly variable",
+            diagnostic_prefix(env_vars),
+            name
+        )?;
+        return Ok(Some(1));
+    }
     if let Some((base, subscript)) = parse_printf_array_target(name) {
         if is_marked(env_vars, "__RUBASH_ASSOC_VARS", base) {
             if let Some(store) = variables.as_deref_mut() {
@@ -242,13 +296,14 @@ fn assign_printf_output(
         } else {
             env_vars.insert(name.to_string(), output);
         }
-        return;
+        return Ok(None);
     }
 
     if let Some(store) = variables.as_deref_mut() {
         let _ = store.set_scalar(name, output.clone());
     }
     env_vars.insert(name.to_string(), output);
+    Ok(None)
 }
 
 fn parse_printf_array_target(name: &str) -> Option<(&str, &str)> {
