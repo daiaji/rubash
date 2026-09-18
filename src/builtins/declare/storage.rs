@@ -1,6 +1,5 @@
 mod array;
 mod assoc;
-mod glob;
 mod words;
 
 pub(super) use array::{append_array_value, format_indexed_array_storage, indexed_array_entries};

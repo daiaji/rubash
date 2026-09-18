@@ -478,10 +478,16 @@ impl Executor {
         &mut self,
         command: &CommandNode,
     ) -> Result<(), ExecuteError> {
+        // GNU trap.c run_error_trap (execute_cmd.c callers): the ERR trap
+        // refuses to run while it is already in progress —
+        // `signal_in_progress (ERROR_TRAP)` — so a failing command inside
+        // the ERR action cannot recursively re-trigger it. Rubash's
+        // error_trap_running flag mirrors SIG_INPROGRESS.
         if self.exit_code == 0
             || command.inverted
             || command.and_or().is_some()
             || self.suppress_errexit != 0
+            || self.error_trap_running
             || (self.function_depth > 0
                 && !crate::builtins::set::shell_option_enabled(&self.env_vars, "errtrace"))
         {
@@ -493,6 +499,7 @@ impl Executor {
         if action.is_empty() {
             return Ok(());
         }
+        self.error_trap_running = true;
         let saved_exit = self.exit_code;
         let saved_trap_command = self.debug_trap_command.borrow().clone();
         *self.debug_trap_command.borrow_mut() =
@@ -513,6 +520,7 @@ impl Executor {
         }
         let _ = self.execute_ast(&ast);
         *self.debug_trap_command.borrow_mut() = saved_trap_command;
+        self.error_trap_running = false;
         self.exit_code = saved_exit;
         Ok(())
     }

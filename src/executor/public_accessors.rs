@@ -583,6 +583,20 @@ impl Executor {
     }
 
     pub(in crate::executor) fn set_current_command(&mut self, cmd: &CommandNode) {
+        // GNU the_printed_command_except_trap is only refreshed when no trap
+        // action is running — every print site guards with
+        // `signal_in_progress (DEBUG_TRAP) == 0 && running_trap == 0`
+        // (execute_cmd.c:4499-4501 and the compound heads), so commands
+        // executed inside a DEBUG/ERR/RETURN/signal trap action never replace
+        // the trapped command's text that BASH_COMMAND exposes
+        // (variables.c:1558 get_bash_command).
+        if self.debug_trap_running
+            || self.error_trap_running
+            || self.return_trap_running
+            || self.signal_trap_running
+        {
+            return;
+        }
         let command = bash_command_text(cmd);
         self.env_vars
             .insert("__RUBASH_LAST_COMMAND".to_string(), command.clone());

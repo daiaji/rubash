@@ -17,14 +17,12 @@ pub(super) use storage::{
 };
 
 use std::collections::{BTreeMap, HashMap};
-use std::env;
-use std::fs;
 
 use super::{
-    apply_parameter_case_mod, assoc_value_at, case_pattern_matches, eval_arith_value,
+    apply_parameter_case_mod, assoc_value_at, eval_arith_value,
     eval_conditional_arith_value, is_marked_var, is_shell_name, parse_indirect_pattern_removal,
     parse_parameter_case_mod, parse_parameter_replacement, parse_parameter_transform,
-    pattern_contains_glob, remove_parameter_pattern, split_storage_words,
+    remove_parameter_pattern, split_storage_words,
     strip_matching_quotes, unquote_storage_value, Executor, ParameterTransform,
     ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
@@ -519,26 +517,40 @@ pub(super) fn word_is_unquoted_array_list_expansion(word: &str) -> bool {
     name.ends_with("[@]") || name.ends_with("[*]")
 }
 
-pub(super) fn pathname_expand_array_token(token: &str) -> Option<Vec<String>> {
-    if token.starts_with('"') || token.starts_with('\'') || !pattern_contains_glob(token) {
-        return None;
+/// GNU arrayfunc.c:557 expand_compound_array_assignment sends every
+/// non-W_NOGLOB element word of a compound array assignment through the real
+/// pathname expansion (subst.c glob_vector / unquoted_glob_pattern_p rules):
+/// nullglob removes an unmatched word, failglob aborts the whole
+/// assignment, and slash-bearing patterns match path components. The
+/// previous hand-rolled `read_dir(".")` matcher returned `None` on no
+/// match, so callers stored the literal pattern and nullglob could never
+/// empty a list (niubash #121).
+pub(super) fn pathname_expand_array_token(
+    token: &str,
+    env_vars: &HashMap<String, String>,
+) -> crate::executor::glob::PathnameExpansion {
+    crate::executor::glob::pathname_expand_word(token, env_vars)
+}
+
+/// GNU arrayfunc.c quote_array_assignment_chars (arrayfunc.c:1107+) marks
+/// `[subscript]=value` / `[subscript]+=value` compound words W_NOGLOB: they
+/// are assignment words, not pathname patterns, so `[0]=nope-*` keeps its
+/// literal element even under nullglob/failglob. Field-split products are
+/// plain words again and do glob (array19.sub stores "[2]=2]" literally as
+/// an element, not an assignment), so callers only consult this for the
+/// original token.
+fn token_is_subscript_assignment(token: &str) -> bool {
+    if let Some((left, _)) = token.split_once('=') {
+        if array_assignment_has_subscript(left) {
+            return true;
+        }
     }
-    if token.contains('/') || token.contains('\\') {
-        return None;
+    if let Some((left, _)) = token.split_once("+=") {
+        if array_assignment_has_subscript(left) {
+            return true;
+        }
     }
-    let include_dotfiles = token.starts_with('.');
-    let mut matches = fs::read_dir(env::current_dir().ok()?)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| include_dotfiles || !name.starts_with('.'))
-        .filter(|name| case_pattern_matches(token, name))
-        .collect::<Vec<_>>();
-    if matches.is_empty() {
-        return None;
-    }
-    matches.sort();
-    Some(matches)
+    false
 }
 
 /// Restores the lexer carrier bytes (\x14 backslash, \x17 single quote,
@@ -556,13 +568,18 @@ fn restore_quote_carriers(value: &str) -> String {
         .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
 }
 
+/// GNU assign_compound_array_list (arrayfunc.c:700+): builds the indexed
+/// element map for a compound `( ... )` value. `Err(pattern)` reports a
+/// failglob pathname-expansion failure on one element word — GNU
+/// expand_compound_array_assignment (arrayfunc.c:557) aborts the whole
+/// assignment then, leaving the target's previous binding untouched.
 pub(super) fn append_array_value(
     current: &str,
     value: &str,
     integer: bool,
     ifs: Option<&str>,
     env_vars: &HashMap<String, String>,
-) -> String {
+) -> Result<String, String> {
     let mut entries = indexed_array_entries(current);
     let mut next_index = entries
         .keys()
@@ -584,12 +601,23 @@ pub(super) fn append_array_value(
         })
         .collect::<Vec<_>>();
     for token in tokens {
-        if let Some(matches) = pathname_expand_array_token(&token) {
-            for value in matches {
-                entries.insert(next_index, value);
-                next_index += 1;
+        // GNU ordering: quote_array_assignment_chars already marked
+        // [subscript]=value words W_NOGLOB, so pathname expansion applies
+        // only to ordinary element words (niubash #121).
+        if !token_is_subscript_assignment(&token) {
+            match pathname_expand_array_token(&token, env_vars) {
+                crate::executor::glob::PathnameExpansion::Matches(matches) => {
+                    for value in matches {
+                        entries.insert(next_index, value);
+                        next_index += 1;
+                    }
+                    continue;
+                }
+                crate::executor::glob::PathnameExpansion::NoMatch => {}
+                crate::executor::glob::PathnameExpansion::Fail(pattern) => {
+                    return Err(pattern);
+                }
             }
-            continue;
         }
 
         if let Some((left, rhs)) = token.split_once("+=") {
@@ -630,14 +658,20 @@ pub(super) fn append_array_value(
             || (token.starts_with('\'') && token.ends_with('\'') && token.len() >= 2);
         if let Some(token) = token.strip_prefix(ARRAY_FIELD_SPLIT_MARKER) {
             let token = unquote_storage_value(token);
-            if let Some(matches) = pathname_expand_array_token(&token) {
-                for value in matches {
-                    entries.insert(next_index, value);
+            match pathname_expand_array_token(&token, env_vars) {
+                crate::executor::glob::PathnameExpansion::Matches(matches) => {
+                    for value in matches {
+                        entries.insert(next_index, value);
+                        next_index += 1;
+                    }
+                }
+                crate::executor::glob::PathnameExpansion::NoMatch => {
+                    entries.insert(next_index, token);
                     next_index += 1;
                 }
-            } else {
-                entries.insert(next_index, token);
-                next_index += 1;
+                crate::executor::glob::PathnameExpansion::Fail(pattern) => {
+                    return Err(pattern);
+                }
             }
             continue;
         }
@@ -668,14 +702,20 @@ pub(super) fn append_array_value(
         let token = unquote_storage_value(&token);
         if let Some(expanded_array) = token.strip_prefix('\x1d') {
             for value in field_split_values_with_ifs(expanded_array, ifs) {
-                if let Some(matches) = pathname_expand_array_token(&value) {
-                    for value in matches {
-                        entries.insert(next_index, value);
+                match pathname_expand_array_token(&value, env_vars) {
+                    crate::executor::glob::PathnameExpansion::Matches(matches) => {
+                        for value in matches {
+                            entries.insert(next_index, value);
+                            next_index += 1;
+                        }
+                    }
+                    crate::executor::glob::PathnameExpansion::NoMatch => {
+                        entries.insert(next_index, value.to_string());
                         next_index += 1;
                     }
-                } else {
-                    entries.insert(next_index, value.to_string());
-                    next_index += 1;
+                    crate::executor::glob::PathnameExpansion::Fail(pattern) => {
+                        return Err(pattern);
+                    }
                 }
             }
             continue;
@@ -707,7 +747,7 @@ pub(super) fn append_array_value(
         }
     }
 
-    format_indexed_array_storage(entries)
+    Ok(format_indexed_array_storage(entries))
 }
 
 pub(super) fn array_assignment_index(

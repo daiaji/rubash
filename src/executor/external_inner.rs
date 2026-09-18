@@ -596,10 +596,17 @@ impl Executor {
                 continue;
             }
             let expanded_value = self.expand_assignment_value(var_value);
+            // GNU variables.c assign_in_env binds a compound `name=(...)`
+            // tempenv word as the literal list text; the internal
+            // COMPOUND_ASSIGNMENT_MARKER must not leak into the child's
+            // environment (niubash #121).
+            let expanded_value = expanded_value
+                .strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
+                .unwrap_or(&expanded_value);
             let Some(env_name) = self.tempenv_export_name(base_name) else {
                 continue;
             };
-            if is_valid_process_env(&env_name, &expanded_value) {
+            if is_valid_process_env(&env_name, expanded_value) {
                 process.env(env_name, expanded_value);
             }
         }

@@ -192,6 +192,41 @@ impl Executor {
         &mut self,
         background_command: &BackgroundCommand,
     ) -> Result<(), ExecuteError> {
+        // GNU execute_simple_command runs run_debug_trap (execute_cmd.c:4506)
+        // BEFORE make_child forks the async child (~4550), so `true &` reports
+        // `DBG:true` from the parent. A compound async body ({ ...; } &,
+        // ( ... ) &) instead goes through execute_in_subshell, whose child
+        // resets the trap table (execute_cmd.c:1670 reset_signal_handlers /
+        // trap.c:1588), so nothing fires for it. Unwrap `!` prefixes: the
+        // printed command for `! true &` is the plain `true` —
+        // print_simple_command does not render CMD_INVERT_RETURN.
+        {
+            let mut inner = &background_command.command;
+            while let Some(inverted_command) = &inner.inverted_command {
+                inner = &inverted_command.command;
+            }
+            let inner_defers_debug = inner.for_command.is_some()
+                || inner.if_command.is_some()
+                || inner.loop_command.is_some()
+                || inner.select_command.is_some()
+                || inner.case_command.is_some()
+                || inner.coproc_command.is_some()
+                || inner.subshell_command.is_some()
+                || inner.subshell
+                || inner.brace_group.is_some()
+                || inner.time_command.is_some()
+                || inner.background_command.is_some()
+                || inner.pipeline_command.is_some()
+                || inner.pipe.is_some()
+                || inner.and_or_list.is_some()
+                || inner.function_command.is_some()
+                || inner.arithmetic_command.is_some()
+                || inner.conditional_command.is_some();
+            if !inner_defers_debug && self.debug_trap_in_scope() {
+                let inner_text = bash_command_source_text(inner);
+                let _ = self.run_debug_trap(&inner_text)?;
+            }
+        }
         let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
             .map(std::path::PathBuf::from)
             .or_else(test_rubash_binary_from_current_exe)
@@ -493,6 +528,33 @@ impl Executor {
         } else if time_command.command.words.first().map(String::as_str) == Some("coproc") {
             self.execute_time_reparsed_coproc(&time_command.command)?;
         } else {
+            // GNU execute_time_command dispatches the inner command through
+            // execute_command, so a simple/`(( ))`/`[[ ]]` inner fires its own
+            // run_debug_trap (execute_cmd.c:4506/3920/4153) — `time true`
+            // reports `DBG:true`, never `DBG:time true`. Compound inners
+            // (for/if/while/select/case/subshell/brace/pipeline/coproc/and-or)
+            // fire inside their own handlers, so they are skipped here.
+            let inner = &time_command.command;
+            let inner_defers_debug = inner.for_command.is_some()
+                || inner.if_command.is_some()
+                || inner.loop_command.is_some()
+                || inner.select_command.is_some()
+                || inner.case_command.is_some()
+                || inner.coproc_command.is_some()
+                || inner.subshell_command.is_some()
+                || inner.subshell
+                || inner.brace_group.is_some()
+                || inner.inverted_command.is_some()
+                || inner.background_command.is_some()
+                || inner.pipeline_command.is_some()
+                || inner.pipe.is_some()
+                || inner.and_or_list.is_some()
+                || inner.function_command.is_some()
+                || inner.time_command.is_some();
+            if !inner_defers_debug && self.debug_trap_in_scope() {
+                let inner_text = bash_command_source_text(inner);
+                let _ = self.run_debug_trap(&inner_text)?;
+            }
             self.execute_command(&time_command.command)?;
         }
         print_time(&self.env_vars, time_command.posix_format, started);
@@ -1529,6 +1591,18 @@ impl Executor {
         if self.xtrace_enabled() {
             let prefix = self.xtrace_prefix();
             eprintln!("{prefix}case {} in", case_command.word);
+        }
+        // GNU execute_cmd.c:3660-3668: the case head is printed
+        // (print_case_command_head, print_cmd.c:731 -> `case WORD in `) and
+        // run_debug_trap fires before the word is expanded, so the trap sees
+        // the raw unexpanded word — `case "$v" in ` keeps the quotes.
+        if self.debug_trap_in_scope() {
+            let raw_word = if case_command.word_metadata.raw.is_empty() {
+                case_command.word.as_str()
+            } else {
+                case_command.word_metadata.raw.as_str()
+            };
+            let _ = self.run_debug_trap(&format!("case {raw_word} in "))?;
         }
         let word = self.expand_case_word(&case_command.word);
         let word = tilde_expand::strip_assignment_quote_marker(&word);
