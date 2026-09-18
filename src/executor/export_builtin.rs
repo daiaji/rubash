@@ -13,8 +13,6 @@ impl Executor {
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(status);
         }
-        self.mark_posix_function_export_touches(&cmd.words[1..]);
-
         // GNU export.def shares declare.def's operand handling: an
         // `export name[sub]=value` subscript resolves under the same
         // ExpandedOnce (W_ASSIGNMENT -> ASS_NOEXPAND) rules.
@@ -91,27 +89,6 @@ impl Executor {
                     self.shell_state.variables.remove(base);
                 }
             }
-        }
-    }
-
-    pub(in crate::executor) fn mark_posix_function_export_touches(&mut self, args: &[String]) {
-        if self.function_depth == 0 || !self.posix_mode_enabled() {
-            return;
-        }
-        let mut names_started = false;
-        for arg in args {
-            if arg == "--" {
-                names_started = true;
-                continue;
-            }
-            if !names_started && arg.starts_with('-') && arg != "-" {
-                continue;
-            }
-            names_started = true;
-            let Some(name) = local_assignment_name(arg) else {
-                continue;
-            };
-            mark_env_name(&mut self.env_vars, POSIX_FUNCTION_EXPORT_TOUCHED, name);
         }
     }
 

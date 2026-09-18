@@ -406,6 +406,25 @@ impl Executor {
         if declare_args_request_integer(&args) {
             args = self.evaluate_declare_integer_assignment_args(&args);
         }
+        // GNU variables.c:2651-2665 (make_local_variable): a local may not
+        // shadow a readonly binding at context 0 — "disallow local copies of
+        // readonly global variables ... Readonly copies of calling function
+        // local variables are OK". declare.def:669-673 then drops the whole
+        // operand (any_failed++ + NEXT_VARIABLE): no local and no assignment.
+        let local_blocked: Vec<String> = if self.function_depth > 0
+            && !declare_args_force_global(&args)
+            && !declare_args_request_print(&args)
+        {
+            self.global_readonly_local_blocks(&args)
+        } else {
+            Vec::new()
+        };
+        if !local_blocked.is_empty() {
+            args.retain(|arg| {
+                local_assignment_name(arg)
+                    .map_or(true, |name| !local_blocked.iter().any(|b| b == name))
+            });
+        }
         // Names that were already local at this frame BEFORE this command's
         // save_local_names ran -- the `var->context == variable_context` test
         // in declare.def:655/850. Empty at global scope.
@@ -489,15 +508,33 @@ impl Executor {
         let result = (|| -> Result<i32, ExecuteError> {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
-            let status = crate::builtins::declare::execute_with_io_named_in_context(
-                command_name,
-                &args,
-                &mut self.env_vars,
-                &mut stdout,
-                &mut stderr,
-                self.function_depth > 0,
-                &frame_locals,
-            )?;
+            for name in &local_blocked {
+                writeln!(
+                    stderr,
+                    "{}{command_name}: {name}: readonly variable",
+                    self.diagnostic_prefix()
+                )?;
+            }
+            // Every operand blocked: GNU skips the operand loop entirely —
+            // no list-mode output even though only option args remain.
+            let status = if !local_blocked.is_empty() && local_names(&args).is_empty() {
+                1
+            } else {
+                let status = crate::builtins::declare::execute_with_io_named_in_context(
+                    command_name,
+                    &args,
+                    &mut self.env_vars,
+                    &mut stdout,
+                    &mut stderr,
+                    self.function_depth > 0,
+                    &frame_locals,
+                )?;
+                if local_blocked.is_empty() {
+                    status
+                } else {
+                    status.max(1)
+                }
+            };
             let stderr = if self.stdout_capture.is_some()
                 && declare_args_request_print(&args)
                 && !args.iter().any(|arg| {
@@ -639,6 +676,21 @@ impl Executor {
                 args.push("-p".to_string());
                 args.extend(local_names);
             }
+            // GNU variables.c:2651-2665 (make_local_variable): readonly
+            // global bindings reject local creation — drop those operands
+            // before the frame save so neither a local nor an assignment
+            // happens (declare.def:669-673 any_failed + NEXT_VARIABLE).
+            let local_blocked: Vec<String> = if !declare_args_request_print(&args) {
+                self.global_readonly_local_blocks(&args)
+            } else {
+                Vec::new()
+            };
+            if !local_blocked.is_empty() {
+                args.retain(|arg| {
+                    local_assignment_name(arg)
+                        .map_or(true, |name| !local_blocked.iter().any(|b| b == name))
+                });
+            }
             let mut frame_locals: Vec<String> = Vec::new();
             if !declare_args_request_print(&args) {
                 let prefix_assignment_names = cmd
@@ -670,16 +722,35 @@ impl Executor {
             // global-scope self-reference error and the function-scope
             // circular-reference warning; local always runs in a function, so
             // `local -n a=$1` with a=$1 warns and continues.
-            let status = crate::builtins::declare::execute_with_io_named_in_context(
-                "local",
-                &args,
-                &mut self.env_vars,
-                &mut stdout,
-                &mut stderr,
-                true,
-                &frame_locals,
-            )?;
-            if status == 0 {
+            for name in &local_blocked {
+                writeln!(
+                    stderr,
+                    "{}local: {name}: readonly variable",
+                    self.diagnostic_prefix()
+                )?;
+            }
+            let (status, builtin_status) =
+                if !local_blocked.is_empty() && local_names(&args).is_empty() {
+                    (1, 0)
+                } else {
+                    let builtin_status =
+                        crate::builtins::declare::execute_with_io_named_in_context(
+                            "local",
+                            &args,
+                            &mut self.env_vars,
+                            &mut stdout,
+                            &mut stderr,
+                            true,
+                            &frame_locals,
+                        )?;
+                    let status = if local_blocked.is_empty() {
+                        builtin_status
+                    } else {
+                        builtin_status.max(1)
+                    };
+                    (status, builtin_status)
+                };
+            if builtin_status == 0 {
                 // Plain scalar locals must shadow the outer value in the typed
                 // owner as well: parameter expansion reads shell_state.variables
                 // first, so `local OPTERR=1` inside a function has to replace the
@@ -841,6 +912,34 @@ impl Executor {
             self.shell_state.variables.remove(&name);
             set_var_attrs(&mut self.env_vars, &name, VarAttrs::default());
         }
+    }
+
+    /// GNU variables.c:2651-2665 (make_local_variable): creating a local for a
+    /// name whose visible binding is readonly at context 0 is rejected — the
+    /// comment calls local copies of readonly globals a security hole, while
+    /// readonly bindings in a caller's frame (context > 0) or the live
+    /// tempenv (context == variable_context) may still be shadowed. Returns
+    /// the operand names to drop; declare.def:669-673 counts each as a
+    /// failure and skips the operand entirely.
+    fn global_readonly_local_blocks(&self, args: &[String]) -> Vec<String> {
+        local_names(args)
+            .into_iter()
+            .filter(|name| {
+                let base = name.split('[').next().unwrap_or(name.as_str());
+                let readonly = is_marked_var(&self.env_vars, READONLY_VARS, base)
+                    || self
+                        .shell_state
+                        .variables
+                        .get(base)
+                        .is_some_and(|variable| variable.readonly);
+                readonly
+                    && !self.tempenv_names.iter().any(|saved| saved == base)
+                    && !self
+                        .local_var_scopes
+                        .iter()
+                        .any(|scope| scope.contains_key(base))
+            })
+            .collect()
     }
 }
 

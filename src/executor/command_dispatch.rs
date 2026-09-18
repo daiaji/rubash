@@ -80,6 +80,36 @@ impl Executor {
         }
         if !keep_temporary_assignments {
             self.restore_temporary_assignments(temporary_assignments);
+        } else if self.posix_mode_enabled() && self.function_depth > 0 {
+            // GNU execute_cmd.c:4892-4894 → variables.c:4662
+            // merge_temporary_env → variables.c:4485 push_posix_temp_var:
+            // a posix special builtin's tempenv binds at the current
+            // variable context; a non-local context binding (context>0 &&
+            // !local_p) gains att_propagate and descends into the caller's
+            // context when the frame pops — surviving the function-call
+            // tempenv restore (`var=inner export var` inside `var=func f`).
+            // A binding that lands on a local dies with its frame instead
+            // (func2's `var=global :` on `local var`).
+            for (name, _) in &cmd.assignments {
+                let (base, _) = assignment_name_and_append(name);
+                let is_local = self
+                    .local_var_scopes
+                    .iter()
+                    .any(|scope| scope.contains_key(base));
+                let is_function_tempenv = self
+                    .function_tempenv_names
+                    .iter()
+                    .any(|frame| frame.iter().any(|n| n == base));
+                if !is_local
+                    && is_function_tempenv
+                    && !self
+                        .tempenv_propagated_names
+                        .iter()
+                        .any(|propagated| propagated == base)
+                {
+                    self.tempenv_propagated_names.push(base.to_string());
+                }
+            }
         }
         self.update_underscore_parameter(cmd);
         // GNU execute_cmd.c:1004-1017: in POSIX mode, a non-interactive shell

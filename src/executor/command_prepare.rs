@@ -1425,9 +1425,18 @@ impl Executor {
                 Err(error) => return Some(Err(error)),
             };
         let temporary_assignments = self.apply_temporary_assignments(&materialized_cmd.assignments);
-        let applied_assignment_values =
-            self.applied_temporary_assignment_values(&materialized_cmd.assignments);
-        let old_posix_export_touched = self.env_vars.remove(POSIX_FUNCTION_EXPORT_TOUCHED);
+        // GNU variables.c push_context: the function-call tempenv becomes the
+        // function's variable context — recorded so a posix special builtin's
+        // merged tempenv inside the function (att_propagate,
+        // variables.c:4485 push_posix_temp_var) can tell a context binding
+        // from an ordinary command tempenv binding.
+        self.function_tempenv_names.push(
+            materialized_cmd
+                .assignments
+                .iter()
+                .map(|(name, _)| assignment_name_and_append(name).0.to_string())
+                .collect(),
+        );
         let result = self.execute_function(
             &function_name,
             &materialized_cmd.words[1..],
@@ -1436,19 +1445,20 @@ impl Executor {
         let finish_result = self.finish_process_substitutions(process_substitution_files);
         let assignment_finish_result =
             self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
-        if self.posix_mode_enabled() {
-            self.restore_function_temporary_assignments(
-                temporary_assignments,
-                applied_assignment_values,
-            );
-        } else {
-            self.restore_temporary_assignments(temporary_assignments);
-        }
-        restore_optional_env_var(
-            &mut self.env_vars,
-            POSIX_FUNCTION_EXPORT_TOUCHED,
-            old_posix_export_touched,
-        );
+        // GNU execute_cmd.c/variables.c (push_context/pop_context): the
+        // function-call tempenv IS the function's variable context —
+        // in-function writes (assignment, export, unset) hit the context
+        // binding and die with the frame in POSIX mode too, so the plain
+        // restore applies unconditionally (varenv12.sub: `var=func f` where f
+        // runs `export var` still restores var=outside). Names that gained
+        // att_propagate inside are skipped by the restore itself.
+        self.restore_temporary_assignments(temporary_assignments);
+        self.function_tempenv_names.pop();
+        // A propagated binding that escaped every remaining function
+        // tempenv is a plain caller-context binding now — restore normally.
+        let frames = &self.function_tempenv_names;
+        self.tempenv_propagated_names
+            .retain(|name| frames.iter().any(|frame| frame.iter().any(|n| n == name)));
         Some(result.and(finish_result).and(assignment_finish_result))
     }
 

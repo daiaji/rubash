@@ -456,48 +456,6 @@ impl Executor {
         self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
     }
 
-    pub(in crate::executor) fn applied_temporary_assignment_values(
-        &self,
-        assignments: &[(String, String)],
-    ) -> HashMap<String, Option<String>> {
-        assignments
-            .iter()
-            .map(|(name, _)| {
-                let (base_name, _) = assignment_name_and_append(name);
-                (base_name.to_string(), self.env_vars.get(base_name).cloned())
-            })
-            .collect()
-    }
-
-    pub(in crate::executor) fn restore_function_temporary_assignments(
-        &mut self,
-        previous: Vec<(String, Option<String>, Option<crate::shell::Variable>)>,
-        applied: HashMap<String, Option<String>>,
-    ) {
-        for (name, value, typed_value) in previous.into_iter().rev() {
-            if name != EXPORTED_VARS {
-                if is_marked_var(&self.env_vars, POSIX_FUNCTION_EXPORT_TOUCHED, &name) {
-                    continue;
-                }
-                let current = self.env_vars.get(&name).cloned();
-                if applied
-                    .get(&name)
-                    .is_some_and(|applied_value| current != *applied_value)
-                {
-                    continue;
-                }
-            }
-            if let Some(value) = value {
-                self.env_vars.insert(name.clone(), value.clone());
-                set_process_env(&name, value);
-            } else {
-                self.env_vars.remove(&name);
-                env::remove_var(&name);
-            }
-            self.restore_typed_temporary_value(&name, typed_value);
-        }
-    }
-
     pub(in crate::executor) fn restore_temporary_assignments(
         &mut self,
         previous: Vec<(String, Option<String>, Option<crate::shell::Variable>)>,
@@ -512,6 +470,18 @@ impl Executor {
         let promoted = std::mem::take(&mut self.tempenv_promoted_names);
         for (name, value, typed_value) in previous.into_iter().rev() {
             self.tempenv_previous.remove(&name);
+            // GNU variables.c:4485-4525 push_posix_temp_var: a propagated
+            // binding descended into the caller's context — the caller's
+            // tempenv restore must not touch it, and it keeps the tempvar's
+            // exported attribute (v->attributes |= var->attributes).
+            if self
+                .tempenv_propagated_names
+                .iter()
+                .any(|propagated| propagated == &name)
+            {
+                self.mark_exported(&name);
+                continue;
+            }
             if promoted.iter().any(|promoted_name| promoted_name == &name) {
                 continue;
             }

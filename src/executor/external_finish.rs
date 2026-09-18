@@ -156,6 +156,21 @@ impl Executor {
         let saved_function_redirects = self.function_definition_redirects.clone();
         let saved_function_def_infos = self.function_def_infos.clone();
         let saved_aliases = self.aliases.clone();
+        // A child script is a process boundary: its tempenv stack (POSIX-mode
+        // persistent `var=2 :` bindings included) is process-local in GNU and
+        // must not leak back into the parent's variable context. Save the
+        // parent's tempenv bookkeeping; the exec-mode child starts fresh
+        // (initialize_shell_variables), the fork-mode child inherits a copy.
+        let saved_tempenv_names = self.tempenv_names.clone();
+        let saved_tempenv_marks = self.tempenv_marks.clone();
+        let saved_tempenv_promoted = self.tempenv_promoted_names.clone();
+        let saved_tempenv_previous = self.tempenv_previous.clone();
+        if this_shell_invocation {
+            self.tempenv_names.clear();
+            self.tempenv_marks.clear();
+            self.tempenv_promoted_names.clear();
+            self.tempenv_previous.clear();
+        }
         if this_shell_invocation {
             let mut child_env = self.child_shell_environment();
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh
@@ -323,6 +338,10 @@ impl Executor {
         self.function_definition_redirects = saved_function_redirects;
         self.function_def_infos = saved_function_def_infos;
         self.aliases = saved_aliases;
+        self.tempenv_names = saved_tempenv_names;
+        self.tempenv_marks = saved_tempenv_marks;
+        self.tempenv_promoted_names = saved_tempenv_promoted;
+        self.tempenv_previous = saved_tempenv_previous;
         self.bash_source_stack = saved_bash_source_stack;
         self.bash_lineno_stack = saved_bash_lineno_stack;
         self.bash_argc_stack = saved_bash_argc_stack;

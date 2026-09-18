@@ -366,6 +366,13 @@ impl Executor {
             || var_name
                 .chars()
                 .any(|c| matches!(c, '/' | '%' | '^' | ',' | '~'))
+            // GNU subst.c parameter_brace_expand: string_extract stops the
+            // variable name at the first character in `#%^,:-=?+/@}`, so a
+            // `:` inside an operator word (`${var+"a: b"}`) never reaches
+            // the substring path — the operator parse owns it. Require a
+            // valid parameter name before `:` (covers shell names, special
+            // parameters, positional digits, `!name`, array subscripts).
+            || !crate::executor::parameter_ops::is_parameter_error_name(var_name)
         {
             return None;
         }
@@ -478,6 +485,13 @@ impl Executor {
             || var_name
                 .chars()
                 .any(|c| matches!(c, '/' | '%' | '^' | ',' | '~'))
+            // GNU subst.c parameter_brace_expand: string_extract stops the
+            // variable name at the first character in `#%^,:-=?+/@}`, so a
+            // `:` inside an operator word (`${var+"a: b"}`) never reaches
+            // the substring path — the operator parse owns it. Require a
+            // valid parameter name before `:` (covers shell names, special
+            // parameters, positional digits, `!name`, array subscripts).
+            || !crate::executor::parameter_ops::is_parameter_error_name(var_name)
         {
             return None;
         }

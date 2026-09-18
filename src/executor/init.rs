@@ -174,6 +174,8 @@ impl Executor {
             tempenv_marks: Vec::new(),
             tempenv_promoted_names: Vec::new(),
             tempenv_previous: HashMap::new(),
+            tempenv_propagated_names: Vec::new(),
+            function_tempenv_names: Vec::new(),
             evalerror_pending: Cell::new(false),
             evalerror_line: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),

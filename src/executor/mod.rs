@@ -586,6 +586,19 @@ pub struct Executor {
     /// tempenv value itself (which would otherwise leak back into the
     /// global scope at frame restore).
     tempenv_previous: HashMap<String, (Option<String>, Option<crate::shell::Variable>, VarAttrs)>,
+    /// GNU variables.c:4485-4525 (push_posix_temp_var): a posix special
+    /// builtin's tempenv merged into a function context gets att_propagate
+    /// when the bound cell is not a local, so the binding descends into the
+    /// caller's context when the frame pops instead of dying with it. Names
+    /// listed here skip function-call tempenv restores (like promoted
+    /// names) until no live function tempenv covers them any more.
+    tempenv_propagated_names: Vec<String>,
+    /// Base names bound by each active function call's own tempenv prefix —
+    /// the function's variable context in GNU terms (variables.c
+    /// push_context). Lets the posix merge path distinguish a function
+    /// tempenv binding (propagates on frame pop) from a plain command
+    /// tempenv binding (dies with its command scope).
+    function_tempenv_names: Vec<Vec<String>>,
     /// GNU expr.c evalerror -> jump_to_top_level (DISCARD): an arithmetic
     /// evaluation failure — including a failed array-subscript evaluation —
     /// discards the rest of the command list that contained the failing
