@@ -980,10 +980,23 @@ impl Executor {
             return output;
         }
         let saved_positional_params = self.positional_params.clone();
-        if let Some(output) = self.run_function_command_substitution(&words) {
-            self.set_positional_params(saved_positional_params);
-            let status = self.last_command_substitution_status.get().unwrap_or(0);
-            return SubstitutionOutput::readback(output.into_bytes(), status, context);
+        // GNU subst.c:7143 command_substitute feeds the body to
+        // parse_and_execute, so the real parser owns each word's quoting:
+        // `"$x"` stays one field, `""` stays one empty argument, and `"*"`
+        // never reaches pathname expansion. The function-call shortcut
+        // re-splits the body with split_shell_words, which erases that
+        // quote state — the stored word `$x` then looks unquoted and
+        // field-splits (issue #116). Keep the shortcut only for bodies the
+        // text split provably cannot misread: whitespace-separated plain
+        // words with no quoting, expansion, escape, redirection, or
+        // command-syntax characters. Everything else falls through to the
+        // real parser/executor paths below.
+        if command_substitution_function_call_is_trivial(source, &words) {
+            if let Some(output) = self.run_function_command_substitution(&words) {
+                self.set_positional_params(saved_positional_params);
+                let status = self.last_command_substitution_status.get().unwrap_or(0);
+                return SubstitutionOutput::readback(output.into_bytes(), status, context);
+            }
         }
         self.set_positional_params(saved_positional_params);
         if command_substitution_words_contain_here_string(&words) {
@@ -1562,6 +1575,34 @@ fn command_substitution_words_contain_here_string(words: &[String]) -> bool {
     words
         .iter()
         .any(|word| word == "<<<" || word.ends_with("<<<"))
+}
+
+/// Whitelist admission for the word-level function-call substitution
+/// shortcut. GNU subst.c:7143 command_substitute hands the body to
+/// parse_and_execute unconditionally; the shortcut is equivalent only when
+/// `split_shell_words` reproduces the real token stream exactly — every
+/// character is plain word text or inline whitespace, so no quote is
+/// stripped (a stripped quote also erases field-split/glob suppression:
+/// `$(f "$x")` split `$x` into three args, issue #116), no escape produces
+/// a carrier, no `$`/backtick expands, no `*`/`?`/`~`/`[...]` pattern or
+/// redirection/operator character needs the lexer, and no `""` empty word
+/// is dropped. `source` is the raw body; `words` are the post-alias split
+/// words, checked too because alias expansion can inject characters the
+/// source never contained.
+fn command_substitution_function_call_is_trivial(source: &str, words: &[String]) -> bool {
+    fn plain_char(ch: char) -> bool {
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '-' | '.' | ',' | '/' | ':' | '=' | '+' | '%' | '@'
+            )
+    }
+    source
+        .chars()
+        .all(|ch| ch == ' ' || ch == '\t' || plain_char(ch))
+        && words
+            .iter()
+            .all(|word| !word.is_empty() && word.chars().all(plain_char))
 }
 
 /// Builtin commands whose command-substitution output is produced by the
