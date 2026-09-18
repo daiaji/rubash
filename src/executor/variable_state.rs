@@ -505,7 +505,16 @@ impl Executor {
         if let Some(mark) = self.tempenv_marks.pop() {
             self.tempenv_names.truncate(mark);
         }
+        // GNU variables.c:2615-2631 make_local_variable (was_tmpvar): a
+        // declare/typeset/local operand bound by this command's prefix was
+        // promoted to a frame local — its env binding must survive this
+        // restore, and it keeps the tempvar's exported attribute.
+        let promoted = std::mem::take(&mut self.tempenv_promoted_names);
         for (name, value, typed_value) in previous.into_iter().rev() {
+            self.tempenv_previous.remove(&name);
+            if promoted.iter().any(|promoted_name| promoted_name == &name) {
+                continue;
+            }
             if let Some(value) = value {
                 self.env_vars.insert(name.clone(), value.clone());
                 set_process_env(&name, value);
@@ -514,6 +523,9 @@ impl Executor {
                 env::remove_var(&name);
             }
             self.restore_typed_temporary_value(&name, typed_value);
+        }
+        for name in promoted {
+            self.mark_exported(&name);
         }
     }
 

@@ -749,6 +749,8 @@ impl Executor {
             parameter_assignment_failure: Cell::new(false),
             tempenv_names: Vec::new(),
             tempenv_marks: Vec::new(),
+            tempenv_promoted_names: Vec::new(),
+            tempenv_previous: HashMap::new(),
             evalerror_pending: Cell::new(false),
             evalerror_line: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),

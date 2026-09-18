@@ -571,6 +571,21 @@ pub struct Executor {
     /// restore_temporary_assignments so nested commands truncate the
     /// tempenv-name stack to the boundary recorded by the outer call.
     tempenv_marks: Vec<usize>,
+    /// GNU variables.c:2604-2620 make_local_variable (was_tmpvar): a
+    /// `declare`/`typeset`/`local` operand whose name is bound by this
+    /// command's own `name=value` prefix promotes the tempenv binding to a
+    /// frame local in place — `z=y typeset z` leaves a live exported local
+    /// z=y for the rest of the frame instead of an empty local that pops
+    /// with the command. Names listed here skip the command-end tempenv
+    /// restore in restore_temporary_assignments.
+    tempenv_promoted_names: Vec<String>,
+    /// Pre-tempenv snapshots (env value, typed cell, attribute set) for the
+    /// names bound by the innermost apply_temporary_assignments mark. The
+    /// declare/local promotion path consults it so a promoted local's
+    /// saved-previous is the value before the prefix applied, not the
+    /// tempenv value itself (which would otherwise leak back into the
+    /// global scope at frame restore).
+    tempenv_previous: HashMap<String, (Option<String>, Option<crate::shell::Variable>, VarAttrs)>,
     /// GNU expr.c evalerror -> jump_to_top_level (DISCARD): an arithmetic
     /// evaluation failure — including a failed array-subscript evaluation —
     /// discards the rest of the command list that contained the failing

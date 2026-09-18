@@ -418,11 +418,12 @@ impl Executor {
                 .assignment_keys()
                 .map(|name| assignment_name_and_append(name).0.to_string())
                 .collect::<Vec<_>>();
-            let mut pre_existing: Vec<String> = self
+            let scope_keys_before_save: Vec<String> = self
                 .local_var_scopes
                 .last()
                 .map(|scope| scope.keys().cloned().collect())
                 .unwrap_or_default();
+            let mut pre_existing: Vec<String> = scope_keys_before_save.clone();
             // GNU variables.c:3564-3578 assign_in_env + declare.def:659-668:
             // names bound through `name=value cmd` tempenv assignments are
             // live at this command's variable context, so `declare -n r`
@@ -432,6 +433,7 @@ impl Executor {
             pre_existing.extend(self.tempenv_names.iter().cloned());
             frame_locals.clone_from(&pre_existing);
             self.save_local_names(&args);
+            self.promote_tempenv_locals(&args, &prefix_assignment_names, &scope_keys_before_save);
             if !local_args_request_inherit(&args) {
                 self.initialize_non_inherited_locals(
                     &args,
@@ -643,16 +645,18 @@ impl Executor {
                     .assignment_keys()
                     .map(|name| assignment_name_and_append(name).0.to_string())
                     .collect::<Vec<_>>();
-                let mut pre_existing: Vec<String> = self
+                let scope_keys_before_save: Vec<String> = self
                     .local_var_scopes
                     .last()
                     .map(|scope| scope.keys().cloned().collect())
                     .unwrap_or_default();
+                let mut pre_existing: Vec<String> = scope_keys_before_save.clone();
                 // Same tempenv visibility as the declare path above: names
                 // bound by `name=value cmd` are live at this context.
                 pre_existing.extend(self.tempenv_names.iter().cloned());
                 frame_locals.clone_from(&pre_existing);
                 self.save_local_names(&args);
+                self.promote_tempenv_locals(&args, &prefix_assignment_names, &scope_keys_before_save);
                 if !local_args_request_inherit(&args) {
                     self.initialize_non_inherited_locals(
                         &args,
@@ -742,6 +746,62 @@ impl Executor {
             }
         }
         Ok(())
+    }
+
+    /// GNU variables.c:2579-2631 make_local_variable (was_tmpvar path): a
+    /// `declare`/`typeset`/`local` operand whose name is bound by this
+    /// command's own `name=value` prefix finds the tempenv binding
+    /// (find_variable -> tempvar) and promotes it to a frame local in
+    /// place, keeping its value and exported attribute — `z=y typeset z`
+    /// leaves a live exported local z=y for the rest of the frame, and
+    /// `z=y typeset z=w` leaves the local the assignment created. The
+    /// binding is NOT popped with the command's tempenv. For a name that
+    /// was not already a frame local, the frame-restore snapshot must hold
+    /// the value BEFORE the prefix applied (recorded by
+    /// apply_temporary_assignments in tempenv_previous), otherwise the
+    /// tempenv value leaks into the global scope when the frame returns.
+    pub(in crate::executor) fn promote_tempenv_locals(
+        &mut self,
+        args: &[String],
+        prefix_assignment_names: &[String],
+        scope_keys_before_save: &[String],
+    ) {
+        if self.function_depth == 0 || prefix_assignment_names.is_empty() {
+            return;
+        }
+        for name in local_names(args) {
+            if !prefix_assignment_names.iter().any(|prefix| prefix == &name) {
+                continue;
+            }
+            // The prefix binding may have been rejected (readonly target) or
+            // routed through a nameref to a different cell; only a binding
+            // that actually landed on this name is promoted.
+            if !self.env_vars.contains_key(&name) {
+                continue;
+            }
+            if !self.tempenv_promoted_names.iter().any(|saved| saved == &name) {
+                self.tempenv_promoted_names.push(name.clone());
+            }
+            // A name that was already a frame local keeps the snapshot its
+            // earlier declaration recorded (the caller's value); only a
+            // first declaration's snapshot gets the pre-prefix value.
+            if scope_keys_before_save.iter().any(|saved| saved == &name) {
+                continue;
+            }
+            if let Some((env_value, typed_value, attrs)) =
+                self.tempenv_previous.get(&name).cloned()
+            {
+                if let Some(scope) = self.local_var_scopes.last_mut() {
+                    scope.insert(name.clone(), env_value);
+                }
+                if let Some(typed_scope) = self.local_typed_scopes.last_mut() {
+                    typed_scope.insert(name.clone(), typed_value);
+                }
+                if let Some(attr_scope) = self.local_attr_scopes.last_mut() {
+                    attr_scope.insert(name.clone(), attrs);
+                }
+            }
+        }
     }
 
     pub(in crate::executor) fn initialize_non_inherited_locals(

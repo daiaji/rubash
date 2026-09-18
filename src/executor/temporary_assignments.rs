@@ -74,6 +74,10 @@ impl Executor {
         // and the typed shell_state.variables owner, so parameter expansion
         // does not keep seeing a leaked temporary value).
         self.tempenv_marks.push(self.tempenv_names.len());
+        // A promoted tempenv local survives the command-end restore, so any
+        // names left promoted by a command whose restore was deferred
+        // (keep_temporary_assignments) must not skip a later mark's restore.
+        self.tempenv_promoted_names.clear();
         let mut previous = Vec::new();
         if !assignments.is_empty() {
             previous.push((
@@ -113,11 +117,17 @@ impl Executor {
         for (name, value) in assignments {
             let expanded_value = self.expand_assignment_value(value);
             let (base_name, _) = assignment_name_and_append(name);
-            previous.push((
+            let saved_env = self.env_vars.get(base_name).cloned();
+            let saved_typed = self.shell_state.variables.get(base_name).cloned();
+            self.tempenv_previous.insert(
                 base_name.to_string(),
-                self.env_vars.get(base_name).cloned(),
-                self.shell_state.variables.get(base_name).cloned(),
-            ));
+                (
+                    saved_env.clone(),
+                    saved_typed.clone(),
+                    capture_var_attrs(&self.env_vars, base_name),
+                ),
+            );
+            previous.push((base_name.to_string(), saved_env, saved_typed));
             // GNU variables.c bind_variable (ASS_NAMEREF path): a temporary
             // assignment to a nameref writes the referenced variable, so the
             // restore must also capture the target's previous value or the
