@@ -71,12 +71,21 @@ impl Executor {
         }
 
         if let Some((name, value)) = split_assignment_word(word) {
-            let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
-            let value = tilde_expand::strip_assignment_quote_marker(value);
-            if quoted {
-                if let Some(expanded) = self.expand_quoted_array_assignment_value(value) {
-                    return format!("{name}={expanded}");
-                }
+            // GNU general.c:480 assignment() only marks an UNQUOTED token
+            // W_ASSIGNMENT. The lexer signals the quoted case by placing
+            // \x1c (QUOTED_ASSIGNMENT_VALUE) right after `=`
+            // (word.rs mark_quoted_assignment_value): such a word is one
+            // ordinary word — `a=` is literal text and the RHS is not an
+            // assignment RHS. Taking the assignment path below would hoist
+            // `'`-quotes inside `$(...)` bodies to SQ_DATA sentinels and
+            // smuggle them into the nested parse as data (the PUA byte then
+            // became a command name, rubash#117). Expand it as a plain word
+            // with the caller's quote context instead.
+            if let Some(rhs) = value.strip_prefix(tilde_expand::QUOTED_ASSIGNMENT_VALUE) {
+                return self.expand_embedded_parameters_mut_with_context(
+                    &format!("{name}={rhs}"),
+                    context,
+                );
             }
             let compound_assignment = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
             let raw_value = value
@@ -91,7 +100,7 @@ impl Executor {
             // `n=([0]=~/a [1]=$p)` keeps $p's result literal). Quoted
             // elements stay literal.
             let tilde_raw_owned;
-            let raw_value = if !quoted && raw_value.starts_with('(') && raw_value.ends_with(')') {
+            let raw_value = if raw_value.starts_with('(') && raw_value.ends_with(')') {
                 tilde_raw_owned = self.expand_tilde_in_compound_assignment(raw_value);
                 &tilde_raw_owned
             } else {
@@ -105,7 +114,8 @@ impl Executor {
                 };
                 return format!("{name}={marker}{expanded}");
             }
-            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted)
+            if let Some(expanded) =
+                self.expand_compound_positional_at_assignment(raw_value, false)
             {
                 let marker = if compound_assignment {
                     COMPOUND_ASSIGNMENT_MARKER.to_string()
@@ -144,8 +154,21 @@ impl Executor {
             // \u{E103} is DATA_BACKTICK in assignment_expansion.rs; use a
             // free codepoint or the sentinel decodes as a backtick.
             const SQ_DATA: &str = "\u{E107}";
-            let hoisted_dq = hoist_data_double_quotes(raw_value, DQ_DATA);
-            let hoisted_sq = hoist_data_single_quotes(&hoisted_dq, SQ_DATA);
+            // Quotes inside a `$(...)`/backtick body are syntax for the
+            // nested parse (subst.c:7143 command_substitute re-parses the
+            // body; parse.y parse_comsub PST_NOEXPAND keeps them out of the
+            // outer pass), never data to hoist — the sentinel would reach
+            // the comsub source verbatim. Same invariant as
+            // expand_assignment_value_hoisting's `$(`-guard.
+            let needs_hoist = !raw_value.contains("$(") && !raw_value.contains('`');
+            let hoisted = if needs_hoist {
+                hoist_data_single_quotes(
+                    &hoist_data_double_quotes(raw_value, DQ_DATA),
+                    SQ_DATA,
+                )
+            } else {
+                raw_value.to_string()
+            };
             let expanded = self
                 .expand_embedded_parameters_mut(&format!(
                     "{}{}",
@@ -154,12 +177,11 @@ impl Executor {
                     } else {
                         ""
                     },
-                    hoisted_sq
+                    hoisted
                 ))
                 .replace(DQ_DATA, "\"")
                 .replace(SQ_DATA, "'");
-            if !quoted
-                && !expanded.contains('=')
+            if !expanded.contains('=')
                 && tilde_expand::assignment_value_needs_tilde_expansion(raw_value, true)
                 && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
                     || expanded.starts_with("~/"))
