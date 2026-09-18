@@ -430,7 +430,8 @@ impl Executor {
                 let suppress_glob = assignment_builtin_receives_assignment_word(cmd, index, word)
                     || word.starts_with('\x1b')
                     || word.starts_with('\x1d')
-                    || raw_word_suppresses_pathname_expansion(raw, metadata);
+                    || raw_word_suppresses_pathname_expansion(raw, metadata)
+                    || compound_assignment_operand_word(cmd, index, word);
                 self.expand_command_word(cmd, index, word, raw)
                     .into_iter()
                     .map(move |word| (word, suppress_glob))
@@ -1486,6 +1487,23 @@ fn assignment_builtin_receives_assignment_word(
     word: &str,
 ) -> bool {
     if index == 0 || split_assignment_word(word).is_none() {
+        return false;
+    }
+    matches!(
+        cmd.words.first().map(String::as_str),
+        Some("export" | "readonly" | "declare" | "typeset" | "local")
+    )
+}
+
+/// GNU parse.y marks a `name=(...)` / `name[sub]=(...)` operand to a
+/// declaration builtin W_COMPASSIGN: expand_word_internal hands the list to
+/// expand_compound_array_assignment (arrayfunc.c:557), which pathname-expands
+/// each ELEMENT word, instead of globbing the whole operand. Without this
+/// `declare -a e[10]=(zzz-*)` under failglob would report
+/// `no match: e[10]=(zzz-*)` — the operand text — instead of the failing
+/// element pattern `no match: zzz-*` (niubash #121).
+fn compound_assignment_operand_word(cmd: &CommandNode, index: usize, word: &str) -> bool {
+    if index == 0 || !word.contains(COMPOUND_ASSIGNMENT_MARKER) {
         return false;
     }
     matches!(

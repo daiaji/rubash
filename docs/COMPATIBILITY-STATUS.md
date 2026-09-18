@@ -1039,3 +1039,69 @@ trap 1、exp 8、coproc 6、more-exp 6、cond 19、read 44、array 116、assoc 1
 varenv 80、new-exp 59。函数体诊断行号修复（function_command.rs 不再把
 body 命令压成定义行）带来 errors 164→3、exp 134→8、func 58→0、trap 61→1
 的全局收益。
+
+## 第二十四节：2026-09-18 niubash#121 批次（compound 数组赋值 nullglob/failglob + ERR/DEBUG trap 属主点）
+
+**口径**：`scripts/true-baseline.sh glob trap shopt`，WSL GNU Bash 5.3.0
+（/usr/local/bin/bash）。工作分支 `fix/niubash-121-nullglob-traps`。
+
+**台账**：trap **0**、shopt **0**、glob 69（全部平台归属，与本次无关：
+Windows 文件名不允许 `a?`/`*abc.c`/`a*b` 字面 glob 字符（os error 123）、
+GNU 侧 `test-glue-functions` 未进 harness CR-strip 清单、en_US.UTF-8
+strcoll 排序 vs RB 字节序排序的既有差异；glob.tests 无任何 `=(` 用例）。
+
+**nullglob/failglob（compound 数组赋值）**：
+
+- `src/executor/glob.rs::pathname_expand_word`（pathexp.c 端口）成为
+  compound 赋值元素词的唯一 pathname 展开入口；原手写
+  `read_dir(".")` matcher（`declare/storage/glob.rs`）整体删除——不支持
+  `/`、不支持 nullglob/failglob。
+- GNU `arrayfunc.c:557 expand_compound_array_assignment` →
+  `assign_compound_array_list`：元素词逐一过真实 pathname expansion；
+  `[subscript]=v`/`+=` 词由 `quote_array_assignment_chars`
+  （arrayfunc.c:1107+）标 W_NOGLOB 保留字面（`[0]=nope-*` 不展开）；
+  field-split 产物是普通词、仍展开。
+- failglob：`Err(pattern)` 在 bind 前中止 operand——新目标留
+  `declare -a g=()`，既有/已声明目标保留原状态；`declare -a e[10]=(zz*)`
+  在 member 检查前报 `no match: zz-*`。
+- 临时环境 `a=(...) cmd`：GNU `variables.c assign_in_env` 把 compound 词
+  绑为标量字面文本，元素词不解析、不展开，failglob 亦不报；
+  COMPOUND_ASSIGNMENT_MARKER 不得泄进子进程环境（external_inner.rs）。
+- `command_prepare.rs`：declare/typeset/local/export/readonly 的
+  `name=(...)` operand 标 suppress_glob（W_COMPASSIGN），防止整个
+  operand 被当单个词 glob（否则 failglob 报 `no match: e[10]=(zz-*)`）。
+
+**ERR trap**：`Executor::error_trap_running` 镜像 GNU `trap.c
+_run_trap_internal` 的 SIG_INPROGRESS——action 运行中 `run_error_trap`
+拒绝重入，`trap 'echo E; false' ERR; false` 只打一次 E（probe 与 GNU
+逐字节一致）。
+
+**DEBUG trap 属主点**（GNU execute_cmd.c 调用点表：for 3053、
+select 3528、case 3668、arith 3920、cond 4153、simple 4506、函数入口
+5387——普通 and/or/包装节点无调用点）：
+
+- `ast_exec.rs` 顶门补齐 wrapper 跳过表：inverted/pipeline/pipe/
+  brace_group/case/select/time/coproc/background/time-prefixed-compound。
+- `pipeline_exec.rs`：顺序 stage 循环逐元素 fire（元素子 shell 保留 trap
+  表，execute_cmd.c:2702+；compound stage 经 execute_in_subshell 重置
+  trap 表，trap.c:1588）；两个 `execute_external_pipeline_concurrently`
+  与 timed-pipeline 快路径在 DEBUG trap 存活时 bail。
+- `compound_exec.rs`：`x &` 父侧在 fork 前 fire（execute_cmd.c:4506 →
+  make_child ~4550），`!` 前缀剥层；`time cmd` inner 由 execute_command
+  自 fire；case head 用未展开 raw word（`case "$v" in `）。
+- `loop_select.rs`/`select_exec.rs`：默认 positional 按
+  print_cmd.c:602/656 打 `for i in "$@"`、`select x in "$@"`。
+- `function_calls.rs`：函数入口 DEBUG 文本取 `__RUBASH_LAST_COMMAND`
+  （展开前 raw 词），保住 `f x "y z"` 引号。
+- `public_accessors.rs::set_current_command`：trap action 运行中不刷新
+  `__RUBASH_LAST_COMMAND`，镜像 GNU `the_printed_command_except_trap`
+  冻结（execute_cmd.c:4499-4501、variables.c:1558 get_bash_command）。
+- `command_substitution.rs`：functrace 下继承 DEBUG 时命令替换不走
+  word-level 捷径（trap.c:1588 仅 function_trace_mode 保留 DEBUG trap）。
+- `command_text.rs::command_has_no_effect` 补 `words.is_empty()`：附带修掉
+  `time { echo x; }` brace body 被整段丢弃的既有 bug。
+
+**已确认残余（不修）**：后台 job 输出与下一命令 DEBUG trap 的交错是
+调度竞态（GNU fork 即时、RB 线程启动有延迟，`{ echo g; } & wait` 两侧
+各自稳定但顺序相反）；`time` 输出格式（`real\t0m0.000s` + 前导空行 vs
+`real 0.00`）为既有格式差异。

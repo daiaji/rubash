@@ -167,6 +167,15 @@ impl Executor {
             // A subshell compound command is not itself a DEBUG stop point.
             // Its body is evaluated at the incremented BASH_SUBSHELL depth
             // below; only functrace/extdebug make DEBUG inherit into that body.
+            // The remaining compound/wrapper node kinds have no
+            // run_debug_trap call site in GNU execute_command_internal either:
+            // the DEBUG fires belong to their inner commands — `!` bodies run
+            // through execute_ast below, pipeline elements each fire inside
+            // their element subshell (execute_cmd.c:4506, stage loop below),
+            // case/select fire the printed command head inside their handlers
+            // (execute_cmd.c:3668/3528), and brace-group, `time`, coproc, and
+            // `&` bodies dispatch to inner command lists (or subshells whose
+            // children reset the trap table, execute_cmd.c:1670).
             let skips_debug_trap = command.function_command.is_some()
                 || command.if_command.is_some()
                 || command.loop_command.is_some()
@@ -178,7 +187,17 @@ impl Executor {
                 // the folded list's members each fire through their own
                 // execute_ast below (dbg-support.tests:55/25 `[ $j -eq $n ]
                 // && j=i` fires once for `[ ...]`, twice only when `j=i` runs).
-                || command.and_or_list.is_some();
+                || command.and_or_list.is_some()
+                || command.inverted_command.is_some()
+                || command.pipeline_command.is_some()
+                || command.pipe.is_some()
+                || command.brace_group.is_some()
+                || command.case_command.is_some()
+                || command.select_command.is_some()
+                || command.time_command.is_some()
+                || command.coproc_command.is_some()
+                || command.background_command.is_some()
+                || command_is_time_prefixed_compound(command);
             let debug_trap_active = crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG")
                 .is_some_and(|action| !action.is_empty());
             // Do not fire for commands inside the trap action itself: Bash

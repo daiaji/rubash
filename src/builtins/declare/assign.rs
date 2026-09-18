@@ -92,6 +92,27 @@ where
         // declare -a e[10]=(test) leaves "declare -a e").
         if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) && raw_target.contains('[') {
             let (base, _) = declare_indexed_element(raw_target).unwrap_or((raw_target, ""));
+            // GNU expand_compound_array_assignment (arrayfunc.c:557) expands
+            // the list's element words BEFORE the assignment is rejected:
+            // under failglob an unmatched element reports `no match:` and the
+            // operand never reaches the member check, leaving the variable
+            // unset (`declare -a e[10]=(zzz-*)` -> `declare: e: not found`).
+            // Under nullglob the (possibly emptied) list still fails the
+            // member check below.
+            let list = value
+                .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
+                .unwrap_or(value);
+            let expanded_value = expand_compound_array_value(list, variables);
+            if let Err(pattern) = append_array_value("()", &expanded_value, integer, variables) {
+                writeln!(
+                    stderr,
+                    "{}no match: {pattern}",
+                    diagnostic_prefix(variables)
+                )?;
+                status = EXECUTION_FAILURE;
+                deleted_names.insert(raw_target.to_string());
+                continue;
+            }
             writeln!(
                 stderr,
                 "{}{raw_target}: cannot assign list to array member",
@@ -176,10 +197,27 @@ where
                     // re-parse and expand the compound value (array.tests:115
                     // declare -a f='("${d[@]}")' expands d into f).
                     let expanded_value = expand_compound_array_value(value, variables);
-                    let storage = append_array_value("()", &expanded_value, integer);
-                    variables.insert(base.to_string(), storage);
-                    mark_typed(variables, ARRAY_VARS, base);
-                    unmark_typed(variables, DECLARED_UNSET_VARS, base);
+                    match append_array_value("()", &expanded_value, integer, variables) {
+                        Ok(storage) => {
+                            variables.insert(base.to_string(), storage);
+                            mark_typed(variables, ARRAY_VARS, base);
+                            unmark_typed(variables, DECLARED_UNSET_VARS, base);
+                        }
+                        // GNU expand_compound_array_assignment aborts the
+                        // operand before bind: `declare -a g=(zzz-*)` under
+                        // failglob leaves g unset entirely, so the operand
+                        // must not reach the attribute pass either
+                        // (declare.def:1031-1034 deleted-name semantics).
+                        Err(pattern) => {
+                            writeln!(
+                                stderr,
+                                "{}no match: {pattern}",
+                                diagnostic_prefix(variables)
+                            )?;
+                            status = EXECUTION_FAILURE;
+                            deleted_names.insert(raw_target.to_string());
+                        }
+                    }
                     continue;
                 }
                 let index = if index_expression.trim().is_empty() {
@@ -378,7 +416,19 @@ where
                 || current.starts_with('\x1d')
                 || current.starts_with('(') && current.ends_with(')')
             {
-                append_array_value(&current, value, integer)
+                match append_array_value(&current, value, integer, variables) {
+                    Ok(storage) => storage,
+                    Err(pattern) => {
+                        writeln!(
+                            stderr,
+                            "{}no match: {pattern}",
+                            diagnostic_prefix(variables)
+                        )?;
+                        status = EXECUTION_FAILURE;
+                        deleted_names.insert(var_name.to_string());
+                        continue;
+                    }
+                }
             } else if integer {
                 (eval_arith_value(&current) + eval_arith_value(value)).to_string()
             } else {
@@ -412,7 +462,19 @@ where
             append_assoc_value("()", value, integer, variables)
         } else if integer {
             if value.starts_with('(') && value.ends_with(')') {
-                append_array_value("()", value, true)
+                match append_array_value("()", value, true, variables) {
+                    Ok(storage) => storage,
+                    Err(pattern) => {
+                        writeln!(
+                            stderr,
+                            "{}no match: {pattern}",
+                            diagnostic_prefix(variables)
+                        )?;
+                        status = EXECUTION_FAILURE;
+                        deleted_names.insert(var_name.to_string());
+                        continue;
+                    }
+                }
             } else {
                 eval_arith_value(value).to_string()
             }
@@ -433,7 +495,19 @@ where
             // literal scalar (nameref22.sub: declare array='(one two three)'
             // prints `declare -- array="(one two three)"`).
             let expanded_value = expand_compound_array_value(value, variables);
-            append_array_value("()", &expanded_value, false)
+            match append_array_value("()", &expanded_value, false, variables) {
+                Ok(storage) => storage,
+                Err(pattern) => {
+                    writeln!(
+                        stderr,
+                        "{}no match: {pattern}",
+                        diagnostic_prefix(variables)
+                    )?;
+                    status = EXECUTION_FAILURE;
+                    deleted_names.insert(var_name.to_string());
+                    continue;
+                }
+            }
         } else {
             value.to_string()
         };

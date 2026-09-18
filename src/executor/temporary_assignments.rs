@@ -10,7 +10,12 @@ impl Executor {
     ) {
         for (name, value) in assignments {
             let expanded_value = self.expand_assignment_value(value);
-            self.apply_shell_assignment(name, expanded_value);
+            // GNU subst.c:10404+ expand_word_error -> DISCARD: a failed
+            // assignment word (failglob no-match, readonly violation, ...)
+            // abandons the rest of this command's assignment list.
+            if !self.apply_shell_assignment(name, expanded_value) {
+                break;
+            }
             // GNU variables.c make_variable_value: an integer-attribute
             // assignment that fails arithmetic evaluation (e.g. `i=0#4`
             // with `declare -i i`) reports evalerror and propagates exit
@@ -21,6 +26,32 @@ impl Executor {
                 self.exit_code = 1;
             }
         }
+    }
+
+    /// GNU failglob path for `name=(...)` / `name+=(...)`: subst.c
+    /// glob_expand_word_list reports `no match: WORD` and the expansion
+    /// error aborts the assignment (execute_cmd.c returns status 1 via
+    /// jump_to_top_level DISCARD — remaining same-line commands do not
+    /// run). arrayfunc.c assign_array_var_from_string already created the
+    /// array before expand_compound_array_assignment ran, so a brand-new
+    /// target is left bound as an empty indexed array (`a=(zzz-*)` then
+    /// `declare -p a` prints `declare -a a=()`), while a target that
+    /// already existed — including a declared-but-unset `declare -a f1` —
+    /// keeps its prior state (niubash #121). Returning false propagates
+    /// the failure through apply_shell_assignment's callers, which map it
+    /// to ExpansionFailure(1) — the same DISCARD contract.
+    fn fail_compound_array_assignment(&mut self, base_name: &str, pattern: &str) -> bool {
+        self.report_failglob(pattern);
+        if !self.env_vars.contains_key(base_name)
+            && !is_marked_var(&self.env_vars, DECLARED_UNSET_VARS, base_name)
+        {
+            self.env_vars.insert(
+                base_name.to_string(),
+                format_indexed_array_storage(BTreeMap::new()),
+            );
+            mark_env_name(&mut self.env_vars, ARRAY_VARS, base_name);
+        }
+        false
     }
 
     pub(in crate::executor) fn apply_temporary_assignments(
@@ -123,6 +154,32 @@ impl Executor {
                     .variables
                     .set(base_name.to_string(), crate::shell::Variable::scalar(expanded_value.clone()));
                 unmark_env_name(&mut self.env_vars, NAMEREF_VARS, base_name);
+                self.tempenv_names.push(base_name.to_string());
+                self.mark_exported(base_name);
+                continue;
+            }
+            // GNU variables.c assign_in_env: a compound `name=(...)` or
+            // `name+=(...)` word in a command's temporary environment binds
+            // the literal list text as a scalar — the element words are not
+            // re-parsed and pathname expansion never runs on them, so
+            // `a=(zzz-*) declare -p a` prints `declare -x a="(zzz-nomatch-*)"`
+            // even under failglob (niubash #121). Route it through the same
+            // exported-scalar binding the nameref fallback above uses.
+            if let Some(compound) = expanded_value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
+                if is_marked_var(&self.env_vars, READONLY_VARS, base_name) {
+                    let line = format!(
+                        "{}{base_name}: readonly variable\n",
+                        self.assignment_diagnostic_prefix()
+                    );
+                    self.emit_assignment_diag(line);
+                    continue;
+                }
+                self.env_vars
+                    .insert(base_name.to_string(), compound.to_string());
+                let _ = self
+                    .shell_state
+                    .variables
+                    .set(base_name.to_string(), crate::shell::Variable::scalar(compound.to_string()));
                 self.tempenv_names.push(base_name.to_string());
                 self.mark_exported(base_name);
                 continue;
@@ -696,13 +753,18 @@ impl Executor {
             } else if is_array_storage(&current)
                 || is_marked_var(&self.env_vars, ARRAY_VARS, base_name)
             {
-                append_array_value(
+                match append_array_value(
                     &current,
                     &value,
                     is_marked_var(&self.env_vars, INTEGER_VARS, base_name),
                     self.env_vars.get("IFS").map(String::as_str),
                     &self.env_vars,
-                )
+                ) {
+                    Ok(storage) => storage,
+                    Err(pattern) => {
+                        return self.fail_compound_array_assignment(base_name, &pattern);
+                    }
+                }
             } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
                 let current = self.eval_integer_assignment_value(&current);
                 let value = self.eval_integer_assignment_value(&value);
@@ -763,13 +825,18 @@ impl Executor {
             // always makes an array, even when the variable previously had
             // the integer attribute (`typeset -i x; x=([0]=7+11)` becomes an
             // integer array with x[0]=18, not a scalar arithmetic result).
-            append_array_value(
+            match append_array_value(
                 "()",
                 &value,
                 is_marked_var(&self.env_vars, INTEGER_VARS, base_name),
                 self.env_vars.get("IFS").map(String::as_str),
                 &self.env_vars,
-            )
+            ) {
+                Ok(storage) => storage,
+                Err(pattern) => {
+                    return self.fail_compound_array_assignment(base_name, &pattern);
+                }
+            }
         } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
             // GNU variables.c make_variable_value with integer attribute calls
             // evalexp -> strlong, which reports "invalid number" / "invalid

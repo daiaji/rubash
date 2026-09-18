@@ -26,7 +26,13 @@ pub(in crate::executor) fn unset_args_need_builtin_diagnostics(args: &[String]) 
 }
 
 pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
-    cmd.assignments.is_empty()
+    // A command carrying words is executable — GNU execute_cmd.c dispatches
+    // every word-bearing command through execute_simple_command (and a brace
+    // group's body through execute_command), so `time { echo x; }` must run
+    // the group body. This predicate only recognizes nodes with literally
+    // nothing to execute.
+    cmd.words.is_empty()
+        && cmd.assignments.is_empty()
         && cmd.redirect_in.is_none()
         && cmd.redirect_out.is_none()
         && cmd.append.is_none()
@@ -360,7 +366,10 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
     } else if let Some(brace_group) = &cmd.brace_group {
         format!("{{ {}; }}", bash_command_sequence_text(&brace_group.body))
     } else {
-        bash_command_text(cmd)
+        // bash_command_text already appends the command's redirections;
+        // routing it through append_source_redirects below would render
+        // each one twice (`2> /dev/null 2> /dev/null`).
+        return bash_command_text(cmd);
     };
     append_source_redirects(&mut text, cmd);
     text
@@ -381,7 +390,9 @@ fn for_command_source_text(for_command: &ForCommand) -> String {
     }
 
     if for_command.default_positional {
-        format!("for {}; {}", for_command.variable, body)
+        // GNU print_cmd.c:602 print_for_command_head reprints the implicit
+        // `for i; do` form's map_list as the literal `"$@"` word.
+        format!("for {} in \"$@\"; {}", for_command.variable, body)
     } else {
         format!(
             "for {} in {}; {}",
@@ -491,7 +502,9 @@ fn select_command_source_text(select_command: &SelectCommand) -> String {
         &select_command.body,
     );
     if select_command.default_positional {
-        format!("select {}; {}", select_command.variable, body)
+        // GNU print_cmd.c:656 print_select_command_head reprints the
+        // implicit `select x; do` form's map_list as the literal `"$@"`.
+        format!("select {} in \"$@\"; {}", select_command.variable, body)
     } else {
         format!(
             "select {} in {}; {}",

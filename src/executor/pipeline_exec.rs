@@ -369,6 +369,29 @@ impl Executor {
             }
             self.set_current_command(stage);
             let last_stage = stage_index + 1 == commands.len();
+            // GNU execute_pipeline runs each element through execute_command
+            // in its own subshell (execute_cmd.c:2702+). The forked element
+            // children keep the trap table — reset_signal_handlers
+            // (trap.c:1588) only runs for execute_in_subshell children — so a
+            // SIMPLE element's run_debug_trap fires per element
+            // (execute_cmd.c:4506). Compound elements (groups, subshells,
+            // loops, arith/cond commands) go through execute_in_subshell and
+            // reset the trap table, so they fire nothing here; any inner
+            // fires belong to the stage's own subshell executor below.
+            // Exception: a `shopt -s lastpipe` last element runs in the
+            // current shell, where `(( ))`/`[[ ]]` elements still fire
+            // (execute_cmd.c:3920/4153) and the other compound kinds fire
+            // inside their own handlers.
+            let in_shell_stage = last_stage && self.lastpipe_enabled();
+            let stage_defers_debug = command_is_compound_pipeline_stage(stage)
+                && !(in_shell_stage
+                    && (stage.arithmetic_command.is_some()
+                        || stage.conditional_command.is_some()));
+            if !stage_defers_debug && self.debug_trap_in_scope() {
+                let stage_text =
+                    crate::executor::command_text::bash_command_source_text(stage);
+                let _ = self.run_debug_trap(&stage_text)?;
+            }
             let preserve_compound_errexit = command_is_compound_pipeline_stage(stage)
                 || stage
                     .words
@@ -487,6 +510,15 @@ impl Executor {
         commands: &[&CommandNode],
     ) -> Result<Option<()>, ExecuteError> {
         if commands.len() != 2 {
+            return Ok(None);
+        }
+        // A live DEBUG trap fires per pipeline element in GNU
+        // (execute_cmd.c:4506); this fast path bypasses the stage loop, so
+        // bail out and let it own the fires.
+        if self.debug_trap_in_scope()
+            && crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG")
+                .is_some_and(|action| !action.is_empty())
+        {
             return Ok(None);
         }
         let Some(input) = self.timed_pipeline_input(commands[0]) else {
@@ -717,6 +749,13 @@ impl Executor {
     ) -> Result<Option<Vec<(String, String, i32)>>, ExecuteError> {
         if commands.len() < 2
             || self.stderr_capture.is_some()
+            // GNU runs each pipeline element's run_debug_trap inside the
+            // element's child (execute_cmd.c:4506). This fast path spawns the
+            // members directly and would bypass those fires, so a live DEBUG
+            // trap takes the sequential stage path which fires per element.
+            || (self.debug_trap_in_scope()
+                && crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG")
+                    .is_some_and(|action| !action.is_empty()))
             // NOTE: stdout_capture (command substitution) is intentionally NOT a
             // bail-out here. External-only pipelines inside `$(...)` must still
             // run concurrently with real OS pipes between stages (GNU bash
@@ -937,6 +976,13 @@ impl Executor {
     ) -> Result<Option<Vec<(String, String, i32)>>, ExecuteError> {
         if commands.len() < 2
             || self.stderr_capture.is_some()
+            // GNU runs each pipeline element's run_debug_trap inside the
+            // element's child (execute_cmd.c:4506). This fast path spawns the
+            // members directly and would bypass those fires, so a live DEBUG
+            // trap takes the sequential stage path which fires per element.
+            || (self.debug_trap_in_scope()
+                && crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG")
+                    .is_some_and(|action| !action.is_empty()))
             // NOTE: stdout_capture (command substitution) is intentionally NOT a
             // bail-out here. External-only pipelines inside `$(...)` must still
             // run concurrently with real OS pipes between stages (GNU bash

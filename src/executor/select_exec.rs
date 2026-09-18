@@ -26,6 +26,26 @@ impl Executor {
             return Ok(());
         }
 
+        // GNU execute_cmd.c:3525-3528: the select head is printed
+        // (print_select_command_head, print_cmd.c:656 -> `select NAME in
+        // WORDS`) and run_debug_trap fires once before the word list is
+        // expanded; the implicit `select x; do` form prints the default
+        // `"$@"` list, the same as the `for` head.
+        if self.debug_trap_in_scope() {
+            let words_text = if select_command.default_positional {
+                "\"$@\"".to_string()
+            } else {
+                crate::executor::command_text::command_words_source_text(
+                    &select_command.words,
+                    &select_command.word_metadata,
+                )
+            };
+            let _ = self.run_debug_trap(&format!(
+                "select {} in {}",
+                select_command.variable, words_text
+            ))?;
+        }
+
         let mut redirect_cmd = cmd.clone();
         let group_outputs =
             self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;

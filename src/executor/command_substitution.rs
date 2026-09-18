@@ -184,6 +184,23 @@ impl Executor {
             self.last_command_substitution_status.set(Some(1));
             return String::new();
         }
+        // GNU trap.c reset_or_restore_signal_handlers (~1588): a command
+        // substitution child keeps the DEBUG trap only when
+        // function_trace_mode is set. When it is inherited, every inner
+        // command's run_debug_trap must fire — with the trap output captured
+        // into the substitution result — which none of the word-level
+        // shortcuts below can express. Disqualify the whole shortcut family
+        // and route the body through the real parser/executor, matching
+        // subst.c:7143 command_substitute -> parse_and_execute.
+        if crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace")
+            && crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG")
+                .is_some_and(|action| !action.is_empty())
+        {
+            if let Some(output) = self.command_list_substitution_output(source, context) {
+                return output;
+            }
+            return String::new();
+        }
         if let Some(output) = self.command_substitution_cd_pwd_output(source) {
             return output;
         }
@@ -751,6 +768,7 @@ impl Executor {
             debug_trap_running: false,
             return_trap_running: false,
             signal_trap_running: false,
+            error_trap_running: false,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             source_debug_suppressed: false,
             debug_trap_command: std::cell::RefCell::new(None),

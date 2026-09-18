@@ -55,23 +55,22 @@ impl Executor {
             }
             values
         };
+        // GNU print_cmd.c:602 print_for_command_head prints `for %s in ` plus
+        // the raw map_list; the implicit `for i; do` form's map_list is the
+        // literal `"$@"` word, so the DEBUG trap text is `for i in "$@"`.
         let for_text = if for_command.default_positional {
-            format!("for {}", for_command.variable)
+            format!("for {} in \"$@\"", for_command.variable)
         } else {
             format!(
                 "for {} in {}",
                 for_command.variable,
-                for_command.words.join(" ")
+                crate::executor::command_text::command_words_source_text(
+                    &for_command.words,
+                    &for_command.word_metadata,
+                )
             )
         };
-        // GNU print_cmd.c:609 xtrace_print_for_command_head prints the literal
-        // word list as written — for the implicit `in "$@"` form the trace
-        // shows `for i in "$@"` verbatim (map_list keeps the unexpanded "$@").
-        let for_xtrace_text = if for_command.default_positional {
-            format!("for {} in \"$@\"", for_command.variable)
-        } else {
-            for_text.clone()
-        };
+        let for_xtrace_text = for_text.clone();
         let mut ran_body = false;
         // GNU execute_cmd.c:3039 sets line_number = for_command->line before
         // each per-iteration debug fire; without the reset the fire inherits

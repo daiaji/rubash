@@ -496,6 +496,11 @@ pub struct Executor {
     debug_trap_running: bool,
     return_trap_running: bool,
     signal_trap_running: bool,
+    /// GNU trap.c SIG_INPROGRESS: _run_trap_internal marks a trap
+    /// in-progress before executing its action, and run_error_trap refuses
+    /// to re-enter while it is set — an ERR trap action that itself fails
+    /// must not recursively re-trigger the ERR trap (niubash #121).
+    error_trap_running: bool,
     /// Child-death notifications that arrived while the SIGCHLD trap action
     /// was already running (a re-entrant reap drops them otherwise; bash
     /// re-runs the trap once per pending notification — trap.tests expects

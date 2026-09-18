@@ -1,16 +1,39 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use super::glob::pathname_expand_array_token;
 use super::{
     eval_arith_value, parse_array_tokens, parse_array_words, split_storage_words,
     unquote_storage_value,
 };
+use crate::executor::glob::{pathname_expand_word, PathnameExpansion};
 
+/// GNU arrayfunc.c quote_array_assignment_chars (arrayfunc.c:1107+) marks
+/// `[subscript]=value` / `[subscript]+=value` compound words W_NOGLOB: they
+/// are assignment words, never pathname-expanded (niubash #121:
+/// `declare -a a=([0]=nope-*)` keeps the literal element under nullglob).
+fn token_is_subscript_assignment(unquoted_token: &str) -> bool {
+    if let Some((left, _)) = unquoted_token.split_once('=') {
+        if array_assignment_has_subscript(left) {
+            return true;
+        }
+    }
+    if let Some((left, _)) = unquoted_token.split_once("+=") {
+        if array_assignment_has_subscript(left) {
+            return true;
+        }
+    }
+    false
+}
+
+/// GNU assign_compound_array_list (arrayfunc.c:700+). `Err(pattern)`
+/// reports a failglob pathname-expansion failure on one element word —
+/// expand_compound_array_assignment (arrayfunc.c:557) aborts the operand
+/// before bind, so `declare -a g=(zzz-*)` leaves g unset.
 pub(in crate::builtins::declare) fn append_array_value(
     current: &str,
     value: &str,
     integer: bool,
-) -> String {
+    env_vars: &HashMap<String, String>,
+) -> Result<String, String> {
     let mut entries = indexed_array_entries(current);
     let mut next_index = entries
         .keys()
@@ -29,19 +52,29 @@ pub(in crate::builtins::declare) fn append_array_value(
         // "[2]=2]" stores [3]="[2]=2]", not [2]="2]").
         let from_field_split = token.starts_with('\x10');
         let token = token.strip_prefix('\x10').unwrap_or(&token);
-        if let Some(matches) = pathname_expand_array_token(&token) {
-            for value in matches {
-                entries.insert(next_index, value);
-                next_index += 1;
-            }
-            continue;
-        }
-
         // GNU arrayfunc.c assign_compound_array_list: the raw compound word
         // keeps its quote characters, but [subscript]=value detection must
         // see through outer quotes (array19.sub: "0)]=1" is a bare element,
         // not a [0)]= assignment; "[2]=2]" IS a [2]= assignment).
         let unquoted_token = unquote_storage_value(&token);
+        // GNU arrayfunc.c:557 expand_compound_array_assignment runs the real
+        // pathname expansion on every element word that is not an
+        // assignment word (W_NOGLOB): nullglob removes unmatched words,
+        // failglob aborts the assignment, slash-bearing patterns match
+        // path components (niubash #121).
+        if from_field_split || !token_is_subscript_assignment(&unquoted_token) {
+            match pathname_expand_word(&token, env_vars) {
+                PathnameExpansion::Matches(matches) => {
+                    for value in matches {
+                        entries.insert(next_index, value);
+                        next_index += 1;
+                    }
+                    continue;
+                }
+                PathnameExpansion::NoMatch => {}
+                PathnameExpansion::Fail(pattern) => return Err(pattern),
+            }
+        }
         if !from_field_split {
             if let Some((left, rhs)) = unquoted_token.split_once("+=") {
                 if let Some(index) = array_assignment_index(left, &entries) {
@@ -110,7 +143,7 @@ pub(in crate::builtins::declare) fn append_array_value(
         }
     }
 
-    format_indexed_array_storage(entries)
+    Ok(format_indexed_array_storage(entries))
 }
 
 pub(in crate::builtins::declare) fn indexed_array_entries(value: &str) -> BTreeMap<usize, String> {
