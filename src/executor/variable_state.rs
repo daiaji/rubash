@@ -431,7 +431,7 @@ impl Executor {
                 && Self::declare_applies_persistent_attribute(cmd))
             || (command == "eval" && cmd.assignment_keys().any(|name| name.ends_with('+')))
             || (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
-                && matches!(command, "." | "source" | "eval" | ":" | "return"))
+                && (is_posix_special_builtin(command) || command == "source"))
     }
 
     // GNU declare.def:1045-1086: a variable found in the temporary environment

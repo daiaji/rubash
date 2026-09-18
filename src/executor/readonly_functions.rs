@@ -25,6 +25,12 @@ impl Executor {
             Ok(args) => args,
             Err(()) => return Ok(1),
         };
+        // GNU variables.c:3320 bind_variable_value → 2920-2937
+        // make_variable_value: a `name=value` operand whose target carries
+        // the integer attribute evaluates the RHS with evalexp (setattr.def
+        // shares declare.def's operand handling) — `readonly int=100+42`
+        // on an int local binds 142 (varenv25.sub).
+        let args = self.evaluate_integer_attribute_assignment_args(&args);
         // GNU builtin_error_prolog prefixes readonly reassignment diagnostics
         // with `this_command_name`; while a function body runs, that name is
         // the enclosing function (execute_cmd.c run_builtin sets it on the

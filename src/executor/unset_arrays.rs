@@ -358,6 +358,22 @@ impl Executor {
         if scope_index >= current_scope_index {
             return false;
         }
+        // GNU variables.c:3984-4001 makunbound: with localvar_unset, an
+        // outer-context local is reinserted as an invisible, unset local in
+        // its own context — the live binding disappears (lookups report
+        // unset instead of falling through to the outer binding) while the
+        // frame's saved snapshot still restores the pre-local value at
+        // function end, and the local attribute survives a later
+        // reassignment. The frame snapshots stay untouched.
+        if crate::builtins::shopt::option_enabled(&self.env_vars, "localvar_unset") {
+            self.env_vars.remove(name);
+            env::remove_var(name);
+            self.shell_state.variables.remove(name);
+            // GNU resets the attributes (att_local + att_invisible; exported
+            // kept only for tempvars) — clear the live attribute marks.
+            set_var_attrs(&mut self.env_vars, name, VarAttrs::default());
+            return true;
+        }
         let previous = self.local_var_scopes[scope_index].remove(name);
         let attrs = self.local_attr_scopes[scope_index]
             .remove(name)

@@ -354,4 +354,45 @@ impl Executor {
             })
             .collect()
     }
+
+    /// GNU variables.c:3320-3345 bind_variable_value → make_variable_value
+    /// (variables.c:2920-2937): an assignment operand whose target carries
+    /// the integer attribute evaluates the RHS with evalexp. readonly and
+    /// export share declare.def's operand handling (setattr.def), so
+    /// `readonly i=100+42` on an int-attributed local binds 142
+    /// (varenv25.sub init_vars2).
+    pub(in crate::executor) fn evaluate_integer_attribute_assignment_args(
+        &self,
+        args: &[String],
+    ) -> Vec<String> {
+        args.iter()
+            .map(|arg| {
+                let Some((name, value)) = split_assignment_word(arg) else {
+                    return arg.clone();
+                };
+                if value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+                    || value.starts_with('(') && value.ends_with(')')
+                {
+                    return arg.clone();
+                }
+                let base = name
+                    .strip_suffix('+')
+                    .unwrap_or(name)
+                    .split('[')
+                    .next()
+                    .unwrap_or(name);
+                let target_is_integer = match self.nameref_resolution(base) {
+                    NamerefResolution::Target(ref target) => {
+                        is_marked_var(&self.env_vars, INTEGER_VARS, target)
+                    }
+                    _ => is_marked_var(&self.env_vars, INTEGER_VARS, base),
+                };
+                if target_is_integer {
+                    format!("{name}={}", self.eval_integer_assignment_value(value))
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect()
+    }
 }

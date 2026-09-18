@@ -676,6 +676,35 @@ impl Executor {
                 args.push("-p".to_string());
                 args.extend(local_names);
             }
+            // GNU setattr.def:555-570 show_localname_attributes:
+            // `local -p name` reports the operand only when it is a local at
+            // the CURRENT variable context (local_p && var->context ==
+            // variable_context) — an outer frame's local is "not found", so
+            // `local -p s` inside a function that declared no s reports an
+            // error even when the caller's local s is dynamically visible
+            // (varenv25.sub init_vars).
+            let mut print_missing: Vec<String> = Vec::new();
+            if declare_args_request_print(&args) && !local_names(&args).is_empty() {
+                let innermost = self.local_var_scopes.last();
+                args.retain(|arg| {
+                    if arg.starts_with('-') || arg.starts_with('+') {
+                        return true;
+                    }
+                    let (base, _) = assignment_name_and_append(arg);
+                    let found = innermost.is_some_and(|scope| scope.contains_key(base));
+                    if !found {
+                        print_missing.push(base.to_string());
+                    }
+                    found
+                });
+            }
+            for name in &print_missing {
+                writeln!(
+                    stderr,
+                    "{}local: {name}: not found",
+                    self.diagnostic_prefix()
+                )?;
+            }
             // GNU variables.c:2651-2665 (make_local_variable): readonly
             // global bindings reject local creation — drop those operands
             // before the frame save so neither a local nor an assignment
@@ -730,7 +759,9 @@ impl Executor {
                 )?;
             }
             let (status, builtin_status) =
-                if !local_blocked.is_empty() && local_names(&args).is_empty() {
+                if (!local_blocked.is_empty() || !print_missing.is_empty())
+                    && local_names(&args).is_empty()
+                {
                     (1, 0)
                 } else {
                     let builtin_status =
@@ -743,7 +774,7 @@ impl Executor {
                             true,
                             &frame_locals,
                         )?;
-                    let status = if local_blocked.is_empty() {
+                    let status = if local_blocked.is_empty() && print_missing.is_empty() {
                         builtin_status
                     } else {
                         builtin_status.max(1)

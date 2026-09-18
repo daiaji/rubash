@@ -22,6 +22,10 @@ impl Executor {
             Ok(args) => args,
             Err(()) => return Ok(1),
         };
+        // Same GNU variables.c:2920-2937 make_variable_value rule as the
+        // readonly path: an operand whose target is integer-attributed
+        // evaluates the RHS arithmetic (`export i=3+4` binds 7).
+        let args = self.evaluate_integer_attribute_assignment_args(&args);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let status = crate::builtins::setattr::export_with_io(
