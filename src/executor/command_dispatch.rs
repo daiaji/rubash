@@ -9,6 +9,15 @@ impl Executor {
         let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_MATCMD);
         let standalone_assignments = cmd.words.is_empty() && !cmd.assignments.is_empty();
         let keep_temporary_assignments = self.keeps_temporary_assignments(cmd);
+        // GNU execute_cmd.c: this_command_name is the command word for the
+        // duration of the command — including its leading tempenv
+        // assignments — so assignment diagnostics carry the command segment
+        // (`FOO=x getopts ...` reports under `getopts:`). A command with no
+        // words is a bare assignment list and reports no command segment.
+        let previous_command_name = std::mem::replace(
+            &mut self.assignment_command_name,
+            cmd.words.first().cloned(),
+        );
         if self.posix_function_declare_prefix_assignments_are_local(cmd) {
             self.save_assignment_local_names(&cmd.assignments);
         }
@@ -75,7 +84,7 @@ impl Executor {
         self.update_underscore_parameter(cmd);
         // GNU execute_cmd.c:1004-1017: in POSIX mode, a non-interactive shell
         // exits when a special builtin returned an error status (> EX_SHERRBASE).
-        if result.is_ok()
+        let outcome = if result.is_ok()
             && self.special_builtin_failed.get()
             && self.posix_mode_enabled()
             && self
@@ -84,12 +93,14 @@ impl Executor {
                 .map(String::as_str)
                 != Some("1")
         {
-            return Err(ExecuteError::ExitCode(self.exit_code));
-        }
-        if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
-            return Err(ExecuteError::ExitCode(self.exit_code));
-        }
-        result
+            Err(ExecuteError::ExitCode(self.exit_code))
+        } else if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
+            Err(ExecuteError::ExitCode(self.exit_code))
+        } else {
+            result
+        };
+        self.assignment_command_name = previous_command_name;
+        outcome
     }
 
     fn execute_prepared_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {

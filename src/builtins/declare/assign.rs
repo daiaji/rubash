@@ -213,15 +213,18 @@ where
         // first clause + the visible-nameref cell validation): an
         // assignment whose target is a nameref without a usable cell
         // validates the value as a nameref value; an invalid one reports
-        // sh_invalidid and leaves the nameref valueless
-        // (nameref12/nameref13.sub: typeset -n foo; typeset foo=12345).
+        // sh_invalidid (`` `value': not a valid identifier ``) and leaves
+        // the nameref valueless (nameref12/nameref13.sub:
+        // typeset -n foo; typeset foo=12345). This is the assignment path —
+        // the `invalid variable name for name reference` wording belongs to
+        // declare.def's `-n name=value` declaration-time check only.
         if marked_vars(variables, NAMEREF_VARS).contains(var_name) {
             let current = variables.get(var_name).cloned().unwrap_or_default();
             if !append && !valid_nameref_value(&current) {
                 if !valid_nameref_value(value) {
                     writeln!(
                         stderr,
-                        "{}{command_name}: `{value}': invalid variable name for name reference",
+                        "{}{command_name}: `{value}': not a valid identifier",
                         diagnostic_prefix(variables)
                     )?;
                     status = EXECUTION_FAILURE;

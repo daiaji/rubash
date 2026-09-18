@@ -98,24 +98,55 @@ impl Executor {
                 let _ = self.run_debug_trap(&for_text)?;
             }
             ran_body = true;
-            // GNU execute_cmd.c:3064 bind_variable: assigning to a readonly
-            // loop variable reports "VAR: readonly variable" and aborts the
-            // loop with status 1.
-            if is_marked_var(&self.env_vars, READONLY_VARS, &for_command.variable) {
-                eprintln!(
-                    "{}{}: readonly variable",
-                    self.diagnostic_prefix(),
-                    for_command.variable
-                );
-                self.exit_code = 1;
-                return Ok(());
-            }
-            self.env_vars
-                .insert(for_command.variable.clone(), value.clone());
+            // GNU execute_cmd.c:3066-3079: the loop variable is resolved with
+            // find_variable_last_nameref; when it is a nameref the iteration
+            // word is validated with valid_nameref_value (invalid word ->
+            // sh_invalidid and the for command fails; readonly ->
+            // err_readonly) and bound with bind_variable_value(v, word,
+            // ASS_NAMEREF), which writes the nameref CELL — retargeting the
+            // reference rather than writing through to the target
+            // (nameref5.sub: `typeset -n v=v1; for v in v1 v2` prints
+            // "v1: 1" "v2: 2"). A non-nameref loop variable uses plain
+            // bind_variable semantics.
+            let bound_name = if is_marked_var(&self.env_vars, NAMEREF_VARS, &for_command.variable)
+            {
+                let value_valid = is_shell_name(&value)
+                    || parse_array_subscript(&value).is_some();
+                if !value_valid {
+                    eprintln!(
+                        "{}`{}': not a valid identifier",
+                        self.diagnostic_prefix(),
+                        value
+                    );
+                    self.exit_code = 1;
+                    return Ok(());
+                }
+                if is_marked_var(&self.env_vars, READONLY_VARS, &for_command.variable) {
+                    eprintln!(
+                        "{}{}: readonly variable",
+                        self.diagnostic_prefix(),
+                        for_command.variable
+                    );
+                    self.exit_code = 1;
+                    return Ok(());
+                }
+                self.env_vars
+                    .insert(for_command.variable.clone(), value.clone());
+                for_command.variable.clone()
+            } else {
+                if !self.apply_shell_assignment(&for_command.variable, value.clone()) {
+                    self.exit_code = 1;
+                    return Ok(());
+                }
+                match self.nameref_resolution(&for_command.variable) {
+                    NamerefResolution::Target(target) => target,
+                    _ => for_command.variable.clone(),
+                }
+            };
             // Keep the typed scalar in sync: function assignments can create a
             // typed entry for the loop variable, which otherwise masks the
             // current iteration value during later word expansion.
-            if let Some(variable) = self.shell_state.variables.get_mut(&for_command.variable) {
+            if let Some(variable) = self.shell_state.variables.get_mut(&bound_name) {
                 if let crate::shell::ShellValue::Scalar(current) = &mut variable.value {
                     *current = value.clone();
                 }

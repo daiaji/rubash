@@ -265,6 +265,27 @@ fn assign_printf_output(
     mut variables: Option<&mut VariableStore>,
     stderr: &mut dyn Write,
 ) -> io::Result<Option<i32>> {
+    // GNU variables.c:2201-2204 find_variable_nameref_for_assignment ->
+    // valid_nameref_value: binding a value into a valueless nameref stores
+    // it as the new cell, so the output text is validated as a nameref
+    // target — `printf -v r /` reports `` printf: `/': not a valid
+    // identifier `` and fails (nameref11.sub lines 34/39).
+    if valid_identifier(name)
+        && is_marked(env_vars, "__RUBASH_NAMEREF_VARS", name)
+        && env_vars.get(name).map_or(true, |cell| cell.is_empty())
+    {
+        if !valid_identifier(&output) && parse_printf_array_target(&output).is_none() {
+            writeln!(
+                stderr,
+                "{}printf: `{}': not a valid identifier",
+                diagnostic_prefix(env_vars),
+                output
+            )?;
+            return Ok(Some(1));
+        }
+        env_vars.insert(name.to_string(), output);
+        return Ok(None);
+    }
     let resolved = resolve_printf_bind_name(env_vars, name);
     let name = resolved.as_str();
     // GNU printf.def:114 `v == 0 || ASSIGN_DISALLOWED(v, 0)` ->

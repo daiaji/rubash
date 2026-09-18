@@ -967,6 +967,20 @@ impl Executor {
                     let mut bind_name = array_name.clone();
                     let mut pid_name = format!("{array_name}_PID");
                     let mut can_bind = true;
+                    // GNU execute_cmd.c:2383 check_identifier: an invalid
+                    // coproc name is diagnosed and binds nothing; the coproc
+                    // itself still runs and c_name stays recorded for
+                    // coproc_unsetvars.
+                    let mut c_name = array_name.clone();
+                    if !is_shell_name(&array_name) {
+                        eprintln!(
+                            "{}`{}': not a valid identifier",
+                            self.diagnostic_prefix(),
+                            array_name
+                        );
+                        can_bind = false;
+                    }
+                    if can_bind {
                     match self.nameref_resolution(&array_name) {
                         NamerefResolution::Target(target) => {
                             let target_base =
@@ -995,6 +1009,9 @@ impl Executor {
                                 // cell untouched.
                                 bind_name = target_base.to_string();
                                 pid_name = format!("{target_base}_PID");
+                                // c_name rewritten to the nameref cell
+                                // (execute_cmd.c:2401-2404).
+                                c_name = target_base.to_string();
                             }
                         }
                         NamerefResolution::Unresolved => {
@@ -1032,10 +1049,18 @@ impl Executor {
                             can_bind = false;
                         }
                     }
+                    }
+                    // GNU stores c_name regardless of bind success so
+                    // coproc_unsetvars can still attempt the unbinds.
+                    self.coproc_names.insert(pid, c_name.clone());
                     if can_bind {
                         self.env_vars.insert(bind_name.clone(), array_value);
                         mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &bind_name);
-                        self.env_vars.insert(pid_name, pid.to_string());
+                        // bind_variable (execute_cmd.c:2441) is nameref-aware:
+                        // `coproc ref` with ref_PID a nameref assigns through
+                        // it and hits the resolved target's readonly check.
+                        // err_readonly carries no builtin command segment.
+                        self.apply_shell_assignment(&pid_name, pid.to_string());
                     }
                     self.exit_code = 0;
                 }

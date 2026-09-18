@@ -224,11 +224,34 @@ impl Executor {
             );
             return 2;
         }
-        if self.apply_shell_assignment(variable, value.to_string()) {
+        if self.getopts_apply_bind("getopts", variable, value, stderr) {
             0
         } else {
             2
         }
+    }
+
+    /// GNU getopts binds through bind_variable whose diagnostics go to the
+    /// builtin's stderr — collect them into the buffered stream so they keep
+    /// their position relative to diagnostics the caller already buffered
+    /// (e.g. `illegal option -- h` precedes `getopts: `?': not a valid
+    /// identifier`, nameref11.sub:31).
+    fn getopts_apply_bind<W>(
+        &mut self,
+        command: &str,
+        variable: &str,
+        value: &str,
+        stderr: &mut W,
+    ) -> bool
+    where
+        W: Write,
+    {
+        self.buffer_assignment_diagnostics = true;
+        let ok = self.apply_shell_assignment_command(command, variable, value.to_string());
+        self.buffer_assignment_diagnostics = false;
+        let pending = std::mem::take(&mut self.pending_assignment_diagnostics);
+        let _ = stderr.write_all(&pending);
+        ok
     }
 
     /// bind_variable("OPTARG", ...): a readonly OPTARG reports the
@@ -247,7 +270,7 @@ impl Executor {
             );
             return;
         }
-        self.apply_shell_assignment("OPTARG", value.to_string());
+        self.getopts_apply_bind("getopts", "OPTARG", value, stderr);
     }
 
     /// getopts.def getopts_unbind_variable -> unbind_variable_noref: the

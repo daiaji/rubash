@@ -561,7 +561,7 @@ impl Executor {
             } else {
                 unescape_read_backslashes(line)
             };
-            return i32::from(self.apply_shell_assignment(&names[0], value));
+            return i32::from(self.apply_shell_assignment_command("read", &names[0], value));
         }
 
         let ifs = self
@@ -582,7 +582,7 @@ impl Executor {
         let mut status = 0i32;
         for (index, name) in names.iter().enumerate() {
             let value = fields.get(index).cloned().unwrap_or_default();
-            if !self.apply_shell_assignment(name, value) {
+            if !self.apply_shell_assignment_command("read", name, value) {
                 status = if index + 1 < names.len() { 2 } else { 1 };
                 break;
             }

@@ -351,6 +351,9 @@ impl Executor {
         &mut self,
         previous: Vec<(String, Option<String>, Option<crate::shell::Variable>)>,
     ) {
+        if let Some(mark) = self.tempenv_marks.pop() {
+            self.tempenv_names.truncate(mark);
+        }
         for (name, value, typed_value) in previous.into_iter().rev() {
             if let Some(value) = value {
                 self.env_vars.insert(name.clone(), value.clone());

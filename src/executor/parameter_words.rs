@@ -645,6 +645,13 @@ impl Executor {
         inner: &str,
         double_quoted: bool,
     ) {
+        // GNU subst.c: a failed := assignment is an expand_word_error that
+        // aborts the whole word expansion (DISCARD at top level), so once a
+        // failure is latched the remaining expansions are skipped — this also
+        // prevents the duplicate diagnostic when the word is re-expanded.
+        if self.parameter_assignment_failure.get() {
+            return;
+        }
         if let Some((name, value)) = inner.split_once(":=") {
             if self
                 .parameter_operator_value(name)
@@ -662,7 +669,9 @@ impl Executor {
             if !is_shell_name(name) {
                 return;
             }
-            self.apply_shell_assignment(name, value);
+            if !self.apply_shell_assignment(name, value) {
+                self.parameter_assignment_failure.set(true);
+            }
             return;
         }
 
@@ -680,7 +689,9 @@ impl Executor {
             if !is_shell_name(name) {
                 return;
             }
-            self.apply_shell_assignment(name, value);
+            if !self.apply_shell_assignment(name, value) {
+                self.parameter_assignment_failure.set(true);
+            }
         }
     }
 

@@ -478,6 +478,13 @@ pub struct Executor {
     background_jobs: HashMap<u32, String>,
     background_job_order: Vec<u32>,
     coproc_stdin_writers: HashMap<u32, std::io::PipeWriter>,
+    /// GNU execute_cmd.c Coproc.c_name: the coproc name actually stored,
+    /// after find_variable_nameref_for_create may rewrite it to the nameref
+    /// cell. coproc_unsetvars (execute_cmd.c:2450) unbinds <c_name>_PID and
+    /// check_unbind_variable(c_name) at reap time — even when coproc_bind
+    /// failed (invalid identifier, readonly), so the name must be tracked
+    /// independently of whether the *_PID variable exists.
+    coproc_names: HashMap<u32, String>,
     coproc_stdout_readers: HashMap<u32, std::io::PipeReader>,
     coproc_stderr_forwarders: HashMap<u32, std::thread::JoinHandle<Result<(), std::io::Error>>>,
     assignment_output_process_substitutions: HashMap<String, String>,
@@ -523,6 +530,38 @@ pub struct Executor {
     /// expand_arith_string before evalexp, so diagnostics echo the
     /// post-expansion text (`$A` shows its value, not the literal).
     arithmetic_last_eval_input: std::cell::RefCell<String>,
+    /// GNU error.c builtin_error -> error_prolog: diagnostics raised while a
+    /// builtin runs carry `this_command_name` (`declare: ...`, `getopts: ...`).
+    /// Assignment paths deep inside apply_shell_assignment consult this so a
+    /// failed `builtin name=value` names the builtin, while a bare
+    /// `name=value` command prints no command segment.
+    assignment_command_name: Option<String>,
+    /// GNU builtins emit assignment diagnostics through builtin_error, which
+    /// honors the builtin's redirected stderr and ordering. Builtin callers
+    /// (getopts OPTARG/name binds) set buffer_assignment_diagnostics and drain
+    /// pending_assignment_diagnostics into their buffered stderr so a
+    /// preceding buffered diagnostic (e.g. `illegal option -- h`) keeps its
+    /// position relative to the bind error.
+    buffer_assignment_diagnostics: bool,
+    pending_assignment_diagnostics: Vec<u8>,
+    /// GNU subst.c: an assignment performed by `${var:=word}`/`${var=word}`
+    /// that fails (invalid nameref target value, readonly, ...) is a word
+    /// expansion error — expand_word_error -> exp_jump_to_top_level(DISCARD)
+    /// abandons the rest of the command list. The := applier runs inside
+    /// word expansion where it cannot return an error, so it latches here
+    /// and execute_prepared_command raises ExpansionFailure(1).
+    parameter_assignment_failure: Cell<bool>,
+    /// GNU variables.c:3536 assign_in_env: names bound through `name=value
+    /// cmd` temporary-environment assignments are live at the command's
+    /// variable context while it runs — a function-local `declare -n r`
+    /// sees a tempenv `r` as an existing variable (validating its value as
+    /// the new cell), not as a fresh empty local. Tracked as a stack of the
+    /// bound names so nested commands restore correctly.
+    tempenv_names: Vec<String>,
+    /// Frame marks pairing apply_temporary_assignments /
+    /// restore_temporary_assignments so nested commands truncate the
+    /// tempenv-name stack to the boundary recorded by the outer call.
+    tempenv_marks: Vec<usize>,
     /// True while an if/elif condition list is executing: word-expansion
     /// failures must pierce function frames so the enclosing compound
     /// command can abandon itself entirely (GNU probe f4).

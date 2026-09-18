@@ -188,7 +188,7 @@ impl Executor {
                     self.job_table.remove_job_by_pid_preserve_status(pid);
                     self.forget_background_runtime(pid);
                     if let Some(wait_var) = &request.assign_var {
-                        self.apply_shell_assignment(wait_var, pid.to_string());
+                        self.apply_shell_assignment_command("wait", wait_var, pid.to_string());
                     }
                     self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                     return Ok(status);
@@ -308,7 +308,7 @@ impl Executor {
         }
 
         if let (Some(wait_var), Some(pid)) = (wait_var, last_pid) {
-            self.apply_shell_assignment(wait_var, pid.to_string());
+            self.apply_shell_assignment_command("wait", wait_var, pid.to_string());
         }
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
@@ -379,6 +379,46 @@ impl Executor {
         result.map_err(ExecuteError::IoError)
     }
 
+    /// GNU execute_cmd.c:2450 coproc_unsetvars: unbind_variable_noref
+    /// removes <c_name>_PID literally (no nameref follow, no readonly gate),
+    /// then check_unbind_variable resolves c_name through namerefs and
+    /// refuses readonly targets with `name: cannot unset: readonly
+    /// variable`. Runs for every coproc name recorded at spawn, including
+    /// names whose coproc_bind failed (invalid identifier, readonly).
+    fn coproc_unset_vars(&mut self, pid: u32) {
+        let Some(name) = self.coproc_names.remove(&pid) else {
+            return;
+        };
+        let pid_name = format!("{name}_PID");
+        self.env_vars.remove(&pid_name);
+        self.shell_state.variables.remove(&pid_name);
+        for marker in [
+            READONLY_VARS,
+            NAMEREF_VARS,
+            ARRAY_VARS,
+            ASSOC_VARS,
+            DECLARED_UNSET_VARS,
+        ] {
+            unmark_env_name(&mut self.env_vars, marker, &pid_name);
+        }
+        let unbind_name = self
+            .resolved_variable_name(&name)
+            .unwrap_or_else(|| name.clone());
+        if is_marked_var(&self.env_vars, READONLY_VARS, &unbind_name) {
+            eprintln!(
+                "{}{}: cannot unset: readonly variable",
+                self.diagnostic_prefix(),
+                unbind_name
+            );
+            return;
+        }
+        self.env_vars.remove(&unbind_name);
+        self.shell_state.variables.remove(&unbind_name);
+        for marker in [ARRAY_VARS, ASSOC_VARS, DECLARED_UNSET_VARS] {
+            unmark_env_name(&mut self.env_vars, marker, &unbind_name);
+        }
+    }
+
     fn retire_completed_coproc(&mut self, pid: u32) {
         let is_coproc = self.coproc_stdin_writers.contains_key(&pid)
             || self.coproc_stdout_readers.contains_key(&pid)
@@ -424,38 +464,7 @@ impl Executor {
                 .remove(&fd_output_process_substitution_key(fd));
             self.env_vars.insert(fd_closed_key(fd), "1".to_string());
         }
-        let coproc_names = self
-            .env_vars
-            .iter()
-            .filter_map(|(key, value)| {
-                key.strip_suffix("_PID")
-                    .filter(|_| value == &pid.to_string())
-                    .map(str::to_string)
-            })
-            .collect::<Vec<_>>();
-        for name in coproc_names {
-            // GNU execute_cmd.c coproc_unsetvars -> check_unbind_variable
-            // resolves namerefs: when `coproc ref` redirected the array to
-            // the nameref's target, the unbind removes the TARGET while the
-            // nameref cell itself survives.
-            let unbind_name = self
-                .resolved_variable_name(&name)
-                .unwrap_or_else(|| name.clone());
-            // GNU check_unbind_variable refuses readonly variables with
-            // `name: cannot unset: readonly variable` and leaves them bound.
-            if is_marked_var(&self.env_vars, READONLY_VARS, &unbind_name) {
-                eprintln!(
-                    "{}{}: cannot unset: readonly variable",
-                    self.diagnostic_prefix(),
-                    unbind_name
-                );
-                self.env_vars.remove(&format!("{name}_PID"));
-                continue;
-            }
-            self.env_vars.remove(&unbind_name);
-            self.env_vars.remove(&format!("{name}_PID"));
-            unmark_env_name(&mut self.env_vars, ARRAY_VARS, &unbind_name);
-        }
+        self.coproc_unset_vars(pid);
 
         let coproc_prefix = format!("{FD_COPROC_STDIN_TARGET_PREFIX}{pid}");
         self.env_vars.retain(|key, value| {
@@ -494,6 +503,9 @@ impl Executor {
         self.coproc_stdin_writers.remove(&pid);
         self.coproc_stdout_readers.remove(&pid);
         self.fd_table.close(pid);
+        // GNU reaps dead coprocs through wait_for too; coproc_unsetvars runs
+        // there, not only on the background-refresh path.
+        self.coproc_unset_vars(pid);
     }
 
     fn wait_for_background_pid(

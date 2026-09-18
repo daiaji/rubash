@@ -370,6 +370,18 @@ impl Executor {
             self.exit_code = 1;
         }
 
+        // GNU subst.c: a failing `${var:=word}`/`${var=word}` assignment is an
+        // expand_word_error; noninteractive shells jump to top level with
+        // DISCARD, abandoning the current command list while the script
+        // continues.
+        if self.parameter_assignment_failure.replace(false) {
+            // GNU reports expansion failures with EX_BADUSAGE (2), matching
+            // `${var?msg}` / bad-substitution status, not the builtin-failure
+            // status 1.
+            self.exit_code = 2;
+            return Err(ExecuteError::ExpansionFailure(2));
+        }
+
         if alias_expansion_changed_words
             && !original_words_had_command_substitution
             && self.execute_alias_expanded_syntax(&cmd)?

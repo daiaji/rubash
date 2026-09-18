@@ -1464,7 +1464,10 @@ impl Executor {
                 self.report_fd_dup_error("here-string");
                 return Ok(Some(1));
             };
-            self.set_dynamic_fd_variable(name, fd);
+            if !self.set_dynamic_fd_variable(name, fd) {
+                self.report_fd_assignment_failure(name);
+                return Ok(Some(1));
+            }
             self.set_fd_input_text(fd, input, true);
             return Ok(Some(0));
         }
@@ -1486,7 +1489,10 @@ impl Executor {
                     self.report_readonly_fd_assignment(name);
                     return Ok(Some(1));
                 }
-                self.set_dynamic_fd_variable(name, fd);
+                if !self.set_dynamic_fd_variable(name, fd) {
+                    self.report_fd_assignment_failure(name);
+                    return Ok(Some(1));
+                }
                 if move_source {
                     self.close_persistent_fd(source_fd)?;
                 }
@@ -1512,7 +1518,10 @@ impl Executor {
                         self.report_readonly_fd_assignment(name);
                         return Ok(Some(1));
                     }
-                    self.set_dynamic_fd_variable(name, fd);
+                    if !self.set_dynamic_fd_variable(name, fd) {
+                        self.report_fd_assignment_failure(name);
+                        return Ok(Some(1));
+                    }
                     return Ok(Some(0));
                 }
             }
@@ -1531,7 +1540,10 @@ impl Executor {
                     self.report_readonly_fd_assignment(name);
                     return Ok(Some(1));
                 }
-                self.set_dynamic_fd_variable(name, fd);
+                if !self.set_dynamic_fd_variable(name, fd) {
+                    self.report_fd_assignment_failure(name);
+                    return Ok(Some(1));
+                }
                 return Ok(Some(0));
             }
 
@@ -1553,7 +1565,10 @@ impl Executor {
                 self.report_readonly_fd_assignment(name);
                 return Ok(Some(1));
             }
-            self.set_dynamic_fd_variable(name, fd);
+            if !self.set_dynamic_fd_variable(name, fd) {
+                self.report_fd_assignment_failure(name);
+                return Ok(Some(1));
+            }
             self.set_fd_input_text(fd, input, true);
             // Same `6<>` suffix rule as the exec path above.
             if redirect.operator.ends_with("<>") {
@@ -1585,7 +1600,10 @@ impl Executor {
                     self.report_readonly_fd_assignment(name);
                     return Ok(Some(1));
                 }
-                self.set_dynamic_fd_variable(name, fd);
+                if !self.set_dynamic_fd_variable(name, fd) {
+                    self.report_fd_assignment_failure(name);
+                    return Ok(Some(1));
+                }
                 if move_source {
                     self.close_persistent_fd(source_fd)?;
                 }
@@ -1596,7 +1614,10 @@ impl Executor {
                     self.report_readonly_fd_assignment(name);
                     return Ok(Some(1));
                 }
-                self.set_dynamic_fd_variable(name, fd);
+                if !self.set_dynamic_fd_variable(name, fd) {
+                    self.report_fd_assignment_failure(name);
+                    return Ok(Some(1));
+                }
                 return Ok(Some(0));
             }
             self.create_redirect_output(&target, redirect.clobber)?;
@@ -1604,7 +1625,10 @@ impl Executor {
                 self.report_readonly_fd_assignment(name);
                 return Ok(Some(1));
             }
-            self.set_dynamic_fd_variable(name, fd);
+            if !self.set_dynamic_fd_variable(name, fd) {
+                self.report_fd_assignment_failure(name);
+                return Ok(Some(1));
+            }
             self.set_fd_output_file(fd, target, true);
             return Ok(Some(0));
         }
@@ -1624,7 +1648,10 @@ impl Executor {
                     self.report_readonly_fd_assignment(name);
                     return Ok(Some(1));
                 }
-                self.set_dynamic_fd_variable(name, fd);
+                if !self.set_dynamic_fd_variable(name, fd) {
+                    self.report_fd_assignment_failure(name);
+                    return Ok(Some(1));
+                }
                 return Ok(Some(0));
             }
             OpenOptions::new()
@@ -1635,7 +1662,10 @@ impl Executor {
                 self.report_readonly_fd_assignment(name);
                 return Ok(Some(1));
             }
-            self.set_dynamic_fd_variable(name, fd);
+            if !self.set_dynamic_fd_variable(name, fd) {
+                self.report_fd_assignment_failure(name);
+                return Ok(Some(1));
+            }
             self.set_fd_output_file(fd, target, true);
             return Ok(Some(0));
         }
@@ -1724,7 +1754,12 @@ impl Executor {
                         )));
                     };
                     self.copy_persistent_input_fd(fd, source_fd);
-                    self.set_dynamic_fd_variable(name, fd);
+                    if !self.set_dynamic_fd_variable(name, fd) {
+                        return Err(ExecuteError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("{name}: cannot assign fd to variable"),
+                        )));
+                    }
                     if move_source {
                         self.close_persistent_input_fd(source_fd);
                     }
@@ -1744,7 +1779,12 @@ impl Executor {
                         )));
                     };
                     self.copy_persistent_output_fd(fd, source_fd);
-                    self.set_dynamic_fd_variable(name, fd);
+                    if !self.set_dynamic_fd_variable(name, fd) {
+                        return Err(ExecuteError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("{name}: cannot assign fd to variable"),
+                        )));
+                    }
                     if move_source {
                         self.close_persistent_output_fd(source_fd)?;
                     }
@@ -1773,7 +1813,12 @@ impl Executor {
                         if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                             self.set_fd_output_file(fd, target.clone(), true);
                         }
-                        self.set_dynamic_fd_variable(name, fd);
+                        if !self.set_dynamic_fd_variable(name, fd) {
+                            return Err(ExecuteError::IoError(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!("{name}: cannot assign fd to variable"),
+                            )));
+                        }
                         close_after_success(self, fd)?;
                         return Ok(true);
                     }
@@ -1795,7 +1840,12 @@ impl Executor {
                 if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                     self.set_fd_output_file(fd, target.clone(), true);
                 }
-                self.set_dynamic_fd_variable(name, fd);
+                if !self.set_dynamic_fd_variable(name, fd) {
+                    return Err(ExecuteError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("{name}: cannot assign fd to variable"),
+                    )));
+                }
                 close_after_success(self, fd)?;
                 return Ok(true);
             }
@@ -1813,7 +1863,12 @@ impl Executor {
                     .and_then(|target| target.strip_suffix(')'))
                 {
                     if self.open_persistent_output_process_substitution(fd, &target)? {
-                        self.set_dynamic_fd_variable(name, fd);
+                        if !self.set_dynamic_fd_variable(name, fd) {
+                            return Err(ExecuteError::IoError(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!("{name}: cannot assign fd to variable"),
+                            )));
+                        }
                         close_after_success(self, fd)?;
                         return Ok(true);
                     }
@@ -1828,7 +1883,12 @@ impl Executor {
                     self.create_redirect_output(&target, redirect.clobber)?;
                 }
                 self.set_fd_output_file(fd, target, true);
-                self.set_dynamic_fd_variable(name, fd);
+                if !self.set_dynamic_fd_variable(name, fd) {
+                    return Err(ExecuteError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("{name}: cannot assign fd to variable"),
+                    )));
+                }
                 close_after_success(self, fd)?;
                 return Ok(true);
             }
@@ -2000,27 +2060,27 @@ impl Executor {
         self.exit_code = 1;
     }
 
-    fn set_dynamic_fd_variable(&mut self, name: &str, fd: u32) {
-        if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
-            let storage_name = self
-                .resolved_variable_name(array_name)
-                .unwrap_or_else(|| array_name.to_string());
-            let current = self
-                .env_vars
-                .get(&storage_name)
-                .cloned()
-                .unwrap_or_default();
-            let mut entries = indexed_array_entries(&current);
-            entries.insert(index, fd.to_string());
-            self.env_vars
-                .insert(storage_name.clone(), format_indexed_array_storage(entries));
-            mark_env_name(&mut self.env_vars, ARRAY_VARS, &storage_name);
-        } else {
-            let storage_name = self
-                .resolved_variable_name(name)
-                .unwrap_or_else(|| name.to_string());
-            self.env_vars.insert(storage_name, fd.to_string());
-        }
+    /// GNU redir.c bind_dynamic_variable -> bind_variable: a `{var}` fd
+    /// assignment is a real variable binding — nameref targets resolve, an
+    /// empty-cell nameref stores the fd number as its cell and is validated
+    /// (`exec {r}>f` on `declare -n r` reports `` `10': not a valid
+    /// identifier `` under the command name and fails), and element-form
+    /// names assign through assign_array_element. Returns false when the
+    /// binding was rejected.
+    fn set_dynamic_fd_variable(&mut self, name: &str, fd: u32) -> bool {
+        self.apply_shell_assignment(name, fd.to_string())
+    }
+
+    /// GNU redir.c: after the fd-number bind fails the redirection reports
+    /// `name: cannot assign fd to variable` (no command-name segment) and
+    /// the command fails with status 1.
+    fn report_fd_assignment_failure(&mut self, name: &str) {
+        eprintln!(
+            "{}{}: cannot assign fd to variable",
+            self.diagnostic_prefix(),
+            name
+        );
+        self.exit_code = 1;
     }
 
     pub(in crate::executor) fn execute_exec_command(

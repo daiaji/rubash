@@ -121,8 +121,15 @@ impl Executor {
                 .filter(|n| *n >= 1 && *n <= values.len())
                 .map(|n| values[n - 1].clone())
                 .unwrap_or_default();
-            self.env_vars
-                .insert(select_command.variable.clone(), selected.clone());
+            // GNU execute_cmd.c execute_select_command binds the reply
+            // through bind_variable: nameref select variables follow full
+            // assignment semantics (empty-cell nameref stores the cell,
+            // invalid values report `` `x': not a valid identifier `` —
+            // nameref11.sub `select r in /` on `declare -n r`).
+            if !self.apply_shell_assignment(&select_command.variable, selected.clone()) {
+                self.exit_code = 1;
+                return Ok(());
+            }
             set_process_env(&select_command.variable, selected);
 
             match self.execute_select_body(&select_command.body)? {

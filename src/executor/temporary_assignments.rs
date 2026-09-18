@@ -34,12 +34,18 @@ impl Executor {
         // the previous shell variable values (both the legacy env_vars value
         // and the typed shell_state.variables owner, so parameter expansion
         // does not keep seeing a leaked temporary value).
+        self.tempenv_marks.push(self.tempenv_names.len());
         let mut previous = Vec::new();
         if !assignments.is_empty() {
             previous.push((
                 EXPORTED_VARS.to_string(),
                 self.env_vars.get(EXPORTED_VARS).cloned(),
                 self.shell_state.variables.get(EXPORTED_VARS).cloned(),
+            ));
+            previous.push((
+                NAMEREF_VARS.to_string(),
+                self.env_vars.get(NAMEREF_VARS).cloned(),
+                self.shell_state.variables.get(NAMEREF_VARS).cloned(),
             ));
         }
         // GNU findcmd.c:356-365: a PATH in the temporary command environment
@@ -90,6 +96,37 @@ impl Executor {
                     self.shell_state.variables.get(target).cloned(),
                 ));
             }
+            // GNU variables.c:3564-3578 assign_in_env: when the name does not
+            // resolve (find_variable NULL — e.g. a nameref with an empty or
+            // invalid cell), the tempenv binding falls back to the literal
+            // name as a plain exported variable; the nameref attribute does
+            // not apply inside the temporary environment
+            // (nameref11.sub: `declare -n r; r=/ f` shows `declare -x r="/"`
+            // inside f and restores the empty nameref afterwards). A readonly
+            // original still rejects the binding via ASSIGN_DISALLOWED.
+            if resolved_target.is_none()
+                && is_marked_var(&self.env_vars, NAMEREF_VARS, base_name)
+            {
+                if is_marked_var(&self.env_vars, READONLY_VARS, base_name) {
+                    let line = format!(
+                        "{}{base_name}: readonly variable
+",
+                        self.assignment_diagnostic_prefix()
+                    );
+                    self.emit_assignment_diag(line);
+                    continue;
+                }
+                self.env_vars
+                    .insert(base_name.to_string(), expanded_value.clone());
+                let _ = self
+                    .shell_state
+                    .variables
+                    .set(base_name.to_string(), crate::shell::Variable::scalar(expanded_value.clone()));
+                unmark_env_name(&mut self.env_vars, NAMEREF_VARS, base_name);
+                self.tempenv_names.push(base_name.to_string());
+                self.mark_exported(base_name);
+                continue;
+            }
             self.apply_shell_assignment(name, expanded_value);
             // GNU variables.c bind_variable (ASS_NAMEREF tempenv path): the
             // temporary assignment lands on the referenced variable and it is
@@ -99,6 +136,7 @@ impl Executor {
             let export_target = resolved_target
                 .clone()
                 .unwrap_or_else(|| base_name.to_string());
+            self.tempenv_names.push(export_target.clone());
             self.mark_exported(&export_target);
         }
         previous
@@ -200,6 +238,41 @@ impl Executor {
         true
     }
 
+    /// GNU builtins call bind_variable while `this_command_name` is the
+    /// builtin's name, so assignment diagnostics carry the `name:` segment
+    /// (`getopts: `?': not a valid identifier`, `declare: x: readonly
+    /// variable`). Bare `name=value` commands have no command segment.
+    pub(in crate::executor) fn apply_shell_assignment_command(
+        &mut self,
+        command: &str,
+        name: &str,
+        value: String,
+    ) -> bool {
+        let previous = self.assignment_command_name.replace(command.to_string());
+        let result = self.apply_shell_assignment(name, value);
+        self.assignment_command_name = previous;
+        result
+    }
+
+    /// emit_assignment_diag routes through the builtin's buffered stderr when
+    /// a caller opted in (GNU builtin_error ordering/redirection), otherwise
+    /// writes process stderr directly like eprintln!.
+    fn emit_assignment_diag(&mut self, line: String) {
+        if self.buffer_assignment_diagnostics {
+            self.pending_assignment_diagnostics
+                .extend_from_slice(line.as_bytes());
+        } else {
+            let _ = std::io::stderr().write_all(line.as_bytes());
+        }
+    }
+
+    fn assignment_diagnostic_prefix(&self) -> String {
+        match &self.assignment_command_name {
+            Some(command) => format!("{}{command}: ", self.diagnostic_prefix()),
+            None => self.diagnostic_prefix(),
+        }
+    }
+
     pub(in crate::executor) fn apply_shell_assignment(
         &mut self,
         name: &str,
@@ -219,10 +292,10 @@ impl Executor {
                 // pre-formatted buffer instead.
                 let line = format!(
                     "{}warning: {}: circular name reference\n",
-                    self.diagnostic_prefix(),
+                    self.assignment_diagnostic_prefix(),
                     base_name
                 );
-                let _ = std::io::stderr().write_all(line.as_bytes());
+                self.emit_assignment_diag(line);
                 // GNU variables.c:2036-2046 find_variable_nameref + the
                 // bind_variable maxloop path: inside a function a circula
                 // nameref assignment writes the GLOBAL namesake of the name
@@ -249,10 +322,10 @@ impl Executor {
                 // internal_warning, so the assignment fails with status 1.
                 let line = format!(
                     "{}warning: {}: maximum nameref depth (8) exceeded\n",
-                    self.diagnostic_prefix(),
+                    self.assignment_diagnostic_prefix(),
                     base_name
                 );
-                let _ = std::io::stderr().write_all(line.as_bytes());
+                self.emit_assignment_diag(line);
                 return false;
             }
             // Unresolved cell: resolve to the nameref itself; the
@@ -288,9 +361,9 @@ impl Executor {
                 };
                 let line = format!(
                     "{}`{offender}': not a valid identifier\n",
-                    self.diagnostic_prefix()
+                    self.assignment_diagnostic_prefix()
                 );
-                let _ = std::io::stderr().write_all(line.as_bytes());
+                self.emit_assignment_diag(line);
                 self.exit_code = 1;
                 return false;
             }
@@ -315,10 +388,10 @@ impl Executor {
                     if is_marked_var(&self.env_vars, "__RUBASH_READONLY_VARS", elem_base) {
                         let line = format!(
                             "{}{}: readonly variable\n",
-                            self.diagnostic_prefix(),
+                            self.assignment_diagnostic_prefix(),
                             elem_base
                         );
-                        let _ = std::io::stderr().write_all(line.as_bytes());
+                        self.emit_assignment_diag(line);
                         self.exit_code = 1;
                         return false;
                     }
@@ -340,10 +413,10 @@ impl Executor {
                     if is_marked_var(&self.env_vars, "__RUBASH_READONLY_VARS", elem_base) {
                         let line = format!(
                             "{}{}: readonly variable\n",
-                            self.diagnostic_prefix(),
+                            self.assignment_diagnostic_prefix(),
                             elem_base
                         );
-                        let _ = std::io::stderr().write_all(line.as_bytes());
+                        self.emit_assignment_diag(line);
                         self.exit_code = 1;
                         return false;
                     }
@@ -358,10 +431,10 @@ impl Executor {
         if is_marked_var(&self.env_vars, "__RUBASH_READONLY_VARS", base_name) {
             let line = format!(
                 "{}{}: readonly variable\n",
-                self.diagnostic_prefix(),
+                self.assignment_diagnostic_prefix(),
                 base_name
             );
-            let _ = std::io::stderr().write_all(line.as_bytes());
+            self.emit_assignment_diag(line);
             self.exit_code = 1;
             return false;
         }
@@ -461,12 +534,14 @@ impl Executor {
             );
             self.env_vars.insert(base_name.to_string(), stored.clone());
             for bare in &bare_elements {
-                eprintln!(
-                    "{}{}: {}: must use subscript when assigning associative array",
-                    self.diagnostic_prefix(),
+                let line = format!(
+                    "{}{}: {}: must use subscript when assigning associative array
+",
+                    self.assignment_diagnostic_prefix(),
                     base_name,
                     bare
                 );
+                self.emit_assignment_diag(line);
             }
             if !bare_elements.is_empty() {
                 self.exit_code = 1;
@@ -512,7 +587,9 @@ impl Executor {
                 if let Some(msg) =
                     crate::executor::arithmetic::arithmetic_error_message(&value, false, &self.env_vars)
                 {
-                    eprintln!("{}{}", self.diagnostic_prefix(), msg);
+                    let line = format!("{}{}
+", self.assignment_diagnostic_prefix(), msg);
+                    self.emit_assignment_diag(line);
                 }
                 self.arithmetic_expansion_error.set(true);
                 String::new()

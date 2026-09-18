@@ -241,11 +241,18 @@ impl Executor {
                 .assignment_keys()
                 .map(|name| assignment_name_and_append(name).0.to_string())
                 .collect::<Vec<_>>();
-            let pre_existing: Vec<String> = self
+            let mut pre_existing: Vec<String> = self
                 .local_var_scopes
                 .last()
                 .map(|scope| scope.keys().cloned().collect())
                 .unwrap_or_default();
+            // GNU variables.c:3564-3578 assign_in_env + declare.def:659-668:
+            // names bound through `name=value cmd` tempenv assignments are
+            // live at this command's variable context, so `declare -n r`
+            // sees a tempenv `r` as an existing variable (its value becomes
+            // the candidate cell and is validated) rather than resetting a
+            // fresh empty local.
+            pre_existing.extend(self.tempenv_names.iter().cloned());
             self.save_local_names(&args);
             if !local_args_request_inherit(&args) {
                 self.initialize_non_inherited_locals(
@@ -423,11 +430,14 @@ impl Executor {
                     .assignment_keys()
                     .map(|name| assignment_name_and_append(name).0.to_string())
                     .collect::<Vec<_>>();
-                let pre_existing: Vec<String> = self
+                let mut pre_existing: Vec<String> = self
                     .local_var_scopes
                     .last()
                     .map(|scope| scope.keys().cloned().collect())
                     .unwrap_or_default();
+                // Same tempenv visibility as the declare path above: names
+                // bound by `name=value cmd` are live at this context.
+                pre_existing.extend(self.tempenv_names.iter().cloned());
                 self.save_local_names(&args);
                 if !local_args_request_inherit(&args) {
                     self.initialize_non_inherited_locals(
