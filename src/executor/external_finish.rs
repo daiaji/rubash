@@ -157,14 +157,19 @@ impl Executor {
         let saved_function_def_infos = self.function_def_infos.clone();
         let saved_aliases = self.aliases.clone();
         if this_shell_invocation {
-            let child_env = self.child_shell_environment();
-            self.env_vars = child_env.clone();
+            let mut child_env = self.child_shell_environment();
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh
-            // shell always sets IFS to its default when it is not in the
-            // inherited environment, so ${IFS+...} expands in the child.
-            self.env_vars
-                .entry("IFS".to_string())
-                .or_insert_with(|| " \t\n".to_string());
+            // shell rebuilds its managed variables (BASH_CMDS/BASH_ALIASES
+            // assoc marks, FUNCNAME/DIRSTACK array marks, BASH_VERSINFO
+            // readonly, UID/EUID/PPID, SHELLOPTS/BASHOPTS replay, SHLVL+1,
+            // IFS default). Without this the in-process child fell back to
+            // indexed-array handling for ${!BASH_CMDS[@]} (assoc audit C1).
+            Self::initialize_fresh_shell_env_vars(&mut child_env);
+            // The in-process child shares the parent's OS process, so the
+            // child's PPID is the parent shell's pid (a real child would see
+            // getppid() == the parent shell's getpid()).
+            child_env.insert("PPID".to_string(), self.shell_pid.to_string());
+            self.env_vars = child_env;
             self.shell_state.variables = crate::shell::VariableStore::from_environment(&self.env_vars);
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh
             // shell invocation inherits only exported variables and exported
