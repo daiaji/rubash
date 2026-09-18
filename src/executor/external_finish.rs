@@ -243,6 +243,30 @@ impl Executor {
             self.subshell_depth.set(saved_depth + 1);
         }
 
+        // A ${THIS_SH} child is a process boundary, so the process
+        // environment must show the CHILD's env for the whole run:
+        // builtins write shell state through std::env
+        // (builtins/setattr/apply.rs:66,166) and lookups fall back to
+        // env::var (embedded_parameters.rs:421, parameter_errors.rs:900+),
+        // which otherwise lets non-exported parent values (e.g. a readonly
+        // var) leak into the "fresh" child. Any writes the child makes die
+        // with the scope, exactly like a real child's env block dying on
+        // exit.
+        let saved_process_env: Option<HashMap<String, String>> = if this_shell_invocation {
+            let saved: HashMap<String, String> = env::vars().collect();
+            for (name, _) in env::vars() {
+                env::remove_var(&name);
+            }
+            for (name, value) in &self.env_vars {
+                if crate::executor::local_helpers::is_valid_process_env(name, value) {
+                    env::set_var(name, value);
+                }
+            }
+            Some(saved)
+        } else {
+            None
+        };
+
         let result = self.execute_ast(&ast);
         let mut status = self.exit_code;
         // GNU shell.c exit_shell -> run_exit_trap: a ${THIS_SH} child is a
@@ -253,6 +277,15 @@ impl Executor {
         if this_shell_invocation {
             if let Ok(trap_status) = self.run_exit_trap_for_status(status) {
                 status = trap_status;
+            }
+        }
+
+        if let Some(saved) = saved_process_env {
+            for (name, _) in env::vars() {
+                env::remove_var(&name);
+            }
+            for (name, value) in saved {
+                env::set_var(name, value);
             }
         }
 
