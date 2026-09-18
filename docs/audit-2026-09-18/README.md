@@ -74,3 +74,39 @@ GNU carries a word list with `W_HASQUOTEDNULL` provenance (`subst.c:2957`); ruba
 3. **RC-2** word-list provenance for `[@]`/`$@`.
 4. **RC-4/RC-5** converge scanners/shortcuts to `skip_matched_pair` + `parse_and_execute` (#117 direction).
 5. Per-suite singles: `type -f`, coproc-in-function, `exec 0<`, `&>`, `OLDPWD` import, valsub/funsub model.
+
+---
+
+## Design plans (post-audit, 2026-09-18)
+
+Four read-only design agents produced implementation plans for the top root
+causes; full texts preserved in the Devin session transcript (session
+f0f292b805a340e8). Key design decisions:
+
+- **RC-1 (child isolation)**: split `execute_direct_shell_script` —
+  `${THIS_SH} file` gets a fresh `Executor::new()` built under a scrubbed
+  process-env scope (refactor `apply_child_environment` → shared
+  `child_process_environment()`), `./x.sh` ENOEXEC mode keeps shared-executor
+  subshell semantics. New `child_exit_status` converts ALL ExecuteError
+  variants to a status at the boundary (fixes abort-parent P0 alone in
+  Stage 1). Stage 3 moves the script driver (`run_script_with_history` et al)
+  from main.rs into the lib so in-process children get history recording.
+- **RC-3 (array_expand_once)**: no new state — GNU consults a global per
+  operation (retroactive). Converge ~35 subscript consumers onto
+  `subscript_expansion.rs` as the canonical resolver; indexed no-expand still
+  arithmetic-evals (`$(`→operand error, not execution), assoc takes literal
+  key. Also fixes the reverse gap: option-OFF must do the second expansion
+  RB currently never performs.
+- **RC-2 (word-list model)**: Stage-0 adds `Vec<Fragment>` (Literal|Splice)
+  parallel output in the embedded walker, composing prefix/suffix onto
+  first/last element per subst.c splice rule; Stage-2 promotes
+  `ExpandedFragment`/`ExpandedWord` to the canonical result with
+  `into_scalar()` adapters over ~300 call sites.
+- **RC-4/5 (scanner convergence)**: census found 7 `)`-scanners + 5
+  `]`-finders + 5 case-depth dialects. Canonical = `skip_cmd_subst`
+  (skip.rs:15) → new `src/lexer/comsub_scan.rs`; subscript canonical =
+  `assoc_subscript_end` generalized. 6-stage migration with per-stage suite
+  slices; `continuation.rs` delegation diff prepared for captain review.
+  Comsub shortcut census: canned strings + posixpipe `4` paths delete first;
+  `$(<file)` kept (only GNU-sanctioned shortcut); ~15 single-builtin handlers
+  collapse to whitelist or die.
