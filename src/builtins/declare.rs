@@ -143,14 +143,44 @@ pub(crate) fn sync_typed_attributes(
                 Some(crate::shell::ShellValue::IndexedArray(_))
             )
         {
-            let _ = store.replace_indexed_array(base, std::iter::empty::<String>());
+            // GNU arrayfunc.c convert_var_to_array: a scalar's value moves to
+            // element 0 when the variable gains att_array — with
+            // localvar_inherit that scalar is the inherited caller's value
+            // (`declare -a v` on v=7 keeps [0]="7"). Serialized storage text
+            // is parsed back into entries.
+            let env_value = variables.get(base).cloned().unwrap_or_default();
+            let elements: Vec<String> = if env_value.starts_with('\x1d')
+                || (env_value.starts_with('(') && env_value.ends_with(')'))
+            {
+                indexed_array_entries(&env_value).into_values().collect()
+            } else if env_value.is_empty() {
+                Vec::new()
+            } else {
+                vec![env_value]
+            };
+            let _ = store.replace_indexed_array(base, elements);
         } else if assocs.contains(base)
             && !matches!(
                 store.get(base).map(|v| &v.value),
                 Some(crate::shell::ShellValue::AssociativeArray(_))
             )
         {
-            let _ = store.replace_associative_array(base, std::iter::empty::<(String, String)>());
+            // GNU arrayfunc.c:111-140 convert_var_to_assoc: a scalar's value
+            // moves to element "0" when the variable gains att_assoc —
+            // `declare -A v` on an inherited scalar v=7 keeps [0]="7" so a
+            // later `v+=(1 one)` merges instead of replacing. Serialized
+            // assoc storage text is parsed back into entries.
+            let env_value = variables.get(base).cloned().unwrap_or_default();
+            let entries: Vec<(String, String)> = if env_value.starts_with('\x1d')
+                || (env_value.starts_with('(') && env_value.ends_with(')'))
+            {
+                parse_assoc_words(env_value.strip_prefix('\x1d').unwrap_or(&env_value))
+            } else if env_value.is_empty() {
+                Vec::new()
+            } else {
+                vec![("0".to_string(), env_value)]
+            };
+            let _ = store.replace_associative_array(base, entries);
         }
         if let Some(variable) = store.get_mut(base) {
             variable.exported = exported.contains(base);
@@ -703,13 +733,16 @@ where
             continue;
         }
         if array && assocs.contains(var_name) && !arrays.contains(var_name) {
+            // GNU declare.def -> convert_var_to_array refusal: the operand
+            // errors and the variable keeps its assoc value untouched —
+            // clearing it would print `declare -A m` where GNU still shows
+            // the elements (varenv14.sub declare -a assoc case).
             writeln!(
                 stderr,
                 "{}{command_name}: {}: cannot convert associative to indexed array",
                 diagnostic_prefix(variables),
                 var_name
             )?;
-            variables.insert(var_name.to_string(), String::new());
             attr_status = EXECUTION_FAILURE;
             continue;
         }

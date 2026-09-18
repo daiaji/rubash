@@ -247,6 +247,23 @@ where
         }
         if assoc {
             mark_assoc(variables, name);
+            // GNU arrayfunc.c:111-140 convert_var_to_assoc: applying
+            // att_assoc to a variable holding a scalar moves the value into
+            // element "0" (`declare -A v` on v=7 stores [0]="7"). Materialize
+            // the assoc storage here so element reads, `${v[@]}`, and
+            // compound appends all see the canonical form — including the
+            // scalar a local inherits under localvar_inherit.
+            if let Some(current) = variables.get(name) {
+                let is_storage = current.starts_with('\x1d')
+                    || (current.starts_with('(') && current.ends_with(')'));
+                if !current.is_empty() && !is_storage {
+                    let converted = super::storage::format_assoc_storage(vec![(
+                        "0".to_string(),
+                        current.clone(),
+                    )]);
+                    variables.insert(name.to_string(), converted);
+                }
+            }
         }
         if made_array_special && !array && !assoc {
             // GNU declare.def:959-962: making_array_special converts the
