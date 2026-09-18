@@ -124,15 +124,98 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
         self.refresh_background_jobs()?;
-        if let Some((pid, wait_var)) = self.wait_any_background_request(cmd) {
-            // wait -n consumes the selected completion; explicit waits retain
-            // it so a repeated wait for the same pid returns the same status.
-            if let Some(status) = self.wait_for_background_pid(pid, false)? {
-                if let Some(wait_var) = wait_var {
-                    self.apply_shell_assignment(&wait_var, pid.to_string());
+        // GNU wait.def:139-152: a `-p name` option is validated and the
+        // variable unbound before any waiting happens, in every wait form —
+        // an invalid identifier or a readonly name fails immediately, and a
+        // name that never gets bound stays unset.
+        if let Some(name) = wait_assign_var(&cmd.words[1..]) {
+            if !is_shell_name(&name) {
+                let mut stderr = Vec::new();
+                writeln!(
+                    stderr,
+                    "{}wait: `{name}': not a valid identifier",
+                    self.diagnostic_prefix()
+                )?;
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                return Ok(1);
+            }
+            if is_marked_var(&self.env_vars, READONLY_VARS, &name) {
+                let mut stderr = Vec::new();
+                writeln!(
+                    stderr,
+                    "{}wait: {name}: cannot unset: readonly variable",
+                    self.diagnostic_prefix()
+                )?;
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                return Ok(1);
+            }
+            self.env_vars.remove(&name);
+        }
+        if let Some(request) = wait_any_request(&cmd.words[1..]) {
+            // GNU builtins/wait.def:209-246 + jobs.c:3456 wait_for_any_job:
+            // `wait -n` returns the first unnotified dead job in slot order,
+            // restricted to the operand waitlist when operands are given
+            // (set_waitlist, wait.def:352-399 — invalid operands diagnose but
+            // valid ones still wait), and -p binds the reaped job's last
+            // pid. Numeric operands consult saved reaped statuses first
+            // (check_nonjobs/bgpids, wait.def:423+), which completed_statuses
+            // already models.
+            let mut stderr = Vec::new();
+            let mut candidates: Vec<u32> = Vec::new();
+            for operand in &request.operands {
+                if let Some(pid) = self.resolve_background_job(operand) {
+                    if !candidates.contains(&pid) {
+                        candidates.push(pid);
+                    }
+                } else {
+                    write_wait_operand_error(operand, &self.diagnostic_prefix(), &mut stderr)?;
                 }
-                self.write_buffered_builtin_output(cmd, &[], &[])?;
-                return Ok(status);
+            }
+            if !request.operands.is_empty() && candidates.is_empty() {
+                // set_waitlist counted no waitable jobs: every operand
+                // failed and wait -n returns 127.
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                return Ok(127);
+            }
+
+            loop {
+                self.refresh_background_jobs()?;
+                if let Some((pid, status)) = self.first_completed_wait_candidate(&candidates) {
+                    self.join_coproc_stderr_forwarder(pid)?;
+                    // wait -n consumes the job (delete_job); the status stays
+                    // in completed_statuses as the bgpids equivalent so a
+                    // later operand-addressed `wait -n $pid` still reports it.
+                    self.job_table.remove_job_by_pid_preserve_status(pid);
+                    self.forget_background_runtime(pid);
+                    if let Some(wait_var) = &request.assign_var {
+                        self.apply_shell_assignment(wait_var, pid.to_string());
+                    }
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    return Ok(status);
+                }
+                // Any candidate still running? GNU blocks in wait_for
+                // (ANY_PID) until a child exits; we poll the Child handles.
+                let alive = if candidates.is_empty() {
+                    self.job_table.jobs.values().any(|job| {
+                        job.background
+                            && job
+                                .pids
+                                .iter()
+                                .any(|pid| self.background_children.contains_key(pid))
+                    })
+                } else {
+                    candidates
+                        .iter()
+                        .any(|pid| self.background_children.contains_key(pid))
+                };
+                if !alive {
+                    // wait_for_any_job returns -1 with nothing left to wait
+                    // for; wait.def:243-245 maps that to 127 and leaves -p's
+                    // variable unset.
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    return Ok(127);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
 
@@ -159,7 +242,12 @@ impl Executor {
                     .iter()
                     .any(|operand| self.resolve_background_job(operand).is_some())
             {
-                let status = self.wait_for_background_operands(&operands, cmd)?;
+                // GNU wait.def:338-339: -p binds the pid of the LAST operand
+                // waited for (pstat.pid; NO_PID when the last operand
+                // failed, leaving the pre-unbound variable unset).
+                let wait_var = wait_assign_var(&cmd.words[1..]);
+                let status =
+                    self.wait_for_background_operands(&operands, cmd, wait_var.as_deref())?;
                 return Ok(status);
             }
         }
@@ -192,6 +280,7 @@ impl Executor {
         &mut self,
         operands: &[String],
         cmd: &CommandNode,
+        wait_var: Option<&str>,
     ) -> Result<i32, ExecuteError> {
         let resolved = operands
             .iter()
@@ -199,49 +288,58 @@ impl Executor {
             .collect::<Vec<_>>();
         let mut stderr = Vec::new();
         let mut status = 0;
+        let mut last_pid = None;
 
         for (operand, pid) in resolved {
             let Some(pid) = pid else {
                 status =
                     write_wait_operand_error(&operand, &self.diagnostic_prefix(), &mut stderr)?;
+                last_pid = None;
                 continue;
             };
             if let Some(wait_status) = self.wait_for_background_pid(pid, true)? {
                 status = wait_status;
+                last_pid = Some(pid);
             } else {
                 status =
                     write_wait_operand_error(&operand, &self.diagnostic_prefix(), &mut stderr)?;
+                last_pid = None;
             }
         }
 
+        if let (Some(wait_var), Some(pid)) = (wait_var, last_pid) {
+            self.apply_shell_assignment(wait_var, pid.to_string());
+        }
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
     }
 
-    fn wait_any_background_request(&self, cmd: &CommandNode) -> Option<(u32, Option<String>)> {
-        let request = wait_any_request(&cmd.words[1..])?;
-        let pid = if let Some(first) = request.operands.first() {
-            self.resolve_background_job(first)?
-        } else {
-            // A completed child may no longer have a Child handle, but its
-            // status remains in JobTable until an explicit wait consumes it.
-            self.job_table
-                .completed_statuses
-                .keys()
-                .next()
-                .copied()
-                .or_else(|| {
-                    self.job_table
-                        .jobs
-                        .values()
-                        .filter(|job| {
-                            job.background && job.state != crate::jobs::ProcessState::Completed
-                        })
-                        .filter_map(|job| job.pids.last().copied())
-                        .next()
-                })?
-        };
-        Some((pid, request.assign_var))
+    /// First completed job among the `wait -n` candidates, in job-table
+    /// order (GNU jobs.c:3456 wait_for_any_job scans slots, not the operand
+    /// list). An empty candidate list means "any background job".
+    fn first_completed_wait_candidate(&self, candidates: &[u32]) -> Option<(u32, i32)> {
+        for job in self.job_table.jobs.values() {
+            if !job.background {
+                continue;
+            }
+            let Some(pid) = job.pids.last().copied() else {
+                continue;
+            };
+            if !candidates.is_empty() && !candidates.contains(&pid) {
+                continue;
+            }
+            if let Some(status) = self.job_table.completed_statuses.get(&pid) {
+                return Some((pid, *status));
+            }
+        }
+        // Numeric operands may name a saved reaped pid whose job entry is
+        // already gone (bgpids; wait.def check_nonjobs).
+        for pid in candidates {
+            if let Some(status) = self.job_table.completed_statuses.get(pid) {
+                return Some((*pid, *status));
+            }
+        }
+        None
     }
 
     pub(in crate::executor) fn refresh_background_jobs(&mut self) -> Result<(), ExecuteError> {
@@ -1419,11 +1517,19 @@ fn wait_background_operands(words: &[String]) -> Option<Vec<String>> {
             break;
         }
 
-        let mut chars = word[1..].chars().peekable();
-        while let Some(option) = chars.next() {
+        // GNU internal_getopt "fnp:": -p consumes the rest of the word or
+        // the next word as its variable-name argument, so it must not leak
+        // into the operand list.
+        for (offset, option) in word[1..].char_indices() {
             match option {
                 'f' => {}
-                'n' | 'p' => return None,
+                'n' => return None,
+                'p' => {
+                    if offset + 2 >= word.len() {
+                        index += 1;
+                    }
+                    break;
+                }
                 _ => return None,
             }
         }
@@ -1431,6 +1537,32 @@ fn wait_background_operands(words: &[String]) -> Option<Vec<String>> {
     }
 
     Some(words[index..].to_vec())
+}
+
+/// The `-p` variable name from a wait command's option cluster, mirroring
+/// GNU internal_getopt "fnp:" argument consumption (wait.def:120-137).
+fn wait_assign_var(words: &[String]) -> Option<String> {
+    let mut index = 0;
+    while let Some(word) = words.get(index) {
+        if word == "--" || !word.starts_with('-') || word == "-" {
+            break;
+        }
+        for (offset, option) in word[1..].char_indices() {
+            match option {
+                'n' | 'f' => {}
+                'p' => {
+                    let value_start = 1 + offset + option.len_utf8();
+                    if value_start < word.len() {
+                        return Some(word[value_start..].to_string());
+                    }
+                    return words.get(index + 1).cloned();
+                }
+                _ => return None,
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 fn write_wait_operand_error<E>(

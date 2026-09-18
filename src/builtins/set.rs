@@ -128,21 +128,6 @@ where
                             // simply reports failure.
                             return Ok(EX_USAGE);
                         }
-                        if *name == "restricted"
-                            && prefix == '+'
-                            && shell_option_enabled(env_vars, "restricted")
-                        {
-                            // GNU set.def set_minus_o_option (set.def:476-501)
-                            // -> change_flag FLAG_ERROR (flags.c:227-235) ->
-                            // sh_invalidoptname: "invalid option name" with
-                            // EX_USAGE; the restriction stays on.
-                            writeln!(
-                                stderr,
-                                "{}set: restricted: invalid option name",
-                                builtin_error_prefix(env_vars)
-                            )?;
-                            return Ok(EX_USAGE);
-                        }
                         set_shell_option(env_vars, name, prefix == '-');
                         index += 1;
                     }

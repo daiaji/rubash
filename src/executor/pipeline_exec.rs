@@ -363,22 +363,42 @@ impl Executor {
                     .map(|word| self.expand_word(word))
                     .and_then(|word| self.function_name_for_command_word(&word))
                     .is_some();
+            // GNU execute_cmd.c:653-656 — CMD_INVERT_RETURN under
+            // exit_immediately_on_error sets CMD_IGNORE_RETURN on the whole
+            // command; execute_pipeline then propagates it to EVERY element
+            // (execute_cmd.c:2702-2708 for left elements, 2722-2723 for the
+            // rightmost), and a group command pushes it into its inner list
+            // (execute_cmd.c:1104-1108). So `!` must suppress errexit inside
+            // every stage, not only invert the pipeline's final status
+            // (set-e1.sub:40 `! { false; echo A $?; } | cat` prints `A 1`).
+            let pipeline_inverted = first.inverted
+                || time_prefix.as_ref().is_some_and(|prefix| prefix.inverted);
             let Some((mut next_input, next_stderr, next_status)) =
-                (if last_stage && self.lastpipe_enabled() {
+                (if pipeline_inverted {
+                    self.with_errexit_suppressed(|executor| {
+                        if last_stage && executor.lastpipe_enabled() {
+                            executor.execute_lastpipe_stage(stage, &input).map(Some)
+                        } else {
+                            executor.execute_pipeline_stage(stage, &input)
+                        }
+                    })?
+                } else if last_stage && self.lastpipe_enabled() {
                     Some(self.execute_lastpipe_stage(stage, &input)?)
                 } else if last_stage || preserve_compound_errexit {
-                    self.execute_pipeline_stage(
-                        stage,
-                        &input,
-                        preserve_compound_errexit && !last_stage,
-                    )?
+                    // Compound and function stages inherit the pipeline
+                    // command's ignore_return (the current suppress_errexit
+                    // depth) instead of being wrapped in extra suppression:
+                    // execute_cmd.c:2702-2708 propagates the flag into every
+                    // element, so `! { false; echo A $?; } | cat` reaches the
+                    // echo while top-level `{ false; echo x; } | cat` still
+                    // dies on `false` under -e.
+                    self.execute_pipeline_stage(stage, &input)?
                 } else {
-                    // Non-final pipeline stages never trigger errexit (bash
-                    // manual: "any command in a pipeline but the last");
-                    // `{ false; echo foo; } | cat` still prints foo
-                    // (set-e1.sub "after brace pipeline").
+                    // Non-final simple pipeline stages never trigger errexit
+                    // (bash manual: "any command in a pipeline but the
+                    // last").
                     self.with_errexit_suppressed(|executor| {
-                        executor.execute_pipeline_stage(stage, &input, false)
+                        executor.execute_pipeline_stage(stage, &input)
                     })?
                 })
             else {
@@ -658,7 +678,7 @@ impl Executor {
         let saved_value = self.env_vars.insert(name.to_string(), value.to_string());
         self.exit_code = status;
         let result = self
-            .execute_pipeline_stage(command, "", false)
+            .execute_pipeline_stage(command, "")
             .ok()
             .flatten();
         self.exit_code = saved_status;
@@ -1211,7 +1231,6 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
-        force_compound_errexit: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         // A pipeline element runs in its own subshell: an expansion error
         // raised while expanding the element's words on the shared executor
@@ -1250,11 +1269,7 @@ impl Executor {
             );
             match materialized {
                 Ok((materialized, process_substitutions)) => {
-                    let inner = self.execute_pipeline_stage_inner(
-                        &materialized,
-                        input,
-                        force_compound_errexit,
-                    );
+                    let inner = self.execute_pipeline_stage_inner(&materialized, input);
                     match self.finish_process_substitutions(process_substitutions) {
                         Err(error) => Err(error),
                         Ok(()) => inner,
@@ -1263,7 +1278,7 @@ impl Executor {
                 Err(error) => Err(error),
             }
         } else {
-            self.execute_pipeline_stage_inner(command, input, force_compound_errexit)
+            self.execute_pipeline_stage_inner(command, input)
         };
         let nounset_hit = self.restore_arithmetic_error_flags(&saved);
         match result {
@@ -1282,12 +1297,11 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
-        force_compound_errexit: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         if let Some(time_command) = &command.time_command {
             let started = time_command_started();
             let Some((output, stderr, status)) =
-                self.execute_pipeline_stage(&time_command.command, input, force_compound_errexit)?
+                self.execute_pipeline_stage(&time_command.command, input)?
             else {
                 return Ok(None);
             };
@@ -1302,7 +1316,7 @@ impl Executor {
 
         if command_is_compound_pipeline_stage(command) {
             return self
-                .execute_compound_pipeline_stage(command, input, force_compound_errexit)
+                .execute_compound_pipeline_stage(command, input)
                 .map(Some);
         }
 
@@ -1312,7 +1326,7 @@ impl Executor {
         let command = &command;
         let Some(name) = command.words.first().map(String::as_str) else {
             return self
-                .execute_compound_pipeline_stage(command, input, force_compound_errexit)
+                .execute_compound_pipeline_stage(command, input)
                 .map(Some);
         };
 
@@ -1684,8 +1698,7 @@ impl Executor {
                 }
             }
             _ => {
-                if let Some(output) =
-                    self.execute_function_pipeline_stage(command, input, force_compound_errexit)?
+                if let Some(output) = self.execute_function_pipeline_stage(command, input)?
                 {
                     Ok(Some(output))
                 } else {

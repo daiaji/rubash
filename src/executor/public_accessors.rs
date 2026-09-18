@@ -541,6 +541,36 @@ impl Executor {
             .insert(INHERIT_PROCESS_STDIN.to_string(), "1".to_string());
     }
 
+    /// Fetch the next command-source line when fd 0 has been retargeted.
+    ///
+    /// GNU input.c (bash_input) reads commands through fd 0, so a permanent
+    /// `exec 0<file` redirection (redir.c do_redirections under
+    /// REDIR_PERSIST via builtins/exec.def) moves the script reader onto the
+    /// new input — redir1.sub:4-6 relies on the next commands coming from
+    /// the redirected file. Returns `None` while fd 0 still designates the
+    /// process's real stdin (caller reads it byte-wise), `Some(n)` for a
+    /// buffered fd-0 line, and `Some(0)` at EOF or on a closed/unreadable
+    /// fd 0.
+    pub fn script_fd0_line(&mut self, output: &mut String) -> Option<usize> {
+        match self.fd_table.read_endpoint(0) {
+            Some(FdReadEndpoint::InheritedProcessStdin) => None,
+            Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
+                let line = self
+                    .fd_table
+                    .take_buffered_input_line(0)
+                    .unwrap_or_default();
+                if line.is_empty() {
+                    return Some(0);
+                }
+                output.push_str(&bytes_to_shell_text(&line));
+                Some(line.len())
+            }
+            // Closed or otherwise unreadable fd 0 means end of input for the
+            // command reader (`exec 0<&-` retires the stream).
+            _ => Some(0),
+        }
+    }
+
     pub(in crate::executor) fn set_current_line(&mut self, cmd: &CommandNode) {
         if let Some(line) = cmd.line {
             let line = line.to_string();

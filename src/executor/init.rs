@@ -132,7 +132,26 @@ impl Executor {
                 .map(|path| path.to_string_lossy().replace('\\', "/").to_string())
                 .unwrap_or_else(|_| "rubash".to_string()),
         );
-        env_vars.remove("OLDPWD");
+        // GNU variables.c:952-963 initialize_shell_variables: an imported
+        // OLDPWD is kept only when it names a directory
+        // (OLDPWD_CHECK_DIRECTORY, config-top.h:183); otherwise Bash binds a
+        // dummy invisible variable, which is why `cd -` then reports
+        // "OLDPWD not set". The directory check runs in the shell path
+        // namespace, so a WSL-style /mnt/d/... value counts when its
+        // Windows translation exists.
+        let keep_oldpwd = env_vars
+            .get("OLDPWD")
+            .is_some_and(|value| {
+                !value.is_empty()
+                    && crate::executor::path::shell_path_to_windows(value, &env_vars).is_dir()
+            });
+        if !keep_oldpwd {
+            env_vars.remove("OLDPWD");
+            // Word expansion falls back to the live process environment
+            // when a name is absent from env_vars, so clear it there too or
+            // `$OLDPWD` would still expand to the rejected value.
+            env::remove_var("OLDPWD");
+        }
         initialize_shell_level(&mut env_vars);
         mark_initial_exported_vars(&mut env_vars);
         mark_env_name(&mut env_vars, EXPORTED_VARS, "OLDPWD");

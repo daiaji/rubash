@@ -49,10 +49,8 @@ const SHELL_OPTIONS: &[ShellOption] = &[
         // History is an interactive-shell feature and is off for scripts.
         default_enabled: false,
     },
-    ShellOption {
-        name: "igncr",
-        default_enabled: false,
-    },
+    // GNU builtins/set.def:194-237 (o_options): `igncr` is a Cygwin-only
+    // option and does not exist upstream.
     ShellOption {
         name: "ignoreeof",
         default_enabled: false,
@@ -113,10 +111,10 @@ const SHELL_OPTIONS: &[ShellOption] = &[
         name: "privileged",
         default_enabled: false,
     },
-    ShellOption {
-        name: "restricted",
-        default_enabled: false,
-    },
+    // GNU builtins/set.def:194-237 (o_options): `restricted` is not a
+    // `set -o` option upstream — restriction is a separate shell flag set
+    // by `set -r`/`bash -r` (flags.c change_flag) and never appears in the
+    // o_options enumeration or SHELLOPTS.
     ShellOption {
         name: "verbose",
         default_enabled: false,

@@ -371,6 +371,38 @@ impl FdTable {
             .map(|(bytes, offset)| (bytes_to_shell_text(&bytes), offset))
     }
 
+    /// Pull one `\n`-terminated line from a buffered text read endpoint,
+    /// advancing the shared offset so the `read` builtin and the script
+    /// driver consume the fd sequentially like GNU's buffered fd-0 stream
+    /// (input.c bash_input). Returns `None` when the fd is not a buffered
+    /// text endpoint, `Some(vec![])` at end of the buffer.
+    pub(crate) fn take_buffered_input_line(&self, fd: u32) -> Option<Vec<u8>> {
+        let input = match self
+            .entries
+            .get(&fd)
+            .filter(|entry| !entry.closed)?
+            .read
+            .as_ref()?
+        {
+            FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input) => {
+                input.clone()
+            }
+            _ => return None,
+        };
+        let mut input = input.borrow_mut();
+        if input.offset >= input.data.len() {
+            return Some(Vec::new());
+        }
+        let rest = &input.data[input.offset..];
+        let line_len = rest
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(rest.len(), |position| position + 1);
+        let line = rest[..line_len].to_vec();
+        input.offset += line_len;
+        Some(line)
+    }
+
     pub(crate) fn output_endpoint(&self, fd: u32) -> Option<FdWriteEndpoint> {
         self.entries.get(&fd)?.write.clone()
     }

@@ -848,7 +848,15 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
 
     loop {
         input.clear();
-        match read_unbuffered_line(&mut input) {
+        // GNU input.c bash_input binds the command reader to fd 0, so a
+        // permanent `exec 0<file` (redir.c do_redirections) moves the script
+        // source to the new input; only fall back to the process's real
+        // stdin while fd 0 still designates it (redir1.sub:4-6).
+        let line_result = match executor.script_fd0_line(&mut input) {
+            Some(count) => Ok(count),
+            None => read_unbuffered_line(&mut input),
+        };
+        match line_result {
             Ok(0) => break,
             Ok(_) => {}
             Err(_) => break,

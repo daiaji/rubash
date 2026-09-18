@@ -368,60 +368,63 @@ impl Executor {
         body: &mut [CommandNode],
         call_cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
+        // GNU execute_cmd.c execute_function applies the call's redirections
+        // to the shell's descriptors around the body (redir.c
+        // do_redirections, undone on return), so `f &> out` routes BOTH
+        // streams (command.h:32-35 r_err_and_out/r_append_err_and_out,
+        // applied at redir.c:899-900/1030). Mirror
+        // apply_brace_group_redirects: propagate through the shared helpers
+        // so each body command's ordered redirect list — not only the
+        // convenience fields — carries the fd-2 leg. Setting
+        // `redirect_err_append` alone created the target file but left the
+        // ordered fd-state machine unaware of it, so `f 2>err` / `f &>f`
+        // leaked the body's stderr to the console.
         if let Some(redirect) = &call_cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
-            self.create_redirect_output(&target, redirect.clobber)?;
-            let append_redirect = Redirect {
-                operator: ">>".to_string(),
-                operator_metadata: Box::new(crate::parser::WordMetadata::new(
-                    0,
-                    ">>".to_string(),
-                    ">>".to_string(),
-                )),
-                kind: crate::parser::RedirectKind::Append,
-                append: true,
-                ..redirect.clone()
-            };
-            for command in body.iter_mut() {
-                if command.redirect_out.is_none() && command.append.is_none() {
-                    command.append = Some(append_redirect.clone());
-                }
+            if redirect_target_fd(&target).is_none() {
+                self.create_redirect_output(&target, redirect.clobber)?;
             }
-        } else if let Some(redirect) = &call_cmd.append {
-            for command in body.iter_mut() {
-                if command.redirect_out.is_none() && command.append.is_none() {
-                    command.append = Some(redirect.clone());
-                }
-            }
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = target;
+            append_redirect.append = true;
+            append_redirect.clobber = false;
+            apply_stdout_append_redirect(body, &append_redirect);
+        }
+        if let Some(redirect) = &call_cmd.append {
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = self.expand_word(&redirect.target);
+            apply_stdout_append_redirect(body, &append_redirect);
         }
 
         if let Some(redirect) = &call_cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
-            if !is_null_device(&target) {
+            if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
-            let append_redirect = Redirect {
-                operator: "2>>".to_string(),
-                operator_metadata: Box::new(crate::parser::WordMetadata::new(
-                    0,
-                    "2>>".to_string(),
-                    "2>>".to_string(),
-                )),
-                kind: crate::parser::RedirectKind::Append,
-                append: true,
-                ..redirect.clone()
-            };
-            for command in body.iter_mut() {
-                if command.redirect_err.is_none() && command.redirect_err_append.is_none() {
-                    command.redirect_err_append = Some(append_redirect.clone());
-                }
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = target;
+            append_redirect.append = true;
+            append_redirect.clobber = false;
+            apply_stderr_append_redirect(body, &append_redirect);
+        }
+        if let Some(redirect) = &call_cmd.redirect_err_append {
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = self.expand_word(&redirect.target);
+            // `&>`/`&>>` store their fd-2 leg as a Combined* kind. A body
+            // command's own `>other` redirect must still win fd 1, so the
+            // propagated leg claims fd 2 only (redir.c:899-900 splits
+            // r_err_and_out into fd-1 open plus fd-2 dup).
+            if matches!(
+                append_redirect.kind,
+                crate::parser::RedirectKind::CombinedOutput
+                    | crate::parser::RedirectKind::CombinedAppend
+            ) {
+                append_redirect.kind = crate::parser::RedirectKind::Append;
+                append_redirect.operator = "2>>".to_string();
+                append_redirect.fd = Some(2);
+                append_redirect.append = true;
             }
-        } else if let Some(redirect) = &call_cmd.redirect_err_append {
-            for command in body.iter_mut() {
-                if command.redirect_err.is_none() && command.redirect_err_append.is_none() {
-                    command.redirect_err_append = Some(redirect.clone());
-                }
-            }
+            apply_stderr_append_redirect(body, &append_redirect);
         }
 
         Ok(())

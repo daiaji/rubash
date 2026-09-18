@@ -53,7 +53,6 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
-        force_compound_errexit: bool,
     ) -> Result<(String, String, i32), ExecuteError> {
         let saved_dir = env::current_dir().ok();
         let mut subshell = self.command_substitution_executor();
@@ -61,11 +60,14 @@ impl Executor {
         // the inherited disposition (execute_cmd.c subshell trap reset), so
         // only traps set inside the member run at its exit.
         crate::builtins::trap::reset_for_subshell(&mut subshell.env_vars);
-        // Compound pipeline stages keep Bash's child-list errexit semantics;
-        // the caller handles the stage status at the pipeline boundary.
-        if force_compound_errexit {
-            subshell.suppress_errexit = 0;
-        }
+        // GNU execute_cmd.c execute_pipeline (2702-2708 left elements,
+        // 2722-2723 rightmost) propagates the pipeline command's
+        // CMD_IGNORE_RETURN into EVERY element, and a group command pushes
+        // it into its inner list (1104-1108). The stage subshell therefore
+        // inherits the parent's errexit suppression verbatim: at top level
+        // (ignore_return clear) `{ false; echo x; } | cat` dies on `false`,
+        // while under `!`/if/while/&&/||/comsub suppression the same group
+        // runs to completion (set-e1.sub:40 prints `A 1`).
         subshell
             .env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
@@ -129,7 +131,6 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
-        force_compound_errexit: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         let Some(name) = command.words.first() else {
             return Ok(Some((String::new(), String::new(), 0)));
@@ -160,12 +161,10 @@ impl Executor {
 
         let saved_dir = env::current_dir().ok();
         let mut subshell = self.command_substitution_executor();
-        // Function pipeline stages are compound command bodies for errexit.
-        if force_compound_errexit {
-            if force_compound_errexit {
-                subshell.suppress_errexit = 0;
-            }
-        }
+        // Function pipeline stages are compound command bodies for errexit
+        // (execute_cmd.c execute_function: the body inherits the element's
+        // CMD_IGNORE_RETURN), so the subshell keeps the parent's
+        // suppress_errexit like the compound-stage path above.
         subshell
             .env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
