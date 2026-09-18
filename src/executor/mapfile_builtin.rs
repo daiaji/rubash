@@ -462,6 +462,74 @@ impl Executor {
         }
 
         let name = array_name.unwrap_or_else(|| "MAPFILE".to_string());
+        // GNU mapfile.def -> builtin_find_indexed_array ->
+        // find_or_make_array_variable (arrayfunc.c:454-497): the array name
+        // is resolved through namerefs. An existing resolved variable is
+        // converted in place (`name: readonly variable` on refusal); an
+        // unset-target nameref creates the array on the CELL name after
+        // valid_nameref_value(cell, 2) — which rejects array references
+        // like `XXX[0]' as not-a-valid-identifier; an invisible
+        // (empty-cell) nameref drops the attribute with a "removing
+        // nameref attribute" warning and binds on the name itself.
+        let name = match self.nameref_resolution(&name) {
+            NamerefResolution::Target(target) => {
+                let base = target.split('[').next().unwrap_or(target.as_str());
+                let target_exists = if target.contains('[') {
+                    self.array_element_parameter_value(&target).is_some()
+                } else {
+                    self.env_vars.contains_key(base)
+                        || self.shell_state.variables.get(base).is_some()
+                };
+                if target_exists {
+                    if is_marked_var(&self.env_vars, READONLY_VARS, base) {
+                        let _ = writeln!(
+                            stderr,
+                            "{}{name}: readonly variable",
+                            self.diagnostic_prefix()
+                        );
+                        return self.finish_mapfile_error(cmd, &stderr, 1);
+                    }
+                    base.to_string()
+                } else if !is_shell_name(&target) {
+                    let _ = writeln!(
+                        stderr,
+                        "{}{command_name}: `{target}': not a valid identifier",
+                        self.diagnostic_prefix()
+                    );
+                    return self.finish_mapfile_error(cmd, &stderr, 1);
+                } else {
+                    target
+                }
+            }
+            NamerefResolution::Unresolved => {
+                let _ = writeln!(
+                    stderr,
+                    "{}warning: {name}: removing nameref attribute",
+                    self.diagnostic_prefix()
+                );
+                unmark_env_name(&mut self.env_vars, NAMEREF_VARS, &name);
+                if is_marked_var(&self.env_vars, READONLY_VARS, &name) {
+                    let _ = writeln!(
+                        stderr,
+                        "{}{name}: readonly variable",
+                        self.diagnostic_prefix()
+                    );
+                    return self.finish_mapfile_error(cmd, &stderr, 1);
+                }
+                name
+            }
+            _ => {
+                if is_marked_var(&self.env_vars, READONLY_VARS, &name) {
+                    let _ = writeln!(
+                        stderr,
+                        "{}{name}: readonly variable",
+                        self.diagnostic_prefix()
+                    );
+                    return self.finish_mapfile_error(cmd, &stderr, 1);
+                }
+                name
+            }
+        };
         if let Some(fd) = read_fd {
             if !self.mapfile_fd_is_available(cmd, fd) {
                 return self.mapfile_bad_file_descriptor(cmd, command_name, fd, &mut stderr);
@@ -502,12 +570,16 @@ impl Executor {
             self.env_vars
                 .insert(name.clone(), format_indexed_array_storage(entries));
             mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+            // Diagnostics already buffered (e.g. the nameref-attribute
+            // warning) must still reach stderr on success.
+            let _ = self.write_buffered_builtin_output(cmd, &[], &stderr);
             return 0;
         }
 
         self.env_vars
             .insert(name.clone(), format_indexed_array_storage(BTreeMap::new()));
         mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+        let _ = self.write_buffered_builtin_output(cmd, &[], &stderr);
         0
     }
 }
