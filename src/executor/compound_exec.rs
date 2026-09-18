@@ -951,11 +951,92 @@ impl Executor {
                     // Windows has no inherited POSIX fd for this pipe. Expose
                     // two shell-owned virtual descriptors instead; the PID
                     // remains job identity, not the observable fd value.
+                    //
+                    // GNU execute_cmd.c:2380-2445 coproc_bind: find_variable
+                    // resolves the name through namerefs first; a nameref
+                    // whose target is unset rewrites c_name to the cell
+                    // (array and <target>_PID bind on the TARGET while the
+                    // nameref stays), an invisible/empty-cell nameref drops
+                    // the attribute with a "removing nameref attribute"
+                    // warning (find_variable_nameref_for_create,
+                    // variables.c:2194-2197), and an existing readonly
+                    // variable fails with err_readonly, binding NOTHING —
+                    // <name>_PID is bound at :2441-2444 only after the
+                    // array bind succeeds.
                     let array_value = format!("({coproc_read_fd} {coproc_write_fd})");
-                    self.env_vars.insert(array_name.clone(), array_value);
-                    mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &array_name);
-                    self.env_vars
-                        .insert(format!("{}_PID", array_name), pid.to_string());
+                    let mut bind_name = array_name.clone();
+                    let mut pid_name = format!("{array_name}_PID");
+                    let mut can_bind = true;
+                    match self.nameref_resolution(&array_name) {
+                        NamerefResolution::Target(target) => {
+                            let target_base =
+                                target.split('[').next().unwrap_or(target.as_str());
+                            let target_exists = self.env_vars.contains_key(target_base)
+                                || self.shell_state.variables.get(target_base).is_some();
+                            if target_exists {
+                                // v != 0: ASSIGN_DISALLOWED on the resolved
+                                // var; elements bind to the target but
+                                // <name>_PID still uses the original name.
+                                if is_marked_var(&self.env_vars, READONLY_VARS, target_base)
+                                {
+                                    eprintln!(
+                                        "{}{}: readonly variable",
+                                        self.diagnostic_prefix(),
+                                        array_name
+                                    );
+                                    can_bind = false;
+                                } else {
+                                    bind_name = target_base.to_string();
+                                }
+                            } else {
+                                // v == 0: c_name rewritten to the cell, so
+                                // both the array and <target>_PID bind on
+                                // the target name; the nameref keeps its
+                                // cell untouched.
+                                bind_name = target_base.to_string();
+                                pid_name = format!("{target_base}_PID");
+                            }
+                        }
+                        NamerefResolution::Unresolved => {
+                            // Invisible/empty-cell nameref: GNU drops the
+                            // attribute with a warning, then treats it as a
+                            // plain variable (readonly check still applies).
+                            eprintln!(
+                                "{}warning: {}: removing nameref attribute",
+                                self.diagnostic_prefix(),
+                                array_name
+                            );
+                            unmark_env_name(&mut self.env_vars, NAMEREF_VARS, &array_name);
+                            if is_marked_var(&self.env_vars, READONLY_VARS, &array_name) {
+                                eprintln!(
+                                    "{}{}: readonly variable",
+                                    self.diagnostic_prefix(),
+                                    array_name
+                                );
+                                can_bind = false;
+                            }
+                        }
+                        NamerefResolution::NotNameref => {
+                            if is_marked_var(&self.env_vars, READONLY_VARS, &array_name) {
+                                eprintln!(
+                                    "{}{}: readonly variable",
+                                    self.diagnostic_prefix(),
+                                    array_name
+                                );
+                                can_bind = false;
+                            }
+                        }
+                        // Circular/depth-overflow chains resolve to nothing
+                        // (INVALID_NAMEREF_VALUE) — GNU binds nothing.
+                        NamerefResolution::Circular | NamerefResolution::MaxDepth => {
+                            can_bind = false;
+                        }
+                    }
+                    if can_bind {
+                        self.env_vars.insert(bind_name.clone(), array_value);
+                        mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &bind_name);
+                        self.env_vars.insert(pid_name, pid.to_string());
+                    }
                     self.exit_code = 0;
                 }
                 Err(e) => {

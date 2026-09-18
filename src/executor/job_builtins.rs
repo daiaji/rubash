@@ -434,9 +434,27 @@ impl Executor {
             })
             .collect::<Vec<_>>();
         for name in coproc_names {
-            self.env_vars.remove(&name);
+            // GNU execute_cmd.c coproc_unsetvars -> check_unbind_variable
+            // resolves namerefs: when `coproc ref` redirected the array to
+            // the nameref's target, the unbind removes the TARGET while the
+            // nameref cell itself survives.
+            let unbind_name = self
+                .resolved_variable_name(&name)
+                .unwrap_or_else(|| name.clone());
+            // GNU check_unbind_variable refuses readonly variables with
+            // `name: cannot unset: readonly variable` and leaves them bound.
+            if is_marked_var(&self.env_vars, READONLY_VARS, &unbind_name) {
+                eprintln!(
+                    "{}{}: cannot unset: readonly variable",
+                    self.diagnostic_prefix(),
+                    unbind_name
+                );
+                self.env_vars.remove(&format!("{name}_PID"));
+                continue;
+            }
+            self.env_vars.remove(&unbind_name);
             self.env_vars.remove(&format!("{name}_PID"));
-            unmark_env_name(&mut self.env_vars, ARRAY_VARS, &name);
+            unmark_env_name(&mut self.env_vars, ARRAY_VARS, &unbind_name);
         }
 
         let coproc_prefix = format!("{FD_COPROC_STDIN_TARGET_PREFIX}{pid}");
