@@ -1122,9 +1122,14 @@ impl Executor {
                     if var_name == "@" {
                         changed = true;
                         values.extend(
-                            positional_parameter_substring(&self.positional_params, offset, length)
-                                .iter()
-                                .map(|value| store!(value)),
+                            positional_parameter_substring_with_zero(
+                                &self.positional_params,
+                                &self.script_name_value(),
+                                offset,
+                                length,
+                            )
+                            .iter()
+                            .map(|value| store!(value)),
                         );
                         continue;
                     }

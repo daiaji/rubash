@@ -291,14 +291,13 @@ impl Executor {
             } else {
                 " ".to_string()
             };
-            if offset == 0 {
-                let mut params = Vec::with_capacity(self.positional_params.len() + 1);
-                params.push(self.script_name_value());
-                params.extend(self.positional_params.iter().cloned());
-                return positional_parameter_substring(&params, 1, length).join(&separator);
-            }
-            return positional_parameter_substring(&self.positional_params, offset, length)
-                .join(&separator);
+            return positional_parameter_substring_with_zero(
+                &self.positional_params,
+                &self.script_name_value(),
+                offset,
+                length,
+            )
+            .join(&separator);
         }
         if let Some(array_name) = var_name
             .strip_suffix("[@]")

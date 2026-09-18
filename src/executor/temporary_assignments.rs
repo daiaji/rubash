@@ -234,9 +234,26 @@ impl Executor {
                 } else {
                     value.clone()
                 };
-                self.assign_circular_fallback(base_name, circular_value);
-                self.exit_code = 0;
-                return true;
+                // GNU bind_variable: the global-namesake write only exists
+                // inside a function context (variables.c:2039). At global
+                // scope a circular assignment fails after the warning.
+                if self.nameref_circular_fallback_name(base_name).is_some() {
+                    self.assign_circular_fallback(base_name, circular_value);
+                    return true;
+                }
+                return false;
+            }
+            NamerefResolution::MaxDepth => {
+                // GNU variables.c:2220 find_variable_nameref_for_assignment:
+                // depth overflow returns INVALID_NAMEREF_VALUE after the
+                // internal_warning, so the assignment fails with status 1.
+                let line = format!(
+                    "{}warning: {}: maximum nameref depth (8) exceeded\n",
+                    self.diagnostic_prefix(),
+                    base_name
+                );
+                let _ = std::io::stderr().write_all(line.as_bytes());
+                return false;
             }
             NamerefResolution::NotNameref => base_name.to_string(),
         };

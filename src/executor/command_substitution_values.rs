@@ -405,15 +405,20 @@ impl Executor {
             }
             if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
                 if var_name == "@" {
-                    return Some(positional_parameter_substring(
+                    return Some(positional_parameter_substring_with_zero(
                         &self.positional_params,
+                        &self.script_name_value(),
                         offset,
                         length,
                     ));
                 }
                 if var_name == "*" {
-                    let values =
-                        positional_parameter_substring(&self.positional_params, offset, length);
+                    let values = positional_parameter_substring_with_zero(
+                        &self.positional_params,
+                        &self.script_name_value(),
+                        offset,
+                        length,
+                    );
                     if quoted_positional_word {
                         return Some(vec![values.join(&self.ifs_first_char_separator())]);
                     }

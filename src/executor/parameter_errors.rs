@@ -663,7 +663,37 @@ impl Executor {
                             }
                         }
                     }
-                } else if Self::is_indirect_array_operator_expression(indirect) {
+                }
+                // `${!name-op...}` indirect-with-operator form: GNU
+                // parameter_brace_expand_indir (subst.c:7911-7918) checks
+                // the indirect NAME before the operator tail is applied —
+                // a valid identifier that does not name a variable is an
+                // "invalid indirect expansion" error, aborting the command
+                // without evaluating the operator's rhs (nameref3.sub:29
+                // `recho "${!foo-unset}"` prints nothing).
+                else {
+                    let head_end = indirect
+                        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .unwrap_or(indirect.len());
+                    let (head, tail) = indirect.split_at(head_end);
+                    if head_end > 0
+                        && is_shell_name(head)
+                        && !tail.starts_with('[')
+                        && matches!(
+                            tail.chars().next(),
+                            Some(':' | '-' | '+' | '=' | '?' | '#' | '%' | '/' | '^' | ',' | '@')
+                        )
+                        && self.env_vars.get(head).is_none()
+                        && self.shell_state.variables.get(head).is_none()
+                    {
+                        return Some((
+                            head.to_string(),
+                            "invalid indirect expansion".to_string(),
+                            1,
+                        ));
+                    }
+                }
+                if Self::is_indirect_array_operator_expression(indirect) {
                     // GNU treats `${!name[@]<op>...}` as indirection through
                     // the VALUE of `name` re-expanded as a parameter
                     // (parameter_brace_expand_indir, subst.c:7941-7945), so a

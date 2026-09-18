@@ -288,6 +288,10 @@ thread_local! {
 enum NamerefResolution {
     Target(String),
     Circular,
+    /// GNU variables.c:2022 find_variable_nameref: the chain exceeded
+    /// NAMEREF_MAX (8) levels without resolving — reported as
+    /// "maximum nameref depth (8) exceeded", not "circular".
+    MaxDepth,
     NotNameref,
 }
 

@@ -34,40 +34,52 @@ impl Executor {
     pub(in crate::executor) fn nameref_target_name(&self, name: &str) -> Option<String> {
         match self.nameref_resolution(name) {
             NamerefResolution::Target(target) => Some(target),
-            NamerefResolution::Circular | NamerefResolution::NotNameref => None,
+            NamerefResolution::Circular
+            | NamerefResolution::MaxDepth
+            | NamerefResolution::NotNameref => None,
         }
     }
 
     pub(in crate::executor) fn resolved_variable_name(&self, name: &str) -> Option<String> {
         match self.nameref_resolution(name) {
             NamerefResolution::Target(target) => Some(target),
-            NamerefResolution::Circular => None,
+            NamerefResolution::Circular | NamerefResolution::MaxDepth => None,
             NamerefResolution::NotNameref => Some(name.to_string()),
         }
     }
 
     pub(in crate::executor) fn nameref_resolution(&self, name: &str) -> NamerefResolution {
-        let mut current = name;
-        let mut seen = HashSet::new();
-        for _ in 0..16 {
-            if !seen.insert(current.to_string()) {
-                return NamerefResolution::Circular;
+        // GNU variables.c:2011-2047 find_variable_nameref: level counts the
+        // hops; level > NAMEREF_MAX (8, variables.h:181) reports
+        // "maximum nameref depth exceeded" (MaxDepth here). A chain is only
+        // "circular name reference" when the resolved variable is the
+        // starting one (v == orig) or the one we just came from
+        // (v == oldv); cycles that do not pass through orig keep looping
+        // until the depth limit fires.
+        let mut current = name.to_string();
+        for level in 1..=9 {
+            if !is_marked_var(&self.env_vars, NAMEREF_VARS, &current) {
+                return if current == name {
+                    NamerefResolution::NotNameref
+                } else {
+                    NamerefResolution::Target(current)
+                };
             }
-            if !is_marked_var(&self.env_vars, NAMEREF_VARS, current) {
-                return NamerefResolution::NotNameref;
+            if level > 8 {
+                return NamerefResolution::MaxDepth;
             }
-            let Some(target) = self.env_vars.get(current) else {
+            let Some(target) = self.env_vars.get(&current) else {
                 return NamerefResolution::NotNameref;
             };
             if !is_shell_name(target) && parse_array_subscript(target).is_none() {
                 return NamerefResolution::NotNameref;
             }
-            if !is_marked_var(&self.env_vars, NAMEREF_VARS, target) {
-                return NamerefResolution::Target(target.clone());
+            if target == name || target == &current {
+                return NamerefResolution::Circular;
             }
-            current = target;
+            current = target.clone();
         }
-        NamerefResolution::Circular
+        NamerefResolution::MaxDepth
     }
 
     /// GNU variables.c:2011 find_variable_nameref: when a nameref chain
@@ -82,17 +94,19 @@ impl Executor {
             return None;
         }
         let mut current = name;
-        let mut seen = HashSet::new();
-        for _ in 0..16 {
-            if !seen.insert(current.to_string()) {
-                return Some(current.to_string());
-            }
+        // Same level/circular accounting as nameref_resolution above:
+        // NAMEREF_MAX=8 hops, circular only when the chain returns to the
+        // start name or the variable just traversed (variables.c:2033).
+        for _ in 0..8 {
             if !is_marked_var(&self.env_vars, NAMEREF_VARS, current) {
                 return None;
             }
             let target = self.env_vars.get(current)?;
             if !is_shell_name(target) && parse_array_subscript(target).is_none() {
                 return None;
+            }
+            if target == name || target == current {
+                return Some(target.clone());
             }
             current = target.as_str();
         }
@@ -158,6 +172,17 @@ impl Executor {
                 // GNU variables.c:2036-2046: circular refs inside a function
                 // resolve at the global scope without namerefs.
                 return self.circular_fallback_value(name);
+            }
+            NamerefResolution::MaxDepth => {
+                // GNU find_variable_nameref (variables.c:2022-2023): a chain
+                // past NAMEREF_MAX resolves to nothing — the variable
+                // expands unset after the depth warning.
+                eprintln!(
+                    "{}warning: {}: maximum nameref depth (8) exceeded",
+                    self.diagnostic_prefix(),
+                    name
+                );
+                return None;
             }
             NamerefResolution::NotNameref => name.to_string(),
         };

@@ -483,6 +483,23 @@ pub(in crate::executor) fn positional_parameter_substring(
     params.iter().skip(start).take(take).cloned().collect()
 }
 
+/// GNU subst.c:3759-3763 pos_params: `${@:0}`/`${*:0}` prepend $0
+/// (dollar_vars[0]) to the positional list before slicing.
+pub(in crate::executor) fn positional_parameter_substring_with_zero(
+    params: &[String],
+    zero: &str,
+    offset: isize,
+    length: Option<isize>,
+) -> Vec<String> {
+    if offset != 0 {
+        return positional_parameter_substring(params, offset, length);
+    }
+    let mut with_zero = Vec::with_capacity(params.len() + 1);
+    with_zero.push(zero.to_string());
+    with_zero.extend(params.iter().cloned());
+    positional_parameter_substring(&with_zero, 1, length)
+}
+
 pub(in crate::executor) fn parse_parameter_replacement(
     name: &str,
 ) -> Option<(&str, &str, &str, bool)> {

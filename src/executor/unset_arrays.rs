@@ -58,6 +58,10 @@ impl Executor {
 
         let function_only = args.iter().any(|arg| arg == "-f");
         let variable_only = args.iter().any(|arg| arg == "-v");
+        // GNU builtins/set.def:866-867: `unset -f` cancels -n, and -n is
+        // only meaningful for variables anyway.
+        let nameref_only =
+            args.iter().any(|arg| arg == "-n") && !function_only;
         let names: Vec<String> = args
             .iter()
             .filter(|arg| !arg.starts_with('-'))
@@ -95,7 +99,61 @@ impl Executor {
             .filter(|arg| arg.starts_with('-') && arg.as_str() != "-f")
             .cloned()
             .collect();
+        // GNU set.def:930-931/965-966: each failed name increments
+        // posix_utility_error, so the first failure is reported while the
+        // remaining names are still processed.
+        let mut nameref_status = 0;
         for name in names {
+            // GNU builtins/set.def:925-968 + 1024 with nameref=1: the
+            // non-unsettable and readonly checks run against
+            // find_variable_last_nameref (the chain's last nameref, or the
+            // variable itself), while the unbind is unbind_nameref
+            // (variables.c:3807-3815) — it removes NAME only when NAME is
+            // itself a nameref, so scalars and `a[sub]` names are a silent
+            // no-op. Element/nameref-target unbinding must not run here.
+            if nameref_only {
+                if let Some(checked) = self.last_nameref_for_unset(&name) {
+                    if matches!(checked.as_str(), "BASH_LINENO" | "BASH_SOURCE") {
+                        writeln!(
+                            stderr,
+                            "{}unset: {name}: cannot unset",
+                            self.diagnostic_prefix()
+                        )?;
+                        nameref_status = 1;
+                        continue;
+                    }
+                    if is_marked_var(&self.env_vars, READONLY_VARS, &checked) {
+                        writeln!(
+                            stderr,
+                            "{}unset: {checked}: cannot unset: readonly variable",
+                            self.diagnostic_prefix()
+                        )?;
+                        nameref_status = 1;
+                        continue;
+                    }
+                }
+                if is_marked_var(&self.env_vars, NAMEREF_VARS, &name)
+                    && !self.unset_outer_local_variable(&name)
+                {
+                    self.env_vars.remove(&name);
+                    std::env::remove_var(&name);
+                    self.shell_state.variables.remove(&name);
+                    for key in [
+                        EXPORTED_VARS,
+                        READONLY_VARS,
+                        ARRAY_VARS,
+                        ASSOC_VARS,
+                        INTEGER_VARS,
+                        UPPERCASE_VARS,
+                        LOWERCASE_VARS,
+                        NAMEREF_VARS,
+                        DECLARED_UNSET_VARS,
+                    ] {
+                        unmark_env_name(&mut self.env_vars, key, &name);
+                    }
+                }
+                continue;
+            }
             // GNU builtins/set.def:927-935 + 990-1010 (unset_builtin): a
             // subscripted name whose base is a nameref unbinds the referenced
             // array's element (unset n[0] with n->v removes v[0]); a plain
@@ -142,7 +200,9 @@ impl Executor {
         for name in variable_args.iter().filter(|a| !a.starts_with('-')) {
             self.shell_state.variables.remove(name);
         }
-        let raw_status = if function_status != 0 {
+        let raw_status = if nameref_status != 0 {
+            nameref_status
+        } else if function_status != 0 {
             function_status
         } else {
             variable_status
@@ -161,6 +221,44 @@ impl Executor {
         } else {
             Ok(raw_status)
         }
+    }
+
+    /// GNU variables.c:2051-2075 find_variable_last_nameref (as used by
+    /// `unset -n`, builtins/set.def:925): the variable the nounset/readonly
+    /// checks run against — the last nameref in the chain, or NAME itself
+    /// when it is not a nameref. Returns None when NAME does not exist or
+    /// the chain hits an empty nameref cell (variables.c:2065-2066 returns
+    /// NULL with vflags=0), which is why GNU silently unbinds a readonly
+    /// nameref whose cell is empty.
+    fn last_nameref_for_unset(&self, name: &str) -> Option<String> {
+        if !self.env_vars.contains_key(name) && self.shell_state.variables.get(name).is_none() {
+            return None;
+        }
+        if !is_marked_var(&self.env_vars, NAMEREF_VARS, name) {
+            return Some(name.to_string());
+        }
+        let mut last = name.to_string();
+        let mut seen = HashSet::from([last.clone()]);
+        // GNU variables.h:181 NAMEREF_MAX.
+        for _ in 0..8 {
+            // GNU variables.c:2064-2066: a missing or empty nameref cell
+            // ends the search with NULL (vflags=0), so the caller skips the
+            // nounset/readonly checks yet still unbinds NAME itself.
+            let Some(cell) = self.env_vars.get(&last) else {
+                return None;
+            };
+            if cell.is_empty() {
+                return None;
+            }
+            if !is_marked_var(&self.env_vars, NAMEREF_VARS, cell) {
+                break;
+            }
+            if !seen.insert(cell.clone()) {
+                return None;
+            }
+            last = cell.clone();
+        }
+        Some(last)
     }
 
     /// GNU builtins/set.def:990-1010 (unset_builtin): `unset -v` of a

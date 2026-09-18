@@ -133,6 +133,15 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             }
+            NamerefResolution::MaxDepth => {
+                eprintln!(
+                    "{}warning: {}: maximum nameref depth (8) exceeded",
+                    self.diagnostic_prefix(),
+                    name
+                );
+                self.exit_code = 1;
+                return true;
+            }
             NamerefResolution::NotNameref => name.to_string(),
         };
         let name = name.as_str();

@@ -45,14 +45,12 @@ impl Executor {
         offset: isize,
         length: Option<isize>,
     ) -> String {
-        let selected = if offset == 0 {
-            let mut params = Vec::with_capacity(self.positional_params.len() + 1);
-            params.push(self.script_name_value());
-            params.extend(self.positional_params.iter().cloned());
-            positional_parameter_substring(&params, 1, length)
-        } else {
-            positional_parameter_substring(&self.positional_params, offset, length)
-        };
+        let selected = positional_parameter_substring_with_zero(
+            &self.positional_params,
+            &self.script_name_value(),
+            offset,
+            length,
+        );
         if var_name == "*" {
             let ifs = self
                 .env_vars
