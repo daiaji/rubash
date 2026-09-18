@@ -2,7 +2,8 @@ use super::storage::quote_assoc_display_key;
 use super::*;
 use crate::executor::{
     assoc_hash_ordered_entries, assoc_hash_ordered_values, assoc_keys,
-    eval_conditional_arith_value_with_writes, DECLARED_UNSET_VARS, NAMEREF_VARS,
+    eval_conditional_arith_value_with_writes, IndexedSubscript, SubscriptSource,
+    DECLARED_UNSET_VARS, NAMEREF_VARS,
 };
 
 impl Executor {
@@ -154,22 +155,20 @@ impl Executor {
         if key.trim() == "*" || key.trim() == "@" {
             return None;
         }
-        let Some(index) = ({
-            let (result, writes) = eval_conditional_arith_value_with_writes(&key, &self.env_vars);
-            if !writes.is_empty() {
-                crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES.with(|w| {
-                    w.borrow_mut().extend(writes);
-                });
-            }
-            result
-        }) else {
-            self.arithmetic_nonfatal_error.set(true);
-            eprintln!(
-                "{}{}: bad array subscript",
-                self.diagnostic_prefix(),
-                array_name
-            );
-            return None;
+        // GNU subst.c array_variable_part -> array_expand_index -> evalexp:
+        // the expanded subscript text is evaluated under no-expand rules, so
+        // a surviving `$name`/`$(...)` fails "operand expected" (expr.c
+        // evalerror aborts the command list) rather than being stored or
+        // silently treated as index 0. The `key` above already received the
+        // single expand_subscript_string pass, so it is Protected data here.
+        let index = match self.eval_indexed_subscript_deferred(SubscriptSource::Protected(&key))
+        {
+            IndexedSubscript::Index(index) => index,
+            // `${a[]}`: GNU subst.c reports "bad substitution" for the
+            // expansion, which parameter_errors turns into the dropped word;
+            // keep the existing silent-failure shape here.
+            IndexedSubscript::Empty => return None,
+            IndexedSubscript::Error => return None,
         };
         // GNU arrayfunc.c:1582-1583 INDEX_ERROR(): a negative subscript that
         // still resolves negative (empty/unset array) prints err_badarraysub

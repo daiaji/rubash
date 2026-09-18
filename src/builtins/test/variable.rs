@@ -31,7 +31,12 @@ pub(crate) fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>)
         };
 
         if assocs.iter().any(|marked| marked == name) {
-            return assoc_key_is_set(value, subscript);
+            // The executor's -v pre-pass (rewrite_operand_array_subscript)
+            // hex-encodes the resolved key behind the \x1e carrier so `]`,
+            // `=` or quoting inside a key cannot corrupt the re-parse.
+            let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(subscript)
+                .unwrap_or_else(|| subscript.to_string());
+            return assoc_key_is_set(value, &key);
         }
 
         if arrays.iter().any(|marked| marked == name) || is_array_storage(value) {

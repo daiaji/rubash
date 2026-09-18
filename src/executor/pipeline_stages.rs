@@ -22,8 +22,14 @@ impl Executor {
         stage_command.redirect_out = None;
         stage_command.append = None;
 
-        let result = self.execute_command(&stage_command);
-        let output = self.stdout_capture.take().unwrap_or_default();
+        // Direct-stdout builtins in the stage consult the thread-local
+        // capture, which belongs to an enclosing capture when this pipeline
+        // runs inside one; give the stage its own capture.
+        let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
+            self.execute_command(&stage_command)
+        });
+        let mut output = self.stdout_capture.take().unwrap_or_default();
+        output.extend_from_slice(&thread_captured);
         let stderr = self.stderr_capture.take().unwrap_or_default();
         self.stdout_capture = saved_stdout_capture;
         self.stderr_capture = saved_stderr_capture;
@@ -174,8 +180,14 @@ impl Executor {
 
         subshell.stdout_capture = Some(Vec::new());
         subshell.stderr_capture = Some(Vec::new());
-        let result = subshell.execute_function(&function_name, &args, &call);
-        let output = subshell.stdout_capture.take().unwrap_or_default();
+        // Direct-stdout builtins in the function consult the thread-local
+        // capture, which belongs to an enclosing capture when this stage
+        // runs inside one; give the call its own capture.
+        let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
+            subshell.execute_function(&function_name, &args, &call)
+        });
+        let mut output = subshell.stdout_capture.take().unwrap_or_default();
+        output.extend_from_slice(&thread_captured);
         let stderr = subshell.stderr_capture.take().unwrap_or_default();
         let status = subshell.last_exit_code();
 

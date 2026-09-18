@@ -208,6 +208,14 @@ impl ConditionalArithParser<'_> {
                     self.env_vars,
                     self.random_state,
                 );
+                if value.is_none() {
+                    // GNU expr.c evalerror from the nested subscript evalexp
+                    // (array_expand_index) reports the subscript text.
+                    self.env_vars.insert(
+                        "__RUBASH_ARITH_SUBSCRIPT_EXPR".to_string(),
+                        stripped.clone(),
+                    );
+                }
                 Some(ArithLValue::Indexed {
                     name: name.clone(),
                     index: value?,

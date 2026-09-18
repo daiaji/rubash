@@ -44,6 +44,9 @@ impl Executor {
         expression: &str,
         trailing_space: bool,
     ) {
+        // GNU expr.c evalerror -> jump_to_top_level (DISCARD): the rest of
+        // the failing command's list is discarded.
+        self.raise_evalerror_abort();
         if let Some(token) = arithmetic_division_by_zero_token(expression) {
             eprintln!(
                 "{}{}: {expression}: division by 0 (error token is \"{token}\")",
@@ -123,7 +126,26 @@ impl Executor {
     /// contract: the parser records each section's whitespace-carrying text
     /// (`7++ ` keeps its trailing blank before `))`), and the error token is
     /// the raw suffix, so the caller must not synthesize an extra space.
+    /// GNU arrayfunc.c:1353-1391 array_expand_index runs the subscript
+    /// through a nested `evalexp`, so when the subscript itself is the
+    /// failure, evalerror names the SUBSCRIPT text — no `((`/`let`/`[[`
+    /// label prefix (`matrix: a[$x]` prints `$(...): arithmetic syntax
+    /// error`, not `((: a[$(...)]`). The evaluator records that text in
+    /// __RUBASH_ARITH_SUBSCRIPT_EXPR (lvalue.rs / value.rs).
+    fn report_subscript_eval_failure(&self) -> bool {
+        let Some(subscript) = self.env_vars.get("__RUBASH_ARITH_SUBSCRIPT_EXPR") else {
+            return false;
+        };
+        let subscript = subscript.clone();
+        self.report_indexed_subscript_error(&subscript);
+        true
+    }
+
     pub(in crate::executor) fn report_arithmetic_error_raw_display(&self, raw_display: &str) {
+        if self.report_subscript_eval_failure() {
+            return;
+        }
+        self.raise_evalerror_abort();
         let display = raw_display.trim_start_matches([' ', '\t']);
         if let Some(message) =
             crate::executor::arithmetic::arithmetic_command_error_message(display, false)
@@ -139,6 +161,7 @@ impl Executor {
         display: &str,
         token: &str,
     ) {
+        self.raise_evalerror_abort();
         eprintln!(
             "{}((: {display}: division by 0 (error token is \"{token}\")",
             self.diagnostic_prefix()
@@ -148,6 +171,11 @@ impl Executor {
     }
 
     pub(in crate::executor) fn report_let_arithmetic_error(&self, expression: &str) {
+        // GNU expr.c: a failed array SUBSCRIPT eval (nested evalexp inside
+        // array_expand_index) names the subscript, not the let operand.
+        if self.report_subscript_eval_failure() {
+            return;
+        }
         // GNU let.def: let_builtin passes EXP_EXPANDED to evalexp, so the
         // arithmetic evaluator does NOT expand $var. In GNU expr.c,
         // legal_variable_starter(c) is ISALPHA(c) || (c == '_'), so '$' is
@@ -167,6 +195,9 @@ impl Executor {
     }
 
     pub(in crate::executor) fn report_conditional_arithmetic_error(&self, expression: &str) {
+        if self.report_subscript_eval_failure() {
+            return;
+        }
         // [[ ]] conditional context: GNU expr.c omits the trailing space
         // in the error token (e.g. "+" not "+ ").
         self.report_arithmetic_error_with_label("[[", expression, false);
@@ -341,7 +372,21 @@ impl Executor {
                 index += 1;
             }
             let expression = arithmetic_expression_arg(&expression);
-            value = self.eval_arithmetic_command_value_no_expand(&expression);
+            // GNU let.def:102 evalexp(arg, EXP_EXPANDED): the operand was
+            // word-expanded once already. With array_expand_once that is the
+            // final text — expr.c:1171 AV_NOEXPAND feeds it to evalexp
+            // verbatim (a surviving `$(...)` is "operand expected"). Without
+            // the option, array_expand_index expand_arith_string re-expands
+            // the subscript, so a `$(...)` produced by the first expansion
+            // executes here.
+            value = if crate::builtins::shopt::option_enabled(
+                &self.env_vars,
+                "array_expand_once",
+            ) {
+                self.eval_arithmetic_command_value_no_expand(&expression)
+            } else {
+                self.eval_arithmetic_command_value(&expression)
+            };
             if value.is_none() {
                 self.report_let_arithmetic_error(&expression);
                 return 1;

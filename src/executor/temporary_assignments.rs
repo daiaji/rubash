@@ -154,10 +154,73 @@ impl Executor {
         value: &str,
         append: bool,
         integer: bool,
+        subscript_from_operand: bool,
     ) -> bool {
-        let current = self.env_vars.get(elem_base).cloned().unwrap_or_default();
+        // GNU arrayfunc.c:268-275 bind_array_variable ->
+        // variables.c:2182 find_variable_nameref_for_create: an element
+        // assignment whose OPERAND base is a nameref (`ref[0]=v`) creates
+        // the array at the cell's name -- the cell must be a bare
+        // identifier (valid_identifier, so `x[i]` cells are rejected too).
+        // An empty or invalid cell fails sh_invalidid and leaves the
+        // nameref untouched (nameref12.sub: `typeset -n ref; ref[0]=foo`
+        // reports `': not a valid identifier` and keeps `declare -n ref`).
+        if subscript_from_operand && is_marked_var(&self.env_vars, NAMEREF_VARS, elem_base) {
+            let cell = self.env_vars.get(elem_base).cloned().unwrap_or_default();
+            if !is_shell_name(&cell) {
+                let line = format!(
+                    "{}`{cell}': not a valid identifier
+",
+                    self.assignment_diagnostic_prefix()
+                );
+                self.emit_assignment_diag(line);
+                self.exit_code = 1;
+                return false;
+            }
+            return self.apply_nameref_array_element_assignment(
+                &cell,
+                subscript,
+                value,
+                append,
+                integer,
+                false,
+            );
+        }
+        // GNU arrayfunc.c:464-475 find_or_make_array_variable: when the
+        // variable being array-ified is itself a nameref, the attribute is
+        // removed with a warning and the cell text is dropped -- it never
+        // becomes element 0 (nameref15.sub: `typeset -n a=b b; b=a[1];
+        // a=foo` leaves `declare -a a=([1]="foo")`, not a nameref or an
+        // array holding "b").
+        let current = if is_marked_var(&self.env_vars, NAMEREF_VARS, elem_base) {
+            let line = format!(
+                "{}warning: {elem_base}: removing nameref attribute
+",
+                self.assignment_diagnostic_prefix()
+            );
+            self.emit_assignment_diag(line);
+            unmark_env_name(&mut self.env_vars, NAMEREF_VARS, elem_base);
+            String::new()
+        } else {
+            self.env_vars.get(elem_base).cloned().unwrap_or_default()
+        };
+        // GNU SET_VFLAGS provenance (builtins/common.h:277-289): a subscript
+        // arriving inside the builtin operand (`read a[$x]`) is ExpandedOnce
+        // data — verbatim with array_expand_once, one deferred
+        // expand_subscript_string pass without it. A subscript arriving via a
+        // nameref CELL (`declare -n r='a[$x]'; r=v`) is raw stored text that
+        // GNU expands at bind time (variables.c bind_variable ->
+        // assign_array_element -> expand_array_index), so it stays Raw.
+        let subscript_source = if subscript_from_operand {
+            SubscriptSource::ExpandedOnce(subscript)
+        } else {
+            SubscriptSource::Raw(subscript)
+        };
         if is_marked_var(&self.env_vars, ASSOC_VARS, elem_base) {
-            let key = self.assoc_subscript_key(subscript);
+            // Same \x1d bookkeeping trim assoc_subscript_key applies.
+            let key = self
+                .resolve_array_subscript(subscript_source)
+                .trim_matches('\x1d')
+                .to_string();
             let mut entries = assoc_entries(&current);
             let existing = entries
                 .iter()
@@ -208,13 +271,32 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        let Ok(index) = self
-            .eval_integer_assignment_value(subscript)
-            .to_string()
-            .parse::<usize>()
-        else {
-            self.exit_code = 1;
-            return false;
+        // arrayfunc.c array_expand_index -> evalexp under no_expand rules:
+        // a surviving $name/$(...) in an ExpandedOnce operand fails
+        // "operand expected" (diagnostic already printed) instead of
+        // executing a second time.
+        let index = match self.eval_indexed_subscript(subscript_source) {
+            IndexedSubscript::Index(index) => {
+                match resolve_indexed_array_subscript(&current, index) {
+                    Some(index) => index,
+                    // GNU assign_array_element_internal: an out-of-range
+                    // negative index is a bad subscript (arrayfunc.c).
+                    None => {
+                        self.report_bad_array_subscript(&format!("{elem_base}[{index}]"));
+                        self.exit_code = 1;
+                        return false;
+                    }
+                }
+            }
+            IndexedSubscript::Empty => {
+                self.report_bad_array_subscript(&format!("{elem_base}[]"));
+                self.exit_code = 1;
+                return false;
+            }
+            IndexedSubscript::Error => {
+                self.exit_code = 1;
+                return false;
+            }
         };
         let mut entries = indexed_array_entries(&current);
         let current_element = entries.get(&index).cloned().unwrap_or_default();
@@ -282,38 +364,48 @@ impl Executor {
         // separately on WORD_DESC/ASSIGNMENT_WORD. This narrow path handles
         // scalar `name+=value` until SHELL_VAR attributes and arrays own it.
         let (base_name, append) = assignment_name_and_append(name);
-        let target_name = match self.nameref_resolution(base_name) {
-            NamerefResolution::Target(target) => target,
+        // A subscript inside the operand itself (`read a[$x]`, `a[$x]=v`
+        // reaching this path) is ExpandedOnce argv data; a subscript that
+        // arrives via a nameref cell is raw stored text GNU expands at bind
+        // time.
+        let (target_name, subscript_from_operand) = match self.nameref_resolution(base_name) {
+            NamerefResolution::Target(target) => (target, false),
             NamerefResolution::Circular => {
-                // GNU writes each diagnostic with one write(2). eprintln!
-                // fragments the message into one syscall per format piece and
-                // those pieces race with stdout under the WSL interop relay,
-                // splitting the message across unrelated lines; emit one
-                // pre-formatted buffer instead.
+                // GNU bind_variable -> find_variable_nameref_context: the
+                // within-context chain walk loops until NAMEREF_MAX, so the
+                // WRITE diagnostic is "maximum nameref depth" — distinct
+                // from the read path's "circular name reference"
+                // (variables.c:3274, find_nameref_at_context maxloop). The
+                // write then lands on bind_global_variable: the global
+                // namesake of the loop-closing name, leaving the local
+                // nameref cell intact (nameref15.sub: `r2+=X` with local
+                // `r2 -> r2` writes global r2).
+                if self.nameref_circular_fallback_name(base_name).is_some() {
+                    let line = format!(
+                        "{}warning: {}: maximum nameref depth (8) exceeded\n",
+                        self.assignment_diagnostic_prefix(),
+                        base_name
+                    );
+                    self.emit_assignment_diag(line);
+                    let circular_value = if append {
+                        let current =
+                            self.circular_fallback_value(base_name).unwrap_or_default();
+                        format!("{current}{value}")
+                    } else {
+                        value.clone()
+                    };
+                    self.assign_circular_fallback(base_name, circular_value);
+                    return true;
+                }
+                // At global scope find_variable_nameref's circular branch
+                // has no context fallback (variables.c:2039), so the read
+                // warning fires and the assignment fails.
                 let line = format!(
                     "{}warning: {}: circular name reference\n",
                     self.assignment_diagnostic_prefix(),
                     base_name
                 );
                 self.emit_assignment_diag(line);
-                // GNU variables.c:2036-2046 find_variable_nameref + the
-                // bind_variable maxloop path: inside a function a circula
-                // nameref assignment writes the GLOBAL namesake of the name
-                // that closed the loop, while the local nameref keeps its
-                // cell (nameref8.sub f1, nameref15.sub xxx_func).
-                let circular_value = if append {
-                    let current = self.circular_fallback_value(base_name).unwrap_or_default();
-                    format!("{current}{value}")
-                } else {
-                    value.clone()
-                };
-                // GNU bind_variable: the global-namesake write only exists
-                // inside a function context (variables.c:2039). At global
-                // scope a circular assignment fails after the warning.
-                if self.nameref_circular_fallback_name(base_name).is_some() {
-                    self.assign_circular_fallback(base_name, circular_value);
-                    return true;
-                }
                 return false;
             }
             NamerefResolution::MaxDepth => {
@@ -329,11 +421,30 @@ impl Executor {
                 return false;
             }
             // Unresolved cell: resolve to the nameref itself; the
-            // empty-cell binding block below assigns the new target.
+            // empty-cell binding block below assigns the new target. Like
+            // NotNameref, any subscript here came from the operand.
             NamerefResolution::Unresolved | NamerefResolution::NotNameref => {
-                base_name.to_string()
+                (base_name.to_string(), true)
             }
         };
+        // GNU arrayfunc.c:454 find_or_make_array_variable ->
+        // variables.c:2182 find_variable_nameref_for_create requires a bare
+        // identifier (valid_identifier, not valid_nameref_value(...,1)):
+        // a compound `ref=(...)`/`ref+=(...)` whose nameref cell is an array
+        // reference like `XXX[0]` fails sh_invalidid, while scalar `ref=v`
+        // forwards to the element (assign_array_element, variables.c:3267).
+        if value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+            && parse_array_subscript(&target_name).is_some()
+        {
+            let line = format!(
+                "{}`{target_name}': not a valid identifier
+",
+                self.assignment_diagnostic_prefix()
+            );
+            self.emit_assignment_diag(line);
+            self.exit_code = 1;
+            return false;
+        }
         // GNU variables.c bind_variable_internal: when a nameref has an
         // empty cell (valueless, created by `declare -n name` without a
         // value), an assignment with a valid shell name or array subscript
@@ -398,7 +509,12 @@ impl Executor {
                     let integer = is_marked_var(&self.env_vars, INTEGER_VARS, base_name)
                         || is_marked_var(&self.env_vars, INTEGER_VARS, elem_base);
                     return self.apply_nameref_array_element_assignment(
-                        elem_base, subscript, &value, append, integer,
+                        elem_base,
+                        subscript,
+                        &value,
+                        append,
+                        integer,
+                        subscript_from_operand,
                     );
                 }
                 // Variable not yet declared as an array: create it as an
@@ -423,7 +539,12 @@ impl Executor {
                     let integer = is_marked_var(&self.env_vars, INTEGER_VARS, base_name)
                         || is_marked_var(&self.env_vars, INTEGER_VARS, elem_base);
                     return self.apply_nameref_array_element_assignment(
-                        elem_base, subscript, &value, append, integer,
+                        elem_base,
+                        subscript,
+                        &value,
+                        append,
+                        integer,
+                        subscript_from_operand,
                     );
                 }
             }
@@ -486,6 +607,29 @@ impl Executor {
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(&value)
             .to_string();
+        // GNU assign_array_var_from_string (arrayfunc.c:910-924): each
+        // `[sub]=` element inside the stored compound text resolves under
+        // the ExpandedOnce rules — the element words already went through
+        // expand_words_no_vars during word expansion, and ASS_NOEXPAND (set
+        // when array_expand_once) makes array_expand_index consume the
+        // result verbatim; assoc keys take their expand_subscript_string
+        // pass at arrayfunc.c:817 on the already-expanded word text.
+        let value = if compound_assignment && value.starts_with('(') && value.ends_with(')') {
+            match self.rewrite_compound_element_subscripts(
+                base_name,
+                &value,
+                is_marked_var(&self.env_vars, ASSOC_VARS, base_name),
+                true,
+            ) {
+                Some(rewritten) => rewritten,
+                None => {
+                    self.exit_code = 1;
+                    return false;
+                }
+            }
+        } else {
+            value
+        };
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
             if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {

@@ -103,6 +103,7 @@ impl Executor {
         // posix_utility_error, so the first failure is reported while the
         // remaining names are still processed.
         let mut nameref_status = 0;
+        let mut element_status = 0;
         for name in names {
             // GNU builtins/set.def:925-968 + 1024 with nameref=1: the
             // non-unsettable and readonly checks run against
@@ -159,10 +160,12 @@ impl Executor {
             // array's element (unset n[0] with n->v removes v[0]); a plain
             // nameref whose cell is an array reference unbinds that element
             // while keeping the nameref itself.
-            if self.unset_through_nameref(&name) {
+            if let Some(status) = self.unset_through_nameref(&name, stderr) {
+                element_status = element_status.max(i32::from(status));
                 continue;
             }
-            if self.unset_array_element(&name) {
+            if let Some(status) = self.unset_array_element(&name) {
+                element_status = element_status.max(i32::from(status));
                 continue;
             }
             if self.unset_outer_local_variable(&name) {
@@ -206,7 +209,8 @@ impl Executor {
             function_status
         } else {
             variable_status
-        };
+        }
+        .max(element_status);
         // GNU execute_cmd.c:4886-4888: builtin_status converts error statuses
         // (> EX_SHERRBASE = 256) to the final exit code, and sets
         // special_builtin_failed for special builtins. EX_USAGE (258) → 2,
@@ -265,27 +269,80 @@ impl Executor {
     /// nameref whose cell is an array reference unbinds the referenced
     /// element and keeps the nameref; a subscripted name whose base is a
     /// nameref resolves the subscript against the referenced array
-    /// (nameref3/nameref15.sub). Returns true when this call performed the
-    /// unbind and the ordinary variable path must be skipped.
-    pub(in crate::executor) fn unset_through_nameref(&mut self, name: &str) -> bool {
+    /// (nameref3/nameref15.sub). Returns Some(status) when this call handled
+    /// the operand and the ordinary variable path must be skipped.
+    pub(in crate::executor) fn unset_through_nameref<W: Write>(
+        &mut self,
+        name: &str,
+        stderr: &mut W,
+    ) -> Option<u8> {
         if is_marked_var(&self.env_vars, NAMEREF_VARS, name) {
-            let cell = self.env_vars.get(name).cloned().unwrap_or_default();
-            if parse_array_subscript(&cell).is_some() {
-                return self.unset_array_element(&cell);
+            // GNU builtins/set.def:925/990-1014: `unset` of a nameref walks to
+            // the LAST nameref in the chain (find_variable_last_nameref) and
+            // unbinds its cell -- a plain-name cell unbinds that variable, an
+            // `x[i]` cell unbinds the element. Intermediate namerefs are
+            // kept (nameref15.sub: `unset a` on a->b->a[1] keeps both).
+            let mut last = name.to_string();
+            let mut seen = HashSet::from([name.to_string()]);
+            for _ in 0..8 {
+                let Some(cell) = self.env_vars.get(&last).cloned() else {
+                    break;
+                };
+                if !is_marked_var(&self.env_vars, NAMEREF_VARS, &cell)
+                    || !seen.insert(cell.clone())
+                {
+                    break;
+                }
+                last = cell;
             }
-            return false;
+            let cell = self.env_vars.get(&last).cloned().unwrap_or_default();
+            if parse_array_subscript(&cell).is_some() {
+                return self.unset_array_element(&cell).or(Some(0));
+            }
+            // GNU set.def:936-937 + 962-966: the resolved referent is
+            // unbound by name; a readonly referent is an error on the
+            // referent's name, and a missing referent is a silent no-op.
+            if !cell.is_empty() && is_shell_name(&cell) {
+                if is_marked_var(&self.env_vars, READONLY_VARS, &cell) {
+                    let _ = writeln!(
+                        stderr,
+                        "{}unset: {cell}: cannot unset: readonly variable",
+                        self.diagnostic_prefix()
+                    );
+                    return Some(1);
+                }
+                self.env_vars.remove(&cell);
+                std::env::remove_var(&cell);
+                self.shell_state.variables.remove(&cell);
+                for key in [
+                    EXPORTED_VARS,
+                    READONLY_VARS,
+                    ARRAY_VARS,
+                    ASSOC_VARS,
+                    INTEGER_VARS,
+                    UPPERCASE_VARS,
+                    LOWERCASE_VARS,
+                    NAMEREF_VARS,
+                    DECLARED_UNSET_VARS,
+                ] {
+                    unmark_env_name(&mut self.env_vars, key, &cell);
+                }
+                return Some(0);
+            }
+            return None;
         }
         let Some((base, subscript)) = parse_array_subscript(name) else {
-            return false;
+            return None;
         };
         if !is_marked_var(&self.env_vars, NAMEREF_VARS, base) {
-            return false;
+            return None;
         }
         let Some(cell) = self.env_vars.get(base).filter(|cell| is_shell_name(cell)) else {
-            return false;
+            return None;
         };
         let cell = cell.clone();
         self.unset_array_element(&format!("{cell}[{subscript}]"))
+            .or(Some(0))
     }
 
     pub(in crate::executor) fn unset_outer_local_variable(&mut self, name: &str) -> bool {
@@ -310,33 +367,43 @@ impl Executor {
         true
     }
 
-    pub(in crate::executor) fn unset_array_element(&mut self, name: &str) -> bool {
+    /// `unset name[sub]` for a bracketed operand. Returns Some(status) when
+    /// the operand is a bracketed lvalue so it doesn't fall through to
+    /// scalar unbinding; the status propagates subscript-expansion errors
+    /// (GNU arrayfunc.c:1290-1317 unbind_array_element -> arrayfunc.c:420
+    /// expand_array_subscript sets return_code=1 on eval failure).
+    pub(in crate::executor) fn unset_array_element(&mut self, name: &str) -> Option<u8> {
         let Some((array_name, subscript)) = parse_array_subscript(name) else {
-            return false;
+            return None;
         };
         if array_name == "BASH_ALIASES" {
             let key = subscript.trim_matches('\'').trim_matches('"');
             self.aliases.remove(key);
             self.sync_dynamic_assoc_vars();
-            return true;
+            return Some(0);
         }
         if array_name == "BASH_CMDS" {
             let key = subscript.trim_matches('\'').trim_matches('"');
             crate::builtins::hash::remove_hashed_path(&mut self.env_vars, key);
             self.sync_dynamic_assoc_vars();
-            return true;
+            return Some(0);
         }
         let Some(current) = self.env_vars.get(array_name).cloned() else {
-            return false;
+            return None;
         };
 
         if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
-            let key = subscript.trim_matches('\'').trim_matches('"');
+            // GNU arrayfunc.c:1241-1251 unbind_array_element assoc branch:
+            // the operand's subscript already went through word expansion
+            // once; with array_expand_once (ASS_NOEXPAND) that text is the
+            // literal key, otherwise unbind performs the deferred
+            // expand_subscript_string pass here.
+            let key = self.resolve_array_subscript(SubscriptSource::ExpandedOnce(&subscript));
             let mut entries = assoc_entries(&current);
-            entries.retain(|(entry_key, _)| entry_key != key);
+            entries.retain(|(entry_key, _)| *entry_key != key);
             self.env_vars
                 .insert(array_name.to_string(), format_assoc_storage(entries));
-            return true;
+            return Some(0);
         }
 
         if is_marked_array_var(&self.env_vars, array_name) || is_array_storage(&current) {
@@ -351,11 +418,14 @@ impl Executor {
                     array_name.to_string(),
                     format_indexed_array_storage(Default::default()),
                 );
-                return true;
+                return Some(0);
             }
-            let subscript_expanded = self.expand_arithmetic_special_parameters(subscript);
-            let Some(index) = self.eval_arithmetic_expansion_value(&subscript_expanded) else {
-                return false;
+            let index = match self.eval_indexed_subscript(SubscriptSource::ExpandedOnce(&subscript))
+            {
+                IndexedSubscript::Index(index) => index,
+                // GNU: `unset 'a[]'` is a silent no-op.
+                IndexedSubscript::Empty => return Some(0),
+                IndexedSubscript::Error => return Some(1),
             };
             // GNU arrayfunc.c:1207-1211: negative subscripts to indexed arrays
             // count back from end; if still negative, report "bad array
@@ -370,7 +440,7 @@ impl Executor {
                     self.diagnostic_prefix()
                 );
                 let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), &stderr);
-                return true; // handled — don't fall through to variable unset
+                return Some(1);
             };
             let mut entries = indexed_array_entries(&current);
             entries.remove(&resolved);
@@ -378,7 +448,7 @@ impl Executor {
                 array_name.to_string(),
                 format_indexed_array_storage(entries),
             );
-            return true;
+            return Some(0);
         }
 
         // GNU arrayfunc.c:1218-1231 unbind_array_element scalar branch: for
@@ -386,35 +456,36 @@ impl Executor {
         // subscript 0 IS the variable itself, so the whole variable is
         // unbound (array.tests: unset 'v[0]' on a scalar removes v). Any
         // other subscript returns -2, which unset.def reports as "not an
-        // array variable" -- reached by returning false here, as does an
+        // array variable" -- reached by returning None here, as does an
         // @/* subscript (arrayfunc.c:1163-1164).
         if subscript == "*" || subscript == "@" {
-            return false;
+            return None;
         }
-        let subscript = self.expand_arithmetic_special_parameters(subscript);
-        if self.eval_arithmetic_expansion_value(&subscript) == Some(0) {
-            if is_marked_var(&self.env_vars, READONLY_VARS, array_name) {
-                return false;
-            }
-            self.env_vars.remove(array_name);
-            std::env::remove_var(array_name);
-            self.shell_state.variables.remove(array_name);
-            for key in [
-                EXPORTED_VARS,
-                READONLY_VARS,
-                ARRAY_VARS,
-                ASSOC_VARS,
-                INTEGER_VARS,
-                UPPERCASE_VARS,
-                LOWERCASE_VARS,
-                NAMEREF_VARS,
-                DECLARED_UNSET_VARS,
-            ] {
-                unmark_env_name(&mut self.env_vars, key, array_name);
-            }
-            return true;
+        match self.eval_indexed_subscript(SubscriptSource::ExpandedOnce(&subscript)) {
+            IndexedSubscript::Index(0) => {}
+            IndexedSubscript::Index(_) => return None,
+            IndexedSubscript::Empty => return Some(0),
+            IndexedSubscript::Error => return Some(1),
         }
-
-        false
+        if is_marked_var(&self.env_vars, READONLY_VARS, array_name) {
+            return None;
+        }
+        self.env_vars.remove(array_name);
+        std::env::remove_var(array_name);
+        self.shell_state.variables.remove(array_name);
+        for key in [
+            EXPORTED_VARS,
+            READONLY_VARS,
+            ARRAY_VARS,
+            ASSOC_VARS,
+            INTEGER_VARS,
+            UPPERCASE_VARS,
+            LOWERCASE_VARS,
+            NAMEREF_VARS,
+            DECLARED_UNSET_VARS,
+        ] {
+            unmark_env_name(&mut self.env_vars, key, array_name);
+        }
+        Some(0)
     }
 }

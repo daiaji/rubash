@@ -86,7 +86,12 @@ pub(in crate::executor) fn append_assoc_value(
 
     for token in tokens {
         if let Some((key, rhs, append)) = assoc_assignment_token(&token) {
-            let key = unquote_storage_value(key);
+            // A subscript resolved by rewrite_compound_element_subscripts
+            // arrives hex-encoded behind the \x1e carrier so `]`/`=` inside
+            // the key survives the token re-parse; decode it back to the
+            // literal key before storage.
+            let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(key)
+                .unwrap_or_else(|| unquote_storage_value(key));
             let rhs = unquote_storage_value(rhs);
             if append {
                 if let Some((_, entry_value)) = entries

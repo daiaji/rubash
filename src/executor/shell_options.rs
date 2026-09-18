@@ -647,6 +647,27 @@ pub(in crate::executor) fn restore_stdout_capture(previous: Option<Vec<u8>>) {
     });
 }
 
+/// Runs `body` under a fresh thread-local stdout capture and returns the
+/// captured bytes together with the body's result.
+///
+/// Command substitutions, process substitutions, and pipeline stages run
+/// bodies on executors whose `stdout_capture` field only intercepts the
+/// `write_default_stdout` path. Builtins that write the process stdout
+/// directly (`write_stdout_bytes` / `write_global_stdout`) consult the
+/// thread-local capture — which, when the substitution runs inside a
+/// pipeline stage, belongs to the enclosing stage, leaking substitution
+/// output into the stage's pipe (GNU subst.c command_substitute forks and
+/// captures the fd itself). Installing a fresh capture for the body keeps
+/// every write in the substitution's own output; the outer buffer is
+/// restored afterwards.
+pub(in crate::executor) fn capture_stdout<R>(body: impl FnOnce() -> R) -> (Vec<u8>, R) {
+    let saved = begin_stdout_capture();
+    let result = body();
+    let captured = take_stdout_capture();
+    restore_stdout_capture(saved);
+    (captured, result)
+}
+
 pub(crate) fn write_stderr_bytes(output: &[u8]) -> io::Result<()> {
     #[cfg(windows)]
     {

@@ -218,6 +218,171 @@ impl Executor {
         writeln!(stdout, "{name}")
     }
 
+    /// GNU declare.def:429,1004: a `declare name[sub]=value` operand carries
+    /// W_ASSIGNMENT, so with `array_expand_once` the already-expanded
+    /// subscript text is ASS_NOEXPAND verbatim data (a surviving
+    /// `$name`/`$(...)` is expr.c "operand expected", not a second
+    /// execution); without the option assign_array_element re-expands it via
+    /// expand_arith_string. Rewrite each `name[sub](+)=value` operand LHS to
+    /// its final `name[index]` / `name[\x1ekey]` form so the env-only
+    /// builtin consumes resolved data. Err(()) means the operand-expected
+    /// diagnostic + evalerror abort (array_expand_index ->
+    /// jump_to_top_level DISCARD) were already raised; the caller supplies
+    /// status 1.
+    /// GNU general.c:480 assignment() applied to the RAW word token:
+    /// whether the operand carried W_ASSIGNMENT. The name part must be
+    /// legal variable characters — any quote or escape char rejects it — or
+    /// a well-formed `name[subscript]` prefix before `=`/`+=`.
+    pub(in crate::executor) fn raw_word_is_assignment(raw: &str) -> bool {
+        let bytes = raw.as_bytes();
+        match bytes.first() {
+            Some(&c) if is_shell_name_start(c as char) => {}
+            _ => return false,
+        }
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'=' => return index > 0,
+                b'[' => {
+                    let Some((sub_end, _)) =
+                        crate::executor::subscript_expansion::scan_compound_subscript(raw, index)
+                    else {
+                        return false;
+                    };
+                    index = sub_end + 1;
+                    if bytes.get(index) == Some(&b'+')
+                        && bytes.get(index + 1) == Some(&b'=')
+                    {
+                        return true;
+                    }
+                    return bytes.get(index) == Some(&b'=');
+                }
+                b'+' if bytes.get(index + 1) == Some(&b'=') => return true,
+                c if is_shell_name_char(c as char) => index += 1,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    pub(in crate::executor) fn rewrite_declare_operand_subscripts(
+        &mut self,
+        args: &[String],
+        word_metadata: &[crate::parser::WordMetadata],
+    ) -> Result<Vec<String>, ()> {
+        // Whether the operand list carries `-A` (set form); an unmarked
+        // variable declared with -A takes the assoc element rules.
+        let mut parse_options = true;
+        let assoc_hint = args.iter().any(|arg| {
+            if parse_options && arg == "--" {
+                parse_options = false;
+                return false;
+            }
+            parse_options && arg.starts_with('-') && arg != "-" && arg[1..].contains('A')
+        });
+        args.iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                // GNU declare.def:429: assoc_noexpand requires W_ASSIGNMENT
+                // on the operand word, and parse.y:5787 only sets it on an
+                // UNQUOTED assignment-shaped token (general.c:480
+                // assignment() rejects quoted/escaped name parts). A quoted
+                // `declare "a[$x]=v"` operand therefore re-expands its
+                // subscript in both option modes.
+                let raw = word_metadata
+                    .iter()
+                    .find(|m| m.word_index == index + 1)
+                    .map(|m| m.raw.as_str());
+                let w_assignment = match raw {
+                    Some(raw) => Self::raw_word_is_assignment(raw),
+                    None => Self::raw_word_is_assignment(arg),
+                };
+                let Some((lhs, value)) = arg.split_once('=') else {
+                    // `declare name[sub]` without `=` is a size-hint
+                    // declaration; GNU discards the subscript text without
+                    // evaluating it (declare.def:605 making_array_special).
+                    return Ok(arg.clone());
+                };
+                let (lhs, append) = lhs
+                    .strip_suffix('+')
+                    .map(|lhs| (lhs, true))
+                    .unwrap_or((lhs, false));
+                let compound = value
+                    .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
+                    .unwrap_or(value);
+                let is_compound =
+                    compound.starts_with('(') && compound.ends_with(')');
+                if lhs.contains('[') {
+                    // GNU subst.c:3599-3605: `name[sub]=(list)` fails
+                    // "cannot assign list to array member" before the
+                    // subscript is ever evaluated — leave it alone.
+                    if is_compound {
+                        return Ok(arg.clone());
+                    }
+                    // GNU declare.def:639-642,953-962: `declare name[sub]=v`
+                    // (no -A flag) binds through the variable declare
+                    // actually creates — at function scope that is a fresh
+                    // LOCAL indexed array (making_array_special ->
+                    // make_local_array_variable), which shadows even a
+                    // global assoc of the same name, so the subscript is
+                    // evaluated arithmetically. Only `-A` or an existing
+                    // same-frame local assoc keeps the assoc path; at
+                    // global scope the existing variable's type rules.
+                    let base = lhs.split('[').next().unwrap_or(lhs);
+                    let operand_assoc = if assoc_hint {
+                        true
+                    } else if self.function_depth > 0 {
+                        is_marked_var(&self.env_vars, ASSOC_VARS, base)
+                            && self
+                                .local_var_scopes
+                                .last()
+                                .is_some_and(|scope| scope.contains_key(base))
+                    } else {
+                        is_marked_var(&self.env_vars, ASSOC_VARS, base)
+                    };
+                    let mode = if w_assignment {
+                        OperandSubscriptMode::ExpandedOnce
+                    } else {
+                        OperandSubscriptMode::AlwaysExpand
+                    };
+                    let rewritten = self.rewrite_operand_subscript_typed(
+                        lhs,
+                        mode,
+                        Some(operand_assoc),
+                    )?;
+                    return Ok(format!(
+                        "{rewritten}{}={value}",
+                        if append { "+" } else { "" }
+                    ));
+                }
+                if !is_compound {
+                    return Ok(arg.clone());
+                }
+                // `declare [-aA] name=(...)`: element subscripts inside the
+                // stored compound text resolve through
+                // expand_compound_array_assignment +
+                // assign_compound_array_list (arrayfunc.c:557-836) — the
+                // declare argument text was not pre-expanded by assignment
+                // word expansion on this path, so the resolver runs its
+                // non-preexpanded (declare) model.
+                let assoc = assoc_hint
+                    || is_marked_var(&self.env_vars, ASSOC_VARS, lhs);
+                let rewritten = self
+                    .rewrite_compound_element_subscripts(lhs, compound, assoc, false)
+                    .ok_or(())?;
+                let marker = if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+                    COMPOUND_ASSIGNMENT_MARKER
+                } else {
+                    ""
+                };
+                Ok(format!(
+                    "{lhs}{}={marker}{rewritten}",
+                    if append { "+" } else { "" }
+                ))
+            })
+            .collect()
+    }
+
     pub(in crate::executor) fn execute_declare(
         &mut self,
         cmd: &CommandNode,
@@ -230,6 +395,14 @@ impl Executor {
             self.sync_dirstack_cell();
         }
         let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
+        let mut args = match self
+            .rewrite_declare_operand_subscripts(&args, &cmd.word_metadata)
+        {
+            Ok(args) => args,
+            // array_expand_index -> evalexp failure: diagnostic + evalerror
+            // abort already raised; GNU discards the rest of the list.
+            Err(()) => return Ok(1),
+        };
         if declare_args_request_integer(&args) {
             args = self.evaluate_declare_integer_assignment_args(&args);
         }
@@ -392,6 +565,12 @@ impl Executor {
             2
         } else {
             let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
+            let mut args = match self
+                .rewrite_declare_operand_subscripts(&args, &cmd.word_metadata)
+            {
+                Ok(args) => args,
+                Err(()) => return Ok(1),
+            };
             if declare_args_request_integer(&args) {
                 args = self.evaluate_declare_integer_assignment_args(&args);
             }

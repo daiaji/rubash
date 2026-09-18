@@ -1,5 +1,7 @@
 use super::*;
 
+
+
 impl Executor {
     fn coprocs_referenced_by_command(&self, command: &CommandNode) -> Vec<u32> {
         let mut redirect_sources = command
@@ -38,6 +40,12 @@ impl Executor {
             return self.execute_ast_inner(ast);
         }
 
+        // A fresh reader-level run: an evalerror abort still pending from a
+        // finished run is stale and must not discard commands here.
+        self.evalerror_pending.set(false);
+        self.evalerror_line.set(None);
+        self.reader_command_line.set(None);
+
         let _guard = EXECUTION_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -53,6 +61,15 @@ impl Executor {
     }
 
     pub(in crate::executor) fn execute_ast_inner(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
+        self.evalerror_exec_depth
+            .set(self.evalerror_exec_depth.get() + 1);
+        let result = self.execute_ast_inner_body(ast);
+        self.evalerror_exec_depth
+            .set(self.evalerror_exec_depth.get().saturating_sub(1));
+        result
+    }
+
+    fn execute_ast_inner_body(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
         {
             let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_UPSTREAM);
             if self.try_upstream_scripts() {
@@ -78,6 +95,29 @@ impl Executor {
         let mut subshell_loop_depth: Option<usize> = None;
         while index < ast.commands.len() {
             let command = &ast.commands[index];
+            // GNU expr.c evalerror -> jump_to_top_level (DISCARD): while an
+            // evalerror abort is pending, a nested command list unwinds
+            // silently and the reader-level loop discards the rest of the
+            // failing command's list — the commands sharing its source
+            // line (`a[$x]=v; echo after` never prints `after`).
+            if self.evalerror_pending.get() {
+                if self.evalerror_exec_depth.get() > 1 {
+                    return Ok(());
+                }
+                if self.evalerror_line.get().is_none() {
+                    self.evalerror_line.set(self.reader_command_line.get());
+                }
+                let boundary = self.evalerror_line.get();
+                if boundary.is_some() && command.line == boundary {
+                    index += 1;
+                    continue;
+                }
+                self.evalerror_pending.set(false);
+                self.evalerror_line.set(None);
+            }
+            if self.evalerror_exec_depth.get() == 1 {
+                self.reader_command_line.set(command.line);
+            }
             {
                 let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_JOBS);
                 let protected_coprocs = self.coprocs_referenced_by_command(command);

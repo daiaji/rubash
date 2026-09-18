@@ -620,11 +620,12 @@ impl Executor {
             self.env_vars.get("__RUBASH_SCRIPT_NAME"),
             self.env_vars.get("__RUBASH_CURRENT_LINE"),
         ) {
-            // Errors inside eval carry the "eval:" segment and report the
-            // caller-relative line, like GNU evalstring diagnostics.
-            if self.env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
-                return format!("{script}: eval: line {line}: ");
-            }
+            // GNU error.c report_prolog prints only get_name_for_error() —
+            // the "eval:" input-name segment is exclusive to parser_error
+            // (error.c:300-316, yy_input_name), so runtime errors inside
+            // eval report `script: line N:` / `bash: line N:` like any
+            // other command (verified GNU 5.3: `eval 'nosuch'` under both
+            // a script and -c prints no eval segment).
             return format!("{script}: line {line}: ");
         }
 

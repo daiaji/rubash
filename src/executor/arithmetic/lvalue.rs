@@ -127,10 +127,44 @@ impl ConditionalArithParser<'_> {
                         Some(super::super::ArithmeticErrorCategory::EmptyArraySubscript);
                     return None;
                 }
-                eval_mutable_arith_value_with_random(&expression, self.env_vars, self.random_state)
-                    .0?
+                match eval_mutable_arith_value_with_random(
+                    &expression,
+                    self.env_vars,
+                    self.random_state,
+                )
+                .0
+                {
+                    Some(index) => index,
+                    None => {
+                        // GNU expr.c evalerror from the nested subscript
+                        // evalexp reports the SUBSCRIPT text, not the whole
+                        // expression (arrayfunc.c array_expand_index).
+                        self.env_vars.insert(
+                            "__RUBASH_ARITH_SUBSCRIPT_EXPR".to_string(),
+                            expression,
+                        );
+                        return None;
+                    }
+                }
             } else {
-                let index = self.parse_comma()?;
+                // Capture the subscript text before evaluating so a failure
+                // can be reported with the subscript as expr_name, matching
+                // GNU's nested evalexp inside array_expand_index.
+                let subscript_start = self.pos;
+                let index = match self.parse_comma() {
+                    Some(index) => index,
+                    None => {
+                        if let Some(text) =
+                            raw_subscript_text_at(self.input, subscript_start)
+                        {
+                            self.env_vars.insert(
+                                "__RUBASH_ARITH_SUBSCRIPT_EXPR".to_string(),
+                                text,
+                            );
+                        }
+                        return None;
+                    }
+                };
                 self.skip_ws();
                 if !self.consume("]") {
                     return None;
@@ -288,4 +322,34 @@ impl ConditionalArithParser<'_> {
         self.pos += op.len();
         Some(op)
     }
+}
+
+/// Return the raw subscript text between `[`-depth boundaries starting at
+/// `start` (which is just past the opening `[`). Used for GNU expr.c
+/// evalerror reporting: a failed nested subscript evalexp names the
+/// subscript text, not the enclosing expression.
+fn raw_subscript_text_at(input: &[u8], start: usize) -> Option<String> {
+    let mut pos = start;
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    while pos < input.len() {
+        match input[pos] {
+            b'\\' => pos += 1,
+            b'\'' if !double => single = !single,
+            b'"' if !single => double = !double,
+            b'[' if !single && !double => depth += 1,
+            b']' if !single && !double => {
+                depth -= 1;
+                if depth == 0 {
+                    return std::str::from_utf8(&input[start..pos])
+                        .ok()
+                        .map(str::to_string);
+                }
+            }
+            _ => {}
+        }
+        pos += 1;
+    }
+    None
 }

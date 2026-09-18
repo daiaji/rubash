@@ -362,6 +362,18 @@ impl Executor {
         let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_EXPAND);
         let preserve_word_metadata = cmd.conditional_command.is_some()
             || cmd.words.first().is_some_and(|word| word == "[[")
+            // Declaration builtins need the raw tokens downstream: GNU's
+            // W_ASSIGNMENT (general.c:480 assignment() on the raw word)
+            // decides both field-split suppression and declare.def:429's
+            // assoc_noexpand — neither can be recovered from the expanded
+            // text (a quoted `"a[$x]=v"` looks identical to an assignment
+            // word after expansion).
+            || cmd.words.first().is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "declare" | "typeset" | "local" | "export" | "readonly"
+                )
+            })
             || !cmd.process_substitutions.is_empty()
             || cmd.word_metadata.iter().any(|metadata| {
                 !metadata.process_substitutions.is_empty()
@@ -1441,9 +1453,18 @@ impl Executor {
         cmd: &CommandNode,
     ) -> bool {
         if self.execute_integer_assignment_suffix(cmd) || self.execute_assignment_words(cmd) {
+            // GNU execute_cmd.c execute_simple_command: a failed standalone
+            // assignment jumps to top level (DISCARD) — the rest of the
+            // command list is discarded (`a[]=v; echo after` prints nothing).
+            if self.exit_code != 0 {
+                self.raise_evalerror_abort();
+            }
             return true;
         }
         if self.execute_array_element_assignment(cmd) {
+            if self.exit_code != 0 {
+                self.raise_evalerror_abort();
+            }
             return true;
         }
         if cmd.words.first().is_some_and(|word| word.starts_with('#')) {

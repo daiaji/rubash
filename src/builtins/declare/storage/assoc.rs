@@ -37,7 +37,9 @@ pub(in crate::builtins::declare) fn parse_assoc_words(value: &str) -> Vec<(Strin
             // subscript close so a quoted `=` inside a stored key stays in
             // the key (assoc.tests assoc4: ["a]=test1;#a"]="123").
             if let Some((key, value, _)) = assoc_assignment_token(&part) {
-                return Some((unquote_storage_value(key), unquote_storage_value(value)));
+                let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(key)
+                    .unwrap_or_else(|| unquote_storage_value(key));
+                return Some((key, unquote_storage_value(value)));
             }
             let (key, value) = part.split_once('=')?;
             Some((
@@ -105,7 +107,10 @@ pub(in crate::builtins::declare) fn append_assoc_value(
 
     for token in tokens {
         if let Some((key, rhs, append)) = assoc_assignment_token(&token) {
-            let key = unquote_storage_value(key);
+            // \x1e-hex encoded keys from rewrite_compound_element_subscripts
+            // decode back to their literal text before storage.
+            let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(key)
+                .unwrap_or_else(|| unquote_storage_value(key));
             let rhs = unquote_storage_value(rhs);
             if append {
                 if let Some((_, entry_value)) = entries

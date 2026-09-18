@@ -634,23 +634,33 @@ impl Executor {
             subshell.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
         let inherit_errexit =
             crate::builtins::shopt::option_enabled(&subshell.env_vars, "inherit_errexit");
-        let result = if posix_mode || inherit_errexit {
-            subshell.execute_ast(&ast)
-        } else {
-            subshell.suppress_errexit = 0;
-            subshell.env_vars.remove("__RUBASH_ERREXIT");
-            crate::builtins::set::set_shell_option(&mut subshell.env_vars, "errexit", false);
-            subshell.execute_ast(&ast)
-        };
-        let mut status = command_substitution_result_status(result, subshell.exit_code);
-        // Bash runs EXIT in the command-substitution child, so an EXIT trap
-        // installed by the body contributes its output to captured stdout.
-        if has_trap_command {
-            if let Ok(exit_status) = subshell.run_exit_trap_for_status(status) {
-                status = exit_status;
+        // Builtins inside the body that write the process stdout directly
+        // consult the thread-local capture — which belongs to an enclosing
+        // pipeline stage when this substitution runs inside one, leaking
+        // the substitution's output into the stage's pipe. Give the body
+        // its own thread-local capture and merge both buffers.
+        let (captured, status) = crate::executor::shell_options::capture_stdout(|| {
+            let result = if posix_mode || inherit_errexit {
+                subshell.execute_ast(&ast)
+            } else {
+                subshell.suppress_errexit = 0;
+                subshell.env_vars.remove("__RUBASH_ERREXIT");
+                crate::builtins::set::set_shell_option(&mut subshell.env_vars, "errexit", false);
+                subshell.execute_ast(&ast)
+            };
+            let mut status = command_substitution_result_status(result, subshell.exit_code);
+            // Bash runs EXIT in the command-substitution child, so an
+            // EXIT trap installed by the body contributes its output to
+            // captured stdout.
+            if has_trap_command {
+                if let Ok(exit_status) = subshell.run_exit_trap_for_status(status) {
+                    status = exit_status;
+                }
             }
-        }
-        let output = subshell.stdout_capture.take().unwrap_or_default();
+            status
+        });
+        let mut output = subshell.stdout_capture.take().unwrap_or_default();
+        output.extend_from_slice(&captured);
 
         if let Some(saved_dir) = saved_dir {
             let _ = env::set_current_dir(saved_dir);
@@ -717,11 +727,15 @@ impl Executor {
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),
             assignment_command_name: None,
-
             buffer_assignment_diagnostics: false,
-            pending_assignment_diagnostics: Vec::new(),            parameter_assignment_failure: Cell::new(false),
+            pending_assignment_diagnostics: Vec::new(),
+            parameter_assignment_failure: Cell::new(false),
             tempenv_names: Vec::new(),
             tempenv_marks: Vec::new(),
+            evalerror_pending: Cell::new(false),
+            evalerror_line: Cell::new(None),
+            evalerror_exec_depth: Cell::new(0),
+            reader_command_line: Cell::new(None),
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             background_children: HashMap::new(),

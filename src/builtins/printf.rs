@@ -305,10 +305,15 @@ fn assign_printf_output(
     }
     if let Some((base, subscript)) = parse_printf_array_target(name) {
         if is_marked(env_vars, "__RUBASH_ASSOC_VARS", base) {
+            // The executor pre-resolved the operand under ExpandedOnce rules
+            // and marker-encoded the resulting key; plain argv text stays
+            // literal.
+            let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(subscript)
+                .unwrap_or_else(|| subscript.to_string());
             if let Some(store) = variables.as_deref_mut() {
-                let _ = store.set_associative_element(base, subscript, output.clone());
+                let _ = store.set_associative_element(base, &key, output.clone());
             }
-            assign_printf_assoc_element(env_vars, base, subscript, output);
+            assign_printf_assoc_element(env_vars, base, &key, output);
         } else if let Some(index) = resolve_printf_indexed_subscript(env_vars, base, subscript) {
             if let Some(store) = variables.as_deref_mut() {
                 let _ = store.set_indexed_element(base, index as i64, output.clone());

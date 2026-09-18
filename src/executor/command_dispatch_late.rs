@@ -1,6 +1,35 @@
 use super::*;
 
 impl Executor {
+    /// GNU builtins/test.c `test -v name[sub]` (and `[ -v ... ]`): the `-v`
+    /// operand is argv data that already went through word expansion, so its
+    /// subscript resolves under the ExpandedOnce rules — verbatim with
+    /// array_expand_once (VA_NOEXPAND/ASS_NOEXPAND via SET_VFLAGS,
+    /// builtins/common.h:277-289), a deferred expand_subscript_string pass
+    /// without it. A failing indexed subscript is an expr.c evalerror that
+    /// discards the rest of the command list (`test -v 'a[$x]'; echo x`
+    /// never prints `x`); the diagnostic + abort flag are raised inside
+    /// rewrite_operand_array_subscript and the builtin returns status 1.
+    pub(in crate::executor) fn execute_test_words(
+        &mut self,
+        args: &[String],
+        bracket: bool,
+    ) -> Result<i32, ExecuteError> {
+        let mut args = args.to_vec();
+        let mut index = 0;
+        while index + 1 < args.len() {
+            if args[index] == "-v" {
+                match self.rewrite_operand_array_subscript(&args[index + 1]) {
+                    Ok(rewritten) => args[index + 1] = rewritten,
+                    Err(()) => return Ok(1),
+                }
+                index += 1;
+            }
+            index += 1;
+        }
+        Ok(crate::builtins::test::execute(&args, bracket, &self.env_vars)?)
+    }
+
     pub(in crate::executor) fn execute_late_builtin_command(
         &mut self,
         cmd: &CommandNode,
@@ -136,8 +165,7 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.env_vars, "test") {
                     self.execute_external(cmd)
                 } else {
-                    self.exit_code =
-                        crate::builtins::test::execute(&cmd.words[1..], false, &self.env_vars)?;
+                    self.exit_code = self.execute_test_words(&cmd.words[1..], false)?;
                     Ok(())
                 }
             }
@@ -145,8 +173,7 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.env_vars, "[") {
                     self.execute_external(cmd)
                 } else {
-                    self.exit_code =
-                        crate::builtins::test::execute(&cmd.words[1..], true, &self.env_vars)?;
+                    self.exit_code = self.execute_test_words(&cmd.words[1..], true)?;
                     Ok(())
                 }
             }

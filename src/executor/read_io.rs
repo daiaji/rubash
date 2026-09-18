@@ -287,8 +287,14 @@ impl Executor {
         let mut subshell = self.command_substitution_executor();
         crate::builtins::trap::reset_for_subshell(&mut subshell.env_vars);
         subshell.stdout_capture = Some(Vec::new());
-        let result = subshell.execute_ast(&ast);
-        let output = subshell.stdout_capture.take().unwrap_or_default();
+        // Direct-stdout builtins inside the substitution consult the
+        // thread-local capture, which belongs to an enclosing pipeline
+        // stage when this substitution runs inside one; give the body its
+        // own capture.
+        let (thread_captured, result) =
+            crate::executor::shell_options::capture_stdout(|| subshell.execute_ast(&ast));
+        let mut output = subshell.stdout_capture.take().unwrap_or_default();
+        output.extend_from_slice(&thread_captured);
         // GNU process_substitute leaves the fork's status for `wait $!`
         // (subst.c:6362+); rubash ran the substitution inline, so register
         // the finished subshell status under $! before returning.
