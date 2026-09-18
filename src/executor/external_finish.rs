@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::ast_exec::is_closed_output_io_error;
 
 impl Executor {
     pub(in crate::executor) fn write_cat_output(
@@ -197,6 +198,18 @@ impl Executor {
         // incremented, or run_sigchld_trap_for_reaped_child suppresses
         // SIGCHLD traps (trap8.sub: four CHLD firings for reaped children).
         let saved_depth = self.subshell_depth.get();
+        // The child is a fresh shell process (shell.c open_shell_script):
+        // it must not inherit the parent's loop/function/compound-condition
+        // depths, or a word-expansion failure inside the child unwinds past
+        // its own top level (ast_exec ExpansionFailure requires
+        // loop_depth==0 to be command-list-local) and kills the child's
+        // remaining commands instead of just skipping the line.
+        let saved_loop_depth = self.loop_depth;
+        let saved_function_depth = self.function_depth;
+        let saved_inside_compound_condition = self.inside_compound_condition.get();
+        self.loop_depth = 0;
+        self.function_depth = 0;
+        self.inside_compound_condition.set(false);
 
         if let Some(input) = self.function_call_stdin(cmd)? {
             self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
@@ -226,7 +239,17 @@ impl Executor {
         }
 
         let result = self.execute_ast(&ast);
-        let status = self.exit_code;
+        let mut status = self.exit_code;
+        // GNU shell.c exit_shell -> run_exit_trap: a ${THIS_SH} child is a
+        // fresh process, so an EXIT trap the child script installed fires
+        // before the status returns to the parent. The `./x.sh` ENOEXEC
+        // mode is a forked subshell (execute_cmd.c:6139-6233) whose trap
+        // table is reset on entry, so it runs no EXIT trap here.
+        if this_shell_invocation {
+            if let Ok(trap_status) = self.run_exit_trap_for_status(status) {
+                status = trap_status;
+            }
+        }
 
         self.restore_shell_env(saved_env);
         if let Some(saved_shell_state) = saved_shell_state {
@@ -243,17 +266,68 @@ impl Executor {
         self.bash_argc_stack = saved_bash_argc_stack;
         self.bash_argv_stack = saved_bash_argv_stack;
         self.subshell_depth.set(saved_depth);
+        self.loop_depth = saved_loop_depth;
+        self.function_depth = saved_function_depth;
+        self.inside_compound_condition.set(saved_inside_compound_condition);
         if let Some(cwd) = saved_cwd {
             let _ = env::set_current_dir(cwd);
         }
         self.exit_code = status;
 
+        // A child script is a process boundary: every fatal error becomes
+        // the child's exit status and can never propagate into the parent's
+        // command list (GNU shell.c/error.c: jump_to_top_level and
+        // exit_shell stay inside the child process). Previously only
+        // ExitCode was converted, so a child's ExpansionFailure escaping
+        // here would abort an enclosing `for`/`while` in the parent.
         match result {
-            Err(ExecuteError::ExitCode(code)) => {
-                self.exit_code = code;
+            Err(error) => {
+                self.exit_code = self.child_process_exit_status(error)?;
                 Ok(())
             }
-            other => other,
+            Ok(()) => Ok(()),
+        }
+    }
+
+    /// Converts a fatal `ExecuteError` escaping an in-process child script
+    /// into the child's exit status, mirroring how GNU's `exit_shell` /
+    /// `jump_to_top_level` terminate only the child process.
+    fn child_process_exit_status(&self, error: ExecuteError) -> Result<i32, ExecuteError> {
+        match error {
+            // `exit N`, errexit, and the lastpipe variant all terminate the
+            // child with a chosen status.
+            ExecuteError::ExitCode(code)
+            | ExecuteError::LastpipeExit(code)
+            // Expansion failures and fatal function errors carry the status
+            // the child died with (error.c jump_to_top_level -> exit_shell).
+            | ExecuteError::ExpansionFailure(code)
+            | ExecuteError::FatalFunctionError(code)
+            // A `return` that reaches the script top level is just the
+            // child's status; it must not return from a parent function.
+            | ExecuteError::Return(code) => Ok(code),
+            // Loop control can never escape a child process.
+            ExecuteError::Break(_) | ExecuteError::Continue(_) => Ok(1),
+            ExecuteError::CommandNotFound(name) => {
+                eprintln!("{name}: command not found");
+                Ok(127)
+            }
+            ExecuteError::FunctionNotFound(name) => {
+                eprintln!("{name}: command not found");
+                Ok(127)
+            }
+            ExecuteError::UnknownBuiltin(name) => {
+                eprintln!("{name}: command not found");
+                Ok(1)
+            }
+            // A dead shared stdout (SIGPIPE analogue) is fatal to the whole
+            // process, not just the child — keep propagating it.
+            ExecuteError::IoError(error) if is_closed_output_io_error(&error) => {
+                Err(ExecuteError::IoError(error))
+            }
+            ExecuteError::IoError(error) => {
+                eprintln!("{error}");
+                Ok(1)
+            }
         }
     }
 

@@ -1014,6 +1014,6 @@ impl Executor {
     }
 }
 
-fn is_closed_output_io_error(error: &std::io::Error) -> bool {
+pub(in crate::executor) fn is_closed_output_io_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(232)
 }
