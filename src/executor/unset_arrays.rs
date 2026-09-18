@@ -362,7 +362,20 @@ impl Executor {
         let attrs = self.local_attr_scopes[scope_index]
             .remove(name)
             .unwrap_or_default();
+        // GNU variables.c:3959-3980 makunbound: the binding is removed at
+        // the context that holds it, so the pre-local binding becomes
+        // visible again. The typed owner needs the same restore — leaving
+        // the local's stale cell makes `${res-word}` report the variable as
+        // still set (varenv10.sub inner/outer).
+        let typed_previous = self
+            .local_typed_scopes
+            .get_mut(scope_index)
+            .and_then(|scope| scope.remove(name));
         restore_optional_shell_var(&mut self.env_vars, name, previous.flatten());
+        self.shell_state.variables.remove(name);
+        if let Some(variable) = typed_previous.flatten() {
+            let _ = self.shell_state.variables.set(name.to_string(), variable);
+        }
         set_var_attrs(&mut self.env_vars, name, attrs);
         true
     }
