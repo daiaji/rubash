@@ -17,6 +17,7 @@ pub const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 pub const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
 pub const CAPCASE_VARS: &str = "__RUBASH_CAPCASE_VARS";
 pub const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
+pub const TRACE_VARS: &str = "__RUBASH_TRACE_VARS";
 pub const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 pub const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 pub const SHELL_START_EPOCH: &str = "__RUBASH_SHELL_START_EPOCH";

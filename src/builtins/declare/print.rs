@@ -81,6 +81,7 @@ where
             lowercase: lowercase.contains(&name),
             capcase: capcase.contains(&name),
             nameref: namerefs.contains(&name),
+            trace: marked_vars(variables, super::TRACE_VARS).contains(&name),
         };
         if let Some(value) = variables.get(&name) {
             if plain {

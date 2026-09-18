@@ -136,6 +136,7 @@ pub(in crate::executor) fn capture_var_attrs(
         nameref: is_marked_var(env_vars, NAMEREF_VARS, name),
         array: is_marked_var(env_vars, ARRAY_VARS, name),
         assoc: is_marked_var(env_vars, ASSOC_VARS, name),
+        trace: is_marked_var(env_vars, TRACE_VARS, name),
     }
 }
 
@@ -152,6 +153,7 @@ pub(in crate::executor) fn set_var_attrs(
     set_marked_var(env_vars, NAMEREF_VARS, name, attrs.nameref);
     set_marked_var(env_vars, ARRAY_VARS, name, attrs.array);
     set_marked_var(env_vars, ASSOC_VARS, name, attrs.assoc);
+    set_marked_var(env_vars, TRACE_VARS, name, attrs.trace);
 }
 
 pub(in crate::executor) fn is_valid_process_env(name: &str, value: &str) -> bool {

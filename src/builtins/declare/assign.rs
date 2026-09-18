@@ -221,7 +221,7 @@ where
                 if !valid_nameref_value(value) {
                     writeln!(
                         stderr,
-                        "{}{command_name}: `{value}': not a valid identifier",
+                        "{}{command_name}: `{value}': invalid variable name for name reference",
                         diagnostic_prefix(variables)
                     )?;
                     status = EXECUTION_FAILURE;

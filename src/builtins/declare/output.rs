@@ -15,6 +15,7 @@ pub(super) struct DeclarationAttrs {
     pub(super) lowercase: bool,
     pub(super) capcase: bool,
     pub(super) nameref: bool,
+    pub(super) trace: bool,
 }
 
 impl DeclarationAttrs {
@@ -26,6 +27,7 @@ impl DeclarationAttrs {
             || self.lowercase
             || self.capcase
             || self.nameref
+            || self.trace
     }
 }
 
@@ -142,6 +144,9 @@ fn declaration_scalar_attrs(attrs: DeclarationAttrs) -> Option<String> {
     if attrs.readonly {
         flags.push('r');
     }
+    if attrs.trace {
+        flags.push('t');
+    }
     if attrs.exported {
         flags.push('x');
     }
@@ -168,6 +173,9 @@ fn declaration_array_attrs(attrs: DeclarationAttrs) -> String {
     if attrs.readonly {
         flags.push('r');
     }
+    if attrs.trace {
+        flags.push('t');
+    }
     if attrs.exported {
         flags.push('x');
     }
@@ -193,6 +201,9 @@ fn declaration_assoc_attrs(attrs: DeclarationAttrs) -> String {
     }
     if attrs.readonly {
         flags.push('r');
+    }
+    if attrs.trace {
+        flags.push('t');
     }
     if attrs.exported {
         flags.push('x');

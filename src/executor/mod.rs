@@ -424,6 +424,7 @@ struct VarAttrs {
     nameref: bool,
     array: bool,
     assoc: bool,
+    trace: bool,
 }
 
 #[derive(Debug)]

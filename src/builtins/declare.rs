@@ -61,6 +61,7 @@ const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
 const CAPCASE_VARS: &str = "__RUBASH_CAPCASE_VARS";
 const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
+const TRACE_VARS: &str = "__RUBASH_TRACE_VARS";
 const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
 use crate::executor::types::COMPOUND_ASSIGNMENT_MARKER;
 const EX_USAGE: i32 = 2;
@@ -314,7 +315,9 @@ where
     let mut lowercase = false;
     let mut capcase = false;
     let mut nameref = false;
-    let mut readonly = false;
+    let mut trace = false;
+    let mut unset_trace = false;
+        let mut readonly = false;
     let mut unset_export = false;
     let mut unset_array = false;
     let mut unset_assoc = false;
@@ -379,6 +382,11 @@ where
                     'n' => unset_nameref = true,
                     'r' if set_attr => readonly = true,
                     'r' => unset_readonly = true,
+                    // GNU declare.def option string "aAfFgiIlnrtux":
+                    // -t sets att_trace (printed by declare -p); +t
+                    // clears it.
+                    't' if set_attr => trace = true,
+                    't' => unset_trace = true,
                     'g' | 'G' | 'I' => {
                         // TODO(variables.c/builtins/declare.def): `-g` forces
                         // global scope inside functions. Rubash has one
@@ -727,6 +735,8 @@ where
         unset_capcase,
         unset_nameref,
         unset_readonly,
+        trace,
+        unset_trace,
     };
     // GNU declare.def: -p is display-only; `declare -np b` must not create
     // or mark b (nameref23.sub:41 -- GNU prints "b: not found" for a failed
