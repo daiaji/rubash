@@ -7,8 +7,49 @@ impl Executor {
         if is_null_device(target) {
             return File::open(shell_path_to_windows("/dev/null", &self.env_vars));
         }
+        // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
+        // the OS fd-alias layer — a dup of fd N, not a filesystem path.
+        // Windows has no /dev, so resolve against the virtual fd table
+        // (niubash#118: `< /dev/stdin` used to open CONIN$ and block on the
+        // console even when fd 0 was a pipeline).
+        if let Some(fd) = dev_stdio_redirect_fd(target) {
+            return self.open_fd_read_endpoint(fd, target);
+        }
         File::open(shell_path_to_windows(target, &self.env_vars))
             .map_err(|e| crate::posix_errors::path_error(target, e))
+    }
+
+    fn open_fd_read_endpoint(&self, fd: u32, target: &str) -> io::Result<File> {
+        match self.fd_table.read_endpoint(fd) {
+            Some(FdReadEndpoint::File(path)) => File::open(&path)
+                .map_err(|e| crate::posix_errors::path_error(&path.to_string_lossy(), e)),
+            Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
+                let bytes = self.virtual_fd_stdin_remaining_bytes(fd).unwrap_or_default();
+                let path = self
+                    .write_process_substitution_temp_bytes(&bytes)
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::Other, "failed to materialize fd input")
+                    })?;
+                File::open(&path)
+            }
+            Some(FdReadEndpoint::InheritedProcessStdin) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::io::AsHandle;
+                    let owned = std::io::stdin().as_handle().try_clone_to_owned()?;
+                    return Ok(File::from(owned));
+                }
+                #[cfg(not(windows))]
+                {
+                    return File::open(target)
+                        .map_err(|e| crate::posix_errors::path_error(target, e));
+                }
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{target}: Bad file descriptor"),
+            )),
+        }
     }
 
     pub(in crate::executor) fn create_redirect_output(
@@ -526,6 +567,31 @@ impl Executor {
             }
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
+                return None;
+            }
+            // `<&N` / `< /dev/fd/N` / `< /dev/std{N}` are fd aliases: GNU
+            // dup2 makes fd 0 read from fd N's current target, i.e. the
+            // shell's virtual stdin/pipe — never the host path `/dev/stdin`
+            // maps to (niubash#118: `cat < /dev/stdin` must consume the
+            // pipe input, not block opening CONIN$).
+            if let Some(source_fd) = redirect_target_fd(&target) {
+                if let Some(input) = self.virtual_fd_stdin_remaining(source_fd) {
+                    return Some(input);
+                }
+                if source_fd == 0 {
+                    if let Some(input) = self.env_vars.get(FUNCTION_STDIN) {
+                        return Some(input.clone());
+                    }
+                }
+                // No virtual input on the fd: duplicate its real endpoint.
+                // fd 0 inherited from the process dups the real stdin
+                // handle — a terminal blocks, matching GNU; a null/closed
+                // stdin yields EOF.
+                if let Ok(mut file) = self.open_fd_read_endpoint(source_fd, &target) {
+                    let mut buf = String::new();
+                    let _ = file.read_to_string(&mut buf);
+                    return Some(buf);
+                }
                 return None;
             }
             let path = shell_path_to_windows(&target, &self.env_vars);

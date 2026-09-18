@@ -920,8 +920,31 @@ impl Executor {
         // (redir7.sub:23), `exec 4>&- 5>&-` (redir.tests:88) and
         // single-redirect forms alike.
         let mut handled = false;
+        // A compound command's redirect injected into cmd.redirects (see
+        // GROUP_REDIRECT_INJECTED_MARK) is the ambient fd state GNU applies
+        // before exec runs — it participates in `>&N` resolution but must
+        // not be persisted, since exec only persists its own redirect list
+        // (execute_cmd.c exec_builtin) and the group undoes its own
+        // redirections (redir.c REDIRECTION_SAVEFD). Track those targets in
+        // `ambient` instead of the persistent fd table (niubash#118:
+        // `{ exec 10>&1; } >file` must not leave fd 1 pointing at file).
+        let mut ambient: std::collections::BTreeMap<u32, String> =
+            std::collections::BTreeMap::new();
         for redirect in &cmd.redirects {
             let target = self.expand_word(&redirect.target);
+            if crate::executor::support_names::is_injected_group_redirect(redirect) {
+                let fd = redirect.fd.unwrap_or_else(|| match redirect.kind {
+                    crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::ReadWrite
+                    | crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::CloseInput
+                    | crate::parser::RedirectKind::HereString
+                    | crate::parser::RedirectKind::HereDoc => 0,
+                    _ => 1,
+                });
+                ambient.insert(fd, target);
+                continue;
+            }
             // Mark the redirect as handled before dispatching: every arm
             // below ends in a `continue`, which would otherwise bypass a
             // bottom-of-loop flag and make `exec >&file` fall through to
@@ -947,7 +970,7 @@ impl Executor {
                         continue;
                     }
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
-                        self.copy_persistent_output_fd(fd, source_fd);
+                        self.copy_exec_output_fd_resolving_ambient(fd, source_fd, &ambient);
                         if move_source {
                             self.close_persistent_output_fd(source_fd)?;
                         }
@@ -1006,7 +1029,7 @@ impl Executor {
                         continue;
                     }
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
-                        self.copy_persistent_output_fd(fd, source_fd);
+                        self.copy_exec_output_fd_resolving_ambient(fd, source_fd, &ambient);
                         if move_source {
                             self.close_persistent_output_fd(source_fd)?;
                         }
@@ -1156,6 +1179,44 @@ impl Executor {
             strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
         };
         Some((fd, input))
+    }
+
+    /// `exec fd>&src` inside a redirected compound must resolve `src`
+    /// against the ambient fd state the compound's own redirects created
+    /// (GROUP_REDIRECT_INJECTED_MARK entries collect into `ambient`),
+    /// without persisting those ambient writes. Follows alias chains and
+    /// file targets; falls back to the persistent fd table when the source
+    /// fd has no ambient entry (niubash#118).
+    fn copy_exec_output_fd_resolving_ambient(
+        &mut self,
+        target_fd: u32,
+        source_fd: u32,
+        ambient: &std::collections::BTreeMap<u32, String>,
+    ) {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut current = source_fd;
+        while let Some(target) = ambient.get(&current) {
+            if !seen.insert(current) {
+                break;
+            }
+            if is_closed_redirect_target(target) {
+                let _ = self.close_persistent_output_fd(target_fd);
+                self.env_vars
+                    .insert(fd_closed_key(target_fd), "1".to_string());
+                return;
+            }
+            if let Some((next_fd, _)) = redirect_target_fd_and_move(target) {
+                current = next_fd;
+                continue;
+            }
+            // dup semantics: point the fd at the same target without
+            // re-opening/truncating — the compound's own open already
+            // created and truncated the file (niubash#118: a fresh
+            // create here erased earlier group output).
+            self.set_fd_output_file(target_fd, target.clone(), target_fd >= 10);
+            return;
+        }
+        self.copy_persistent_output_fd(target_fd, current);
     }
 
     fn copy_persistent_output_fd(&mut self, target_fd: u32, source_fd: u32) {

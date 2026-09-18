@@ -404,9 +404,20 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         let mut stderr = Vec::new();
         let display_target = source_target.strip_prefix('&').unwrap_or(source_target);
+        // GNU reports a failed dup2 of `>&N` as EBADF ("Bad file
+        // descriptor"), but an unopened `/dev/fd/N` (or /dev/std*) path
+        // fails at open() with ENOENT ("No such file or directory") —
+        // redir.c redirection_error uses the syscall errno (niubash#118).
+        let reason = if crate::executor::execution_misc::dev_stdio_redirect_fd(display_target)
+            .is_some()
+        {
+            "No such file or directory"
+        } else {
+            "Bad file descriptor"
+        };
         writeln!(
             &mut stderr,
-            "{}{display_target}: Bad file descriptor",
+            "{}{display_target}: {reason}",
             self.diagnostic_prefix()
         )?;
         state.write_to_fd(self, 2, &stderr)

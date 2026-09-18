@@ -1263,6 +1263,17 @@ impl Executor {
         // `cat <(echo ps) | grep -q ps`). Run the shared materialization
         // here so every stage form sees real paths; the helpers' own
         // materialization calls are no-ops on the rewritten node.
+        // GNU gives every pipeline stage the pipe as its fd 0. Stage helpers
+        // and external stages already receive it through FUNCTION_STDIN;
+        // expose it the same way while the inline arms run so fd-alias
+        // redirections like `cat < /dev/stdin` (niubash#118) resolve to the
+        // stage input instead of the process's own stdin handle.
+        let old_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
+        let old_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        self.env_vars
+            .insert(FUNCTION_STDIN.to_string(), input.to_string());
+        self.env_vars
+            .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
         let result = if command_has_pipeline_process_substitution(command) {
             // The substitution child inherits the stage's stdin — the
             // upstream pipe — so expose the captured input while the
@@ -1293,6 +1304,8 @@ impl Executor {
         } else {
             self.execute_pipeline_stage_inner(command, input)
         };
+        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
+        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
         let nounset_hit = self.restore_arithmetic_error_flags(&saved);
         match result {
             Ok(Some((output, stderr, _status))) if nounset_hit => {

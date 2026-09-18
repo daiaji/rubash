@@ -165,7 +165,9 @@ pub(in crate::executor) fn redirect_target_fd(target: &str) -> Option<u32> {
 
 pub(in crate::executor) fn redirect_target_fd_and_move(target: &str) -> Option<(u32, bool)> {
     let target = target.trim_start_matches(['\x1b', '\x1d']);
-    let fd = target.strip_prefix('&')?;
+    let Some(fd) = target.strip_prefix('&') else {
+        return dev_stdio_redirect_fd(target).map(|fd| (fd, false));
+    };
     let fd = fd.trim_matches(|ch| ch == '"' || ch == '\x1d');
     let (fd, move_fd) = fd
         .strip_suffix('-')
@@ -173,6 +175,28 @@ pub(in crate::executor) fn redirect_target_fd_and_move(target: &str) -> Option<(
         .unwrap_or((fd, false));
     (!fd.is_empty() && fd.chars().all(|ch| ch.is_ascii_digit()))
         .then(|| fd.parse::<u32>().ok().map(|fd| (fd, move_fd)))
+        .flatten()
+}
+
+/// GNU redir.c opens `/dev/stdin`/`/dev/stdout`/`/dev/stderr`,
+/// `/dev/fd/N`, and `/proc/self/fd/N` through the OS's fd-alias device
+/// files, which the kernel resolves to a dup of fd N — behaviorally the
+/// same as `>&N`/`<&N`. Windows has no such filesystem, so the names are
+/// recognized here and flow through the same fd-dup machinery (niubash#118:
+/// `>> /dev/stdout` used to land on the CONOUT$ device path and fail with
+/// Permission denied).
+pub(in crate::executor) fn dev_stdio_redirect_fd(target: &str) -> Option<u32> {
+    match target {
+        "/dev/stdin" => return Some(0),
+        "/dev/stdout" => return Some(1),
+        "/dev/stderr" => return Some(2),
+        _ => {}
+    }
+    let fd = target
+        .strip_prefix("/dev/fd/")
+        .or_else(|| target.strip_prefix("/proc/self/fd/"))?;
+    (!fd.is_empty() && fd.chars().all(|ch| ch.is_ascii_digit()))
+        .then(|| fd.parse::<u32>().ok())
         .flatten()
 }
 

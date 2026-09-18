@@ -234,6 +234,20 @@ impl Executor {
         }
 
         let target = self.expand_word(&redirect.target);
+        // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
+        // the OS fd-alias layer — a dup of fd N, not a filesystem path
+        // (niubash#118: `< /dev/stdin` used to open CONIN$ and block on the
+        // console even inside a pipeline).
+        if let Some(fd) = dev_stdio_redirect_fd(&target) {
+            return match self.fd_table.read_endpoint(fd) {
+                Some(FdReadEndpoint::File(path)) => fs::read_to_string(&path).ok(),
+                Some(FdReadEndpoint::Text(_))
+                | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
+                    self.virtual_fd_stdin_remaining(fd)
+                }
+                _ => None,
+            };
+        }
         let path = shell_path_to_windows(&target, &self.env_vars);
         if redirect.append {
             let _ = OpenOptions::new()

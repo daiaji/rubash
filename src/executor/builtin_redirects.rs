@@ -54,6 +54,11 @@ impl Executor {
             let target = self.expand_word(&redirect.target);
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
+            } else if redirect_target_fd(&target).is_some() {
+                // `<&N` and fd-alias paths (/dev/stdin, /dev/fd/0,
+                // /proc/self/fd/0): the builtin keeps reading its current
+                // stdin channel — the fd dup is a no-op for the virtual
+                // input model.
             } else if redirect.append {
                 OpenOptions::new()
                     .create(true)

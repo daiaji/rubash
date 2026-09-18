@@ -307,13 +307,69 @@ pub(in crate::executor) fn short_set_flag_option(flag: char) -> Option<&'static 
     }
 }
 
+/// Marker written into `operator_metadata.raw` on a compound command's
+/// redirect that was cloned into a body command's redirect list. The clone
+/// exists so inner fd-alias redirections (`>&N`, `/dev/stdout`) resolve
+/// against the fd state the GROUP left — GNU opens compound redirects
+/// before the body runs (redir.c do_redirection_internal). It is NOT the
+/// command's own redirect, though: `exec` persists only its own redirect
+/// list (execute_cmd.c exec_builtin), so the persistent-redirect path must
+/// resolve aliases against marked entries without persisting them.
+/// `operator_metadata.raw` is never consulted at execution time, so it is
+/// a safe carrier.
+pub(in crate::executor) const GROUP_REDIRECT_INJECTED_MARK: &str = "\x1egroup-redirect";
+
+pub(in crate::executor) fn injected_group_redirect(redirect: &Redirect) -> Redirect {
+    let mut cloned = redirect.clone();
+    cloned.operator_metadata.raw = GROUP_REDIRECT_INJECTED_MARK.to_string();
+    cloned
+}
+
+pub(in crate::executor) fn is_injected_group_redirect(redirect: &Redirect) -> bool {
+    redirect.operator_metadata.raw == GROUP_REDIRECT_INJECTED_MARK
+}
+
 pub(in crate::executor) fn apply_stdout_append_redirect(
     commands: &mut [CommandNode],
     redirect: &Redirect,
 ) {
     for command in commands {
-        if command.redirect_out.is_none() && command.append.is_none() {
-            command.append = Some(redirect.clone());
+        // GNU redir.c: a compound command's redirects are opened before the
+        // body runs, so an inner `>&N` / `>/dev/fd/N` duplicates fd N as the
+        // GROUP left it. A command whose own stdout redirect is an fd alias
+        // still needs the outer redirect first so the alias resolves to the
+        // group target ({ printf x >>/dev/stdout; } >>so writes to so —
+        // niubash#118).
+        let own_output_is_fd_alias = command
+            .redirect_out
+            .iter()
+            .chain(command.append.iter())
+            .any(|own| {
+                let target = own.target.trim_start_matches(['\x1b', '\x1d']);
+                crate::executor::execution_misc::redirect_target_fd(target).is_some()
+                    || crate::executor::execution_misc::dev_stdio_redirect_fd(target).is_some()
+            });
+        // A compound command with its own fd-1 redirect (file or fd alias)
+        // shields its body from the outer redirect entirely: GNU opens the
+        // inner redirect before the body runs, so `{ { echo a; } >n1; } >n2`
+        // sends `a` to n1 and never lets n2 reach the body (niubash#118).
+        let has_own_output_redirect = command.redirect_out.is_some()
+            || command.append.is_some()
+            || command.redirects.iter().any(|existing| {
+                matches!(
+                    existing.kind,
+                    crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::ClobberOutput
+                        | crate::parser::RedirectKind::DuplicateOutput
+                        | crate::parser::RedirectKind::CombinedOutput
+                        | crate::parser::RedirectKind::CombinedAppend
+                ) && existing.fd.unwrap_or(1) == 1
+            });
+        if own_output_is_fd_alias {
+            command.redirects.insert(0, injected_group_redirect(&redirect));
+        } else if command.redirect_out.is_none() && command.append.is_none() {
+            command.append = Some(injected_group_redirect(redirect));
             if command.redirects.iter().any(|existing| {
                 matches!(
                     existing.kind,
@@ -322,10 +378,13 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
                         | crate::parser::RedirectKind::ClobberOutput
                 )
             }) {
-                command.redirects.push(redirect.clone());
+                command.redirects.push(injected_group_redirect(&redirect));
             } else {
-                command.redirects.insert(0, redirect.clone());
+                command.redirects.insert(0, injected_group_redirect(&redirect));
             }
+        }
+        if has_own_output_redirect {
+            continue;
         }
         if let Some(for_command) = &mut command.for_command {
             apply_stdout_append_redirect(&mut for_command.body, redirect);
@@ -401,7 +460,7 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
         let inherits_stderr =
             command.redirect_err.is_none() && command.redirect_err_append.is_none();
         if inherits_stderr {
-            command.redirect_err_append = Some(redirect.clone());
+            command.redirect_err_append = Some(injected_group_redirect(&redirect));
             let has_stdout_redirect = command.redirects.iter().any(|existing| {
                 matches!(
                     existing.kind,
@@ -411,9 +470,9 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
                 ) && existing.fd.unwrap_or(1) == 1
             });
             if has_stdout_redirect {
-                command.redirects.push(redirect.clone());
+                command.redirects.push(injected_group_redirect(&redirect));
             } else {
-                command.redirects.insert(0, redirect.clone());
+                command.redirects.insert(0, injected_group_redirect(&redirect));
             }
             apply_inherited_stderr_to_stdout_fd_copy(command, &redirect);
         }

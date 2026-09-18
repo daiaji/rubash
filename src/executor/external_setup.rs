@@ -129,20 +129,29 @@ impl Executor {
             let target = self.expand_word(&redirect.target);
             if redirect.fd.unwrap_or(0) == 0 {
                 if let Some(fd) = redirect_target_fd(&target) {
-                    if let Some(FdReadEndpoint::CoprocStdout(pid)) = self.fd_table.read_endpoint(fd)
-                    {
-                        let reader = self
-                            .coproc_stdout_readers
-                            .get(&pid)
-                            .ok_or_else(|| {
-                                io::Error::new(
-                                    io::ErrorKind::BrokenPipe,
-                                    "coprocess output is closed",
-                                )
-                            })?
-                            .try_clone()?;
-                        process.stdin(Stdio::from(reader));
-                        return Ok(());
+                    match self.fd_table.read_endpoint(fd) {
+                        Some(FdReadEndpoint::CoprocStdout(pid)) => {
+                            let reader = self
+                                .coproc_stdout_readers
+                                .get(&pid)
+                                .ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::BrokenPipe,
+                                        "coprocess output is closed",
+                                    )
+                                })?
+                                .try_clone()?;
+                            process.stdin(Stdio::from(reader));
+                            return Ok(());
+                        }
+                        // `< /dev/fd/N` (and `<&N`) on a file-backed fd dup
+                        // the open file into the child's stdin (GNU redir.c
+                        // dup2 semantics through the /dev/fd device layer).
+                        Some(FdReadEndpoint::File(path)) => {
+                            process.stdin(Stdio::from(File::open(&path)?));
+                            return Ok(());
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -150,6 +159,19 @@ impl Executor {
                 if redirect.fd.unwrap_or(0) == 0 {
                     process.stdin(Stdio::null());
                 }
+                return Ok(());
+            }
+            // `< /dev/stdin` / `<&0` duplicate fd 0 — GNU dup2 keeps the
+            // stage's *current* stdin, which here lives in the virtual
+            // FUNCTION_STDIN/fd-table channel, not the process's own stdin
+            // handle (niubash#118: piping into `cat < /dev/stdin` must feed
+            // the pipe, not block on the console).
+            if redirect.fd.unwrap_or(0) == 0
+                && redirect_target_fd(&target) == Some(0)
+                && (self.env_vars.contains_key(FUNCTION_STDIN)
+                    || self.virtual_fd_stdin_remaining(0).is_some())
+            {
+                process.stdin(Stdio::piped());
                 return Ok(());
             }
             if redirect.fd.unwrap_or(0) == 0 && self.input_fd_redirects_to_process_stdin(&target) {
