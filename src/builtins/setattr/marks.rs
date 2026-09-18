@@ -73,3 +73,27 @@ pub(super) fn nameref_target_name(
     }
     None
 }
+
+/// GNU builtins/setattr.def:651 + variables.c:2188-2205
+/// find_variable_nameref_for_create: attribute builtins resolve a nameref
+/// chain to its FINAL cell verbatim — including cells that are not valid
+/// identifiers (`ref` -> `var[0]`), which the caller then rejects with
+/// sh_invalidid. Unlike nameref_target_name this does not pre-validate
+/// the target.
+pub(super) fn nameref_resolved_cell(
+    env_vars: &HashMap<String, String>,
+    name: &str,
+) -> Option<String> {
+    let mut current = name;
+    for _ in 0..8 {
+        if !marked_vars(env_vars, NAMEREF_VARS).contains(current) {
+            return None;
+        }
+        let target = env_vars.get(current)?;
+        if !marked_vars(env_vars, NAMEREF_VARS).contains(target) {
+            return Some(target.clone());
+        }
+        current = target;
+    }
+    None
+}

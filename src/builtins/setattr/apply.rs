@@ -3,7 +3,7 @@ use std::env;
 use std::io::{self, Write};
 
 use super::marks::{
-    mark_array, mark_exported, mark_readonly, marked_vars, nameref_target_name, unmark_exported,
+    mark_array, mark_exported, mark_readonly, marked_vars, nameref_resolved_cell, unmark_exported,
 };
 use super::value::{
     array_attribute_assignment_value, diagnostic_prefix, eval_arith_value, is_array_value,
@@ -31,8 +31,24 @@ where
         stderr.write_all(diagnostic.as_bytes())?;
         return Ok(EXECUTION_FAILURE);
     }
-    let resolved_name = nameref_target_name(env_vars, name).unwrap_or_else(|| name.to_string());
+    let resolved_name = nameref_resolved_cell(env_vars, name).unwrap_or_else(|| name.to_string());
     let name = resolved_name.as_str();
+    // GNU builtins/setattr.def:651 + variables.c:2201-2204: attribute
+    // builtins applied THROUGH a nameref validate the resolved cell —
+    // `typeset -n ref='var[0]'; export ref' reports
+    // `export: 'var[0]': not a valid identifier` (sh_invalidid on the
+    // cell), not a silent mark on a literal "var[0]" key.
+    if !valid_identifier(name) {
+        let diagnostic = format!(
+            "{}export: `{name}': not a valid identifier
+",
+            diagnostic_prefix()
+        );
+        stderr.write_all(diagnostic.as_bytes())?;
+        // set_var_attribute returns void here without bumping
+        // any_failed, so set_or_show_attributes reports SUCCESS.
+        return Ok(EXECUTION_SUCCESS);
+    }
 
     match mode {
         ExportMode::Set => {
@@ -111,8 +127,23 @@ where
         stderr.write_all(diagnostic.as_bytes())?;
         return Ok(EXECUTION_FAILURE);
     }
-    let resolved_name = nameref_target_name(env_vars, name).unwrap_or_else(|| name.to_string());
+    let resolved_name = nameref_resolved_cell(env_vars, name).unwrap_or_else(|| name.to_string());
     let name = resolved_name.as_str();
+    // Same through-nameref cell validation as apply_export_arg above
+    // (setattr.def:651 -> variables.c:2201-2204): `readonly ref` with
+    // ref -> 'var[0]' reports `readonly: 'var[0]': not a valid
+    // identifier` and leaves the nameref untouched.
+    if !valid_identifier(name) {
+        let diagnostic = format!(
+            "{}readonly: `{name}': not a valid identifier
+",
+            diagnostic_prefix()
+        );
+        stderr.write_all(diagnostic.as_bytes())?;
+        // set_var_attribute returns void here without bumping
+        // any_failed, so set_or_show_attributes reports SUCCESS.
+        return Ok(EXECUTION_SUCCESS);
+    }
 
     let readonly = marked_vars(env_vars, READONLY_VARS);
     if readonly.contains(name) && value.is_some() {

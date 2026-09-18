@@ -201,6 +201,15 @@ impl Executor {
         }
 
         let resolved = self.resolved_variable_name(name)?;
+        // GNU subst.c: a nameref cell that is an array reference names the
+        // element, not a variable literally called "arr[i]" — resolve it
+        // through the array element path (nameref9.sub ${f/x/X} with
+        // f -> arr[1]).
+        if parse_array_subscript(&resolved).is_some() {
+            return self
+                .array_element_parameter_value(&resolved)
+                .map(|value| dequote_storage_marks(&value));
+        }
         let value = self.env_vars.get(&resolved)?;
         // GNU subst.c resolves a bare array name to one element, not the whole
         // array (get_var_and_type -> VT_ARRAYVAR): associative arrays read key
