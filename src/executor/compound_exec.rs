@@ -8,6 +8,121 @@ enum CoprocStderrForwardTarget {
     CoprocStdin(std::io::PipeWriter),
 }
 
+/// Resolved stdio disposition for one of a background child's fds 0-2,
+/// tracking what GNU's do_redirections would leave the descriptor
+/// pointing at inside the forked subshell.
+enum BackgroundStdio {
+    /// fd keeps the parent's handle (GNU: the subshell inherited it).
+    Inherit,
+    /// fd is /dev/null (async stdin default, `>&-`, `<&-`, `>/dev/null`).
+    Null,
+    /// fd is an open file.
+    File(File),
+}
+
+impl Clone for BackgroundStdio {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Inherit => Self::Inherit,
+            Self::Null => Self::Null,
+            Self::File(file) => file.try_clone().map(Self::File).unwrap_or(Self::Inherit),
+        }
+    }
+}
+
+/// Spawn `command` with this process's std handles made non-inheritable for
+/// every fd whose child disposition is not "inherit" (see the niubash#122
+/// comment at the call site). On non-Windows hosts Command already passes
+/// only the configured stdio through fork+exec, so this is a plain spawn.
+#[cfg(windows)]
+fn spawn_with_isolated_std_handles(
+    command: &mut Command,
+    keep_std_handle: [bool; 3],
+) -> io::Result<std::process::Child> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{
+        GetHandleInformation, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+        INVALID_HANDLE_VALUE,
+    };
+
+    let std_handles: [HANDLE; 3] = [
+        std::io::stdin().as_raw_handle() as HANDLE,
+        std::io::stdout().as_raw_handle() as HANDLE,
+        std::io::stderr().as_raw_handle() as HANDLE,
+    ];
+    let mut toggled: Vec<(HANDLE, u32)> = Vec::new();
+    for (index, handle) in std_handles.iter().copied().enumerate() {
+        if keep_std_handle[index] || handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+        let mut flags = 0u32;
+        // SAFETY: handle is one of this process's live std handles;
+        // GetHandleInformation/SetHandleInformation only touch this
+        // process's handle table.
+        unsafe {
+            if GetHandleInformation(handle, &mut flags) == 0 || flags & HANDLE_FLAG_INHERIT == 0 {
+                continue;
+            }
+            if SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) == 0 {
+                continue;
+            }
+        }
+        toggled.push((handle, flags));
+    }
+    let result = command.spawn();
+    for (handle, flags) in toggled {
+        // SAFETY: restoring the flag set observed before the spawn.
+        unsafe {
+            SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags & HANDLE_FLAG_INHERIT);
+        }
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn spawn_with_isolated_std_handles(
+    command: &mut Command,
+    _keep_std_handle: [bool; 3],
+) -> io::Result<std::process::Child> {
+    command.spawn()
+}
+
+/// Drop redirections already consumed as spawn-time stdio from the command
+/// that gets serialized into the background child's `-c` source — GNU's
+/// dispose_redirects (execute_cmd.c:1762) after do_redirections in the async
+/// subshell. `consumed[i]` corresponds to `command.redirects[i]`; redirects
+/// the spawn-time pass could not resolve stay for the child to apply.
+fn strip_consumed_redirects(command: &mut CommandNode, consumed: &[bool]) {
+    if !consumed.iter().any(|consumed| *consumed) {
+        return;
+    }
+    let mut index = 0;
+    command.redirects.retain(|_| {
+        let keep = !consumed[index];
+        index += 1;
+        keep
+    });
+    // The dedicated Option fields mirror entries of `redirects` for the
+    // serializer (redirect_err_append may even hold a `2>>file` synthesized
+    // from a `2>&1` dup); clear every field whose redirect is no longer
+    // carried by the remaining list so it is not re-applied in the child.
+    let remaining = &command.redirects;
+    for field in [
+        &mut command.redirect_in,
+        &mut command.redirect_out,
+        &mut command.append,
+        &mut command.redirect_err,
+        &mut command.redirect_err_append,
+    ] {
+        if field
+            .as_ref()
+            .is_some_and(|redirect| !remaining.contains(redirect))
+        {
+            *field = None;
+        }
+    }
+}
+
 fn forward_coproc_stderr(
     mut stderr: std::process::ChildStderr,
     mut target: CoprocStderrForwardTarget,
@@ -82,11 +197,8 @@ impl Executor {
             .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
-        let source = self.background_command_source(&background_command.command);
         let display_source = bash_command_source_text(&background_command.command);
         let mut child = Command::new(&exe);
-        child.arg("-c").arg(&source);
-        child.stdin(Stdio::null());
         for (key, value) in &self.env_vars {
             if !key.starts_with("__RUBASH_") {
                 child.env(key, value);
@@ -108,7 +220,61 @@ impl Executor {
         }
         child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
 
-        let child = child.spawn()?;
+        // GNU execute_cmd.c:5884 (execute_disk_command) / :1761-1763
+        // (execute_in_subshell): the forked async subshell runs
+        // do_redirections(command->redirects, RX_ACTIVE) on its OWN
+        // descriptors and then dispose_redirects before the body executes,
+        // so `sleep 1 >/dev/null 2>&1 &` leaves no process holding the
+        // parent's stdout/stderr open and a caller reading the shell's pipes
+        // to EOF is released when the shell exits (niubash#122). The spawned
+        // `rubash -c` child stands in for that subshell: resolve the
+        // command's own redirections into its stdio here, and strip the
+        // consumed redirects from the serialized `-c` source so the child
+        // does not re-open them — `cmd >f 2>&1` must keep fd1/fd2 on the
+        // same open file description, which only the spawn-time stdio pair
+        // preserves.
+        let (stdio, consumed) = self.resolve_background_stdio(&background_command.command);
+        let mut child_command = background_command.command.clone();
+        strip_consumed_redirects(&mut child_command, &consumed);
+        let source = self.background_command_source(&child_command);
+        child.arg("-c").arg(&source);
+        let keep_std_handle = [
+            matches!(stdio[0], BackgroundStdio::Inherit),
+            matches!(stdio[1], BackgroundStdio::Inherit),
+            matches!(stdio[2], BackgroundStdio::Inherit),
+        ];
+        for (fd, resolved) in stdio.into_iter().enumerate() {
+            let stdio = match resolved {
+                BackgroundStdio::Inherit => Stdio::inherit(),
+                BackgroundStdio::Null => Stdio::null(),
+                BackgroundStdio::File(file) => Stdio::from(file),
+            };
+            match fd {
+                0 => {
+                    child.stdin(stdio);
+                }
+                1 => {
+                    child.stdout(stdio);
+                }
+                _ => {
+                    child.stderr(stdio);
+                }
+            }
+        }
+
+        // std::process::Command on Windows spawns with bInheritHandles=TRUE
+        // and no PROC_THREAD_ATTRIBUTE_HANDLE_LIST (stable std has no API for
+        // one), so the child anonymously inherits EVERY inheritable handle in
+        // this process — including this shell's own stdout/stderr pipe write
+        // ends, which it would then hold open for its whole lifetime even when
+        // its fd1/fd2 are redirected to /dev/null (niubash#122: the caller's
+        // pipe reader blocks until the async job exits). GNU's subshell has
+        // its descriptors already redirected — nothing else to hold. Clear
+        // HANDLE_FLAG_INHERIT on each parent std handle whose resolved child
+        // fd is not Inherit for the duration of the spawn; all process spawns
+        // in this process run on the executor thread, so the flag flip cannot
+        // race a concurrent CreateProcess here.
+        let child = spawn_with_isolated_std_handles(&mut child, keep_std_handle)?;
         let pid = child.id();
         self.background_children.insert(pid, child);
         self.job_table
@@ -118,6 +284,181 @@ impl Executor {
         self.last_background_pid = Some(pid);
         self.exit_code = 0;
         Ok(())
+    }
+
+    /// Mirror of GNU do_redirections (redir.c) restricted to fds 0-2 for the
+    /// spawned background subshell: walk the command's redirections in parse
+    /// order so `2>&1 >/dev/null` keeps stderr on the inherited pipe while
+    /// `>/dev/null 2>&1` releases both, exactly as GNU's sequential dup2
+    /// ordering does. Best-effort: a target that cannot be resolved here
+    /// (virtual fds, failed opens, expansion side effects) is left in the
+    /// returned `consumed` map as false so it stays in the child's `-c`
+    /// source, where the child re-runs it and reports the same diagnostic
+    /// GNU's subshell would.
+    fn resolve_background_stdio(&self, command: &CommandNode) -> ([BackgroundStdio; 3], Vec<bool>) {
+        use crate::parser::RedirectKind;
+        // GNU execute_cmd.c:595 async_redirect_stdin + :1589-1591
+        // (should_redir_stdin): an async command with no stdin redirect gets
+        // fd 0 from /dev/null, so the base disposition for fd 0 is Null.
+        let mut fd0 = BackgroundStdio::Null;
+        let mut fd1 = BackgroundStdio::Inherit;
+        let mut fd2 = BackgroundStdio::Inherit;
+        let mut consumed = vec![false; command.redirects.len()];
+
+        let target_of =
+            |fd: u32, fd0: &BackgroundStdio, fd1: &BackgroundStdio, fd2: &BackgroundStdio| match fd
+            {
+                0 => fd0.clone(),
+                1 => fd1.clone(),
+                2 => fd2.clone(),
+                _ => BackgroundStdio::Inherit,
+            };
+
+        for (index, redirect) in command.redirects.iter().enumerate() {
+            match redirect.kind {
+                // The heredoc/here-string body travels inside the child's
+                // `-c` source; the child's own redirect pass feeds it.
+                RedirectKind::HereDoc | RedirectKind::HereString => continue,
+                _ => {}
+            }
+            // `{fd}>file` dynamic fd bindings and `<(cmd)`/`>(cmd)` process
+            // substitutions are owned by the child's executor, which knows
+            // how to bind them; do not mistake them for plain fd 0-2 files.
+            if redirect.fd_var.is_some()
+                || redirect.target.starts_with("<(")
+                || redirect.target.starts_with(">(")
+            {
+                continue;
+            }
+            let fd = redirect.fd.unwrap_or(match redirect.kind {
+                RedirectKind::Input
+                | RedirectKind::DuplicateInput
+                | RedirectKind::CloseInput
+                | RedirectKind::ReadWrite => 0,
+                _ => 1,
+            });
+            if fd > 2 {
+                continue;
+            }
+            let resolved = match redirect.kind {
+                RedirectKind::Input => {
+                    let target = self.expand_word(&redirect.target);
+                    if is_closed_redirect_target(&target) {
+                        BackgroundStdio::Null
+                    } else if redirect_target_fd(&target).is_some() {
+                        continue;
+                    } else {
+                        match self.open_input_redirect(&target) {
+                            Ok(file) => BackgroundStdio::File(file),
+                            Err(_) => continue,
+                        }
+                    }
+                }
+                RedirectKind::DuplicateInput | RedirectKind::DuplicateOutput => {
+                    let target = self.expand_word(&redirect.target);
+                    if is_closed_redirect_target(&target) {
+                        BackgroundStdio::Null
+                    } else if let Some(source_fd) = redirect_target_fd(&target) {
+                        // `N>&M`: fd N ends up wherever fd M currently
+                        // points — GNU's dup2 ordering semantics. Source fds
+                        // above 2 are the child's own virtual fd table, so
+                        // leave them for the child to resolve.
+                        if source_fd > 2 {
+                            continue;
+                        }
+                        target_of(source_fd, &fd0, &fd1, &fd2)
+                    } else {
+                        continue;
+                    }
+                }
+                RedirectKind::CloseInput | RedirectKind::CloseOutput => BackgroundStdio::Null,
+                RedirectKind::Output | RedirectKind::ClobberOutput => {
+                    let target = self.expand_word(&redirect.target);
+                    if is_closed_redirect_target(&target) {
+                        BackgroundStdio::Null
+                    } else if redirect_target_fd(&target).is_some() {
+                        continue;
+                    } else if is_null_device(&target) {
+                        BackgroundStdio::Null
+                    } else {
+                        match self.create_redirect_output(&target, redirect.clobber) {
+                            Ok(file) => BackgroundStdio::File(file),
+                            Err(_) => continue,
+                        }
+                    }
+                }
+                RedirectKind::Append => {
+                    let target = self.expand_word(&redirect.target);
+                    if is_closed_redirect_target(&target) {
+                        BackgroundStdio::Null
+                    } else if redirect_target_fd(&target).is_some() {
+                        continue;
+                    } else if is_null_device(&target) {
+                        BackgroundStdio::Null
+                    } else {
+                        match OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(shell_path_to_windows(&target, &self.env_vars))
+                        {
+                            Ok(file) => BackgroundStdio::File(file),
+                            Err(_) => continue,
+                        }
+                    }
+                }
+                RedirectKind::ReadWrite => {
+                    let target = self.expand_word(&redirect.target);
+                    match OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .open(shell_path_to_windows(&target, &self.env_vars))
+                    {
+                        Ok(file) => BackgroundStdio::File(file),
+                        Err(_) => continue,
+                    }
+                }
+                RedirectKind::CombinedOutput | RedirectKind::CombinedAppend => {
+                    // `&>file` / `&>>file`: one open, both fds share it.
+                    let target = self.expand_word(&redirect.target);
+                    let file = if is_null_device(&target) {
+                        fd1 = BackgroundStdio::Null;
+                        fd2 = BackgroundStdio::Null;
+                        consumed[index] = true;
+                        continue;
+                    } else {
+                        let opened = if redirect.kind == RedirectKind::CombinedAppend {
+                            OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(shell_path_to_windows(&target, &self.env_vars))
+                        } else {
+                            self.create_redirect_output(&target, false)
+                        };
+                        match opened {
+                            Ok(file) => file,
+                            Err(_) => continue,
+                        }
+                    };
+                    fd1 = match file.try_clone() {
+                        Ok(clone) => BackgroundStdio::File(clone),
+                        Err(_) => continue,
+                    };
+                    fd2 = BackgroundStdio::File(file);
+                    consumed[index] = true;
+                    continue;
+                }
+                _ => continue,
+            };
+            consumed[index] = true;
+            match fd {
+                0 => fd0 = resolved,
+                1 => fd1 = resolved,
+                _ => fd2 = resolved,
+            }
+        }
+
+        ([fd0, fd1, fd2], consumed)
     }
 
     fn background_command_source(&self, command: &CommandNode) -> String {
