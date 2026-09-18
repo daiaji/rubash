@@ -2,6 +2,14 @@ use super::*;
 use crate::executor::embedded_mutations::collect_command_substitution_source;
 use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 
+/// Hoisted data-quote sentinels: expand_assignment_value_inner lifts the
+/// lexer's \x17/\x18 escaped-quote carriers out of the embedded-parameter
+/// walker so they are not re-read as quote syntax (subst.c:4692
+/// dequote_escapes keeps CTLESC-escaped quotes as data). The embedded
+/// walker still tracks DATA_DOUBLE_QUOTE as a "..." region boundary for
+/// its in_double state so `$'` inside it stays literal (issue #109).
+pub(in crate::executor) const DATA_DOUBLE_QUOTE: &str = "\u{E102}";
+
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::executor) struct AssignmentExpansionResult {
     pub(in crate::executor) value: String,
@@ -632,7 +640,6 @@ impl Executor {
             // markers out of the quote-removal pass so the data quotes they
             // become are not re-stripped as syntax, then restore them.
             const DATA_SINGLE_QUOTE: &str = "\u{E101}";
-            const DATA_DOUBLE_QUOTE: &str = "\u{E102}";
             // GNU parse.y/arrayfunc.c: a compound array assignment preserves
             // the raw parenthesized text so split_storage_words sees the
             // original quoting. The embedded parameter walker treats a bare

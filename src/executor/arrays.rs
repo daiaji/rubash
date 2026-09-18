@@ -623,7 +623,7 @@ pub(super) fn append_array_value(
         if let Some((left, rhs)) = token.split_once("+=") {
             if let Some(index) = array_assignment_index(left, &entries, env_vars) {
                 let current = entries.get(&index).cloned().unwrap_or_default();
-                let rhs = unquote_storage_value(rhs);
+                let rhs = unquote_storage_value(&dequote_compound_element_rhs(rhs));
                 let value = if integer {
                     (eval_arith_value(&current) + eval_arith_value(&rhs)).to_string()
                 } else {
@@ -640,7 +640,7 @@ pub(super) fn append_array_value(
 
         if let Some((left, rhs)) = token.split_once('=') {
             if let Some(index) = array_assignment_index(left, &entries, env_vars) {
-                let decoded = unquote_storage_value(rhs);
+                let decoded = unquote_storage_value(&dequote_compound_element_rhs(rhs));
                 entries.insert(index, decoded);
                 next_index = index + 1;
                 continue;
@@ -653,9 +653,14 @@ pub(super) fn append_array_value(
         let command_subst_token = token.starts_with("\"$(") && token.ends_with('"');
         // A compound word quoted with EITHER quote family stays one element
         // ('a b' and "a b" each store a single element; only unquoted
-        // whitespace splits). Mirrors the declare storage copy.
-        let quoted_token = (token.starts_with('"') && token.ends_with('"') && !command_subst_token)
-            || (token.starts_with('\'') && token.ends_with('\'') && token.len() >= 2);
+        // whitespace splits). Mirrors the declare storage copy. The check
+        // must be a real full-span scan, not starts_with+ends_with: GNU
+        // dequote_string (subst.c:4807) removes EVERY quote pair, so a
+        // mixed token like 'x'a"b"y' dequotes to xa"by — its first quote
+        // closes mid-word and the tail is unquoted. Treating it as fully
+        // quoted skipped quote removal and stored x'a"b"y' (issue #109
+        // nested-quoting class).
+        let quoted_token = token_is_fully_quoted(&token) && !command_subst_token;
         if let Some(token) = token.strip_prefix(ARRAY_FIELD_SPLIT_MARKER) {
             let token = unquote_storage_value(token);
             match pathname_expand_array_token(&token, env_vars) {
@@ -772,6 +777,46 @@ pub(super) fn array_assignment_has_subscript(left: &str) -> bool {
     left.strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
         .is_some()
+}
+
+/// Quote removal for a `[sub]=value` element's value side, mirroring the
+/// element pipeline above: GNU dequotes every quote pair
+/// (subst.c:4807 dequote_string), so `'x'a"y'` stores `xa"y`, not
+/// `x'a"y`. A lone `$'...'` word stays on the unquote_storage_value path,
+/// which ANSI-C decodes and tags decoded quotes itself (issue #109).
+fn dequote_compound_element_rhs(rhs: &str) -> String {
+    if has_unescaped_quote(rhs)
+        && !(rhs.starts_with("$'") && rhs.ends_with('\''))
+        && !rhs.starts_with('\x1d')
+    {
+        restore_quote_carriers(&remove_shell_quotes(rhs))
+    } else {
+        rhs.to_string()
+    }
+}
+
+/// True when the token is exactly one quoted span: the opening quote's
+/// matching close is the last character. GNU quote removal
+/// (subst.c:4807 dequote_string -> dequote_escapes:4692) removes every
+/// quote pair in the word, so `'x'a"b'y'` is NOT fully quoted — its first
+/// `'` closes at index 2 and the rest is unquoted text. Inside `'` quotes
+/// a backslash is literal; inside `"` it escapes the next char
+/// (subst.c string_extract_double_quoted).
+fn token_is_fully_quoted(token: &str) -> bool {
+    let mut chars = token.char_indices().peekable();
+    let Some((_, quote @ ('\'' | '"'))) = chars.next() else {
+        return false;
+    };
+    while let Some((index, ch)) = chars.next() {
+        if quote == '"' && ch == '\\' {
+            chars.next();
+            continue;
+        }
+        if ch == quote {
+            return index + ch.len_utf8() == token.len();
+        }
+    }
+    false
 }
 
 /// True when the raw token has whitespace outside every quote pair (GNU

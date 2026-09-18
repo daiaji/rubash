@@ -356,11 +356,23 @@ impl Executor {
             return Some(value.to_string());
         };
         let mut out = String::with_capacity(inner.len());
-        let bytes = inner.as_bytes();
         let mut index = 0usize;
         let mut token_start = true;
         while index < inner.len() {
-            let ch = bytes[index] as char;
+            // GNU expand_compound_array_assignment (arrayfunc.c:557) hands the
+            // stored list to parse_string_to_word_list (arrayfunc.c:580),
+            // which copies element text verbatim as bytes — multibyte
+            // characters and carrier bytes pass through untouched. Decode
+            // whole chars here: `bytes[index] as char` latin-1-promoted every
+            // UTF-8 byte, corrupting both non-ASCII elements (`x=(é)` stored
+            // `Ã©`) and the PUA data-quote carriers (U+E010/U+E011 stand in
+            // for the CTLESC protection GNU gives decoded $'...' quotes via
+            // sh_single_quote at parse.y:5566-5575 — issue #109: `x=($'a"b')`
+            // leaked the marker bytes as î\x80\x91).
+            let ch = inner[index..]
+                .chars()
+                .next()
+                .expect("index < inner.len() yields a char");
             // A `[` at a token start may begin a `[sub]=value` element.
             if ch == '[' && token_start {
                 if let Some((sub_end, after)) = scan_compound_subscript(inner, index) {
@@ -436,10 +448,9 @@ impl Executor {
                 }
             }
             out.push(ch);
-            index += 1;
+            index += ch.len_utf8();
             token_start = ch.is_ascii_whitespace();
         }
-        let _ = bytes;
         Some(format!("({out})"))
     }
 }
