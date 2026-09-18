@@ -9,6 +9,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::{Mutex, OnceLock};
 
 use super::support_names::split_shell_path;
@@ -354,6 +356,63 @@ pub fn external_command_for_program(
     external_command_for_named_program(program, None, args, env_vars)
 }
 
+/// Append already-expanded arguments to a child command line.
+///
+/// GNU shell_execve (execute_cmd.c:6139+) hands execve the word list that
+/// expand_word_internal produced, so a quoted wildcard reaches the child
+/// literally and nothing ever expands it again. MSYS2- and WinuxCmd-hosted
+/// children instead glob wildcard characters in *unquoted* command-line
+/// arguments themselves (CRT wildcard expansion): `ls "*.txt"` reached the
+/// child as a bare `*.txt` token and was expanded a second time
+/// (niubash#119, rubash-side of #83). Rubash already ran pathname expansion
+/// with quote suppression in expand_command_words, so every `*`/`?`/`[`
+/// surviving in an argument is literal — emit those arguments quoted so the
+/// child runtime does not re-expand them. Command processors that reparse
+/// their own line (cmd.exe batch, PowerShell -File) keep plain .args().
+fn push_external_args(command: &mut Command, args: &[String]) {
+    for arg in args {
+        #[cfg(windows)]
+        {
+            if arg.contains(['*', '?', '[']) {
+                command.raw_arg(windows_quoted_wildcard_arg(arg));
+                continue;
+            }
+        }
+        command.arg(arg);
+    }
+}
+
+/// Quote one argument for a Windows command line so the child's argv sees
+/// the text literally (no CRT wildcard expansion). Follows the
+/// CommandLineToArgvW rules: wrap in double quotes, escape embedded `"` as
+/// `\"`, and double a backslash run that directly precedes the closing quote.
+#[cfg(windows)]
+fn windows_quoted_wildcard_arg(arg: &str) -> String {
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0usize;
+    for ch in arg.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        for _ in 0..backslashes {
+            quoted.push('\\');
+        }
+        backslashes = 0;
+        if ch == '"' {
+            quoted.push_str("\\\"");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    for _ in 0..backslashes {
+        quoted.push_str("\\\\");
+    }
+    quoted.push('"');
+    quoted
+}
+
 pub fn external_command_for_named_program(
     program: &Path,
     command_name: Option<&str>,
@@ -400,13 +459,13 @@ pub fn external_command_for_named_program(
         if let Some(shell) = find_shell(env_vars) {
             let mut command = Command::new(shell);
             command.arg(program);
-            command.args(&native_args);
+            push_external_args(&mut command, &native_args);
             return (command, true);
         }
         if let Some(shell) = current_shell_processor() {
             let mut command = Command::new(shell);
             command.arg(program);
-            command.args(&native_args);
+            push_external_args(&mut command, &native_args);
             return (command, true);
         }
     }
@@ -423,7 +482,7 @@ pub fn external_command_for_named_program(
             }
         }
     }
-    command.args(&native_args);
+    push_external_args(&mut command, &native_args);
     // For `sh -c '...'` without an explicit $0, Bash sets $0 to the shell
     // name (e.g. "/bin/sh" for `/bin/sh -c 'echo $0'`). WinuxCmd's sh.exe
     // defaults to "niu" in that case, so inject the logical name as $0
