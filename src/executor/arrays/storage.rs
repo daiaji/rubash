@@ -129,6 +129,23 @@ pub(in crate::executor) fn store_indexed_array(
 }
 
 pub(in crate::executor) fn quote_array_value(value: &str) -> String {
+    // The element value reaching storage may still carry the lexer's
+    // data-quote markers for $'...'-decoded quotes (U+E010/U+E011, the
+    // CTLESC analog for the protection GNU gives decoded bytes via
+    // sh_single_quote at parse.y:5566-5575). The markers exist so
+    // intermediate quote removal can tell data quotes from syntax quotes;
+    // the array cell holds the real character, exactly like GNU's
+    // assign_compound_array_list stores the dequoted word bytes
+    // (arrayfunc.c:700+). Restoring here — at the storage serialization
+    // boundary — keeps the rendered \x1d(...) form printable verbatim by
+    // declare -p (a bare marker inside "..." printed raw) while
+    // decode_rendered_array_value still hands readers the real quote
+    // (issue #109: `x=($'a"b')` then `declare -p x` printed the E011
+    // carrier bytes instead of "a\"b").
+    let value = value
+        .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
+        .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
+    let value = value.as_str();
     // GNU array.c array_to_assign (947-989) / array_to_kvpair (895-945):
     // every element value goes through ansic_quote when it holds a
     // non-printing character (strtrans.c ansic_shouldquote, 341-361) and

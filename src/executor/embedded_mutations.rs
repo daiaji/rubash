@@ -180,6 +180,20 @@ impl Executor {
                 continue;
             }
 
+            if ch == '\u{e102}' {
+                // DATA_DOUBLE_QUOTE (assignment_expansion.rs): the compound
+                // hoist encodes the lexer's \x18 quote sentinels as E102 so
+                // they pass through untouched. They still delimit a "..."
+                // region for quote-state tracking (GNU parse.y:5305
+                // read_token_word keeps the dquote bit on the word), which
+                // is what makes `$'` literal inside it (issue #109).
+                if matches!(context, SubstitutionQuoteContext::Unquoted) {
+                    in_double = !in_double;
+                }
+                output.push(ch);
+                continue;
+            }
+
             // Quotes that survive to expansion belong to parameter-expansion
             // bodies (the lexer keeps `${...}` verbatim). GNU removes them
             // only in unquoted expansions; a double-quoted expansion keeps
@@ -227,6 +241,17 @@ impl Executor {
                 if alternate && closed && output.len() == span_start {
                     output.push(QUOTED_NULL_MARKER);
                 }
+                continue;
+            }
+
+            if ch == '\'' && in_double {
+                // GNU parse.y:5305 read_token_word only treats ' as quote
+                // syntax at unquoted level; inside a "..." region it is
+                // ordinary data. Emit the ANSI-C data-quote marker (the
+                // CTLESC-analog used for decoded $'...' quotes, quotes.rs
+                // ANSI_C_QUOTE_MARKER) so downstream quote removal can
+                // never re-read it as a quote delimiter.
+                output.push(crate::lexer::ANSI_C_QUOTE_MARKER);
                 continue;
             }
 
@@ -318,6 +343,18 @@ impl Executor {
                         '"' if !matches!(context, SubstitutionQuoteContext::HereDocument) => {
                             chars.next();
                             output.push(next);
+                            continue;
+                        }
+                        // GNU dquote escape set (subst.c CBSDQUOTE): inside a
+                        // "..." region \ only escapes $ ` " \ newline, so \'
+                        // is literal backslash + quote data. Emit the
+                        // backslash self-escaped (\\) so the later
+                        // unescape pass keeps it, and the ' as the ANSI-C
+                        // data-quote marker (CTLESC-analog).
+                        '\'' if in_double => {
+                            chars.next();
+                            output.push_str("\\\\");
+                            output.push(crate::lexer::ANSI_C_QUOTE_MARKER);
                             continue;
                         }
                         // Here-document bodies expand with Q_HERE_DOCUMENT,
@@ -647,6 +684,19 @@ impl Executor {
                 }
                 Some('\'') => {
                     chars.next();
+                    if in_double {
+                        // GNU parse.y:5546-5566 read_token_word dispatches
+                        // $'...' to ansiexpand only at unquoted token level;
+                        // inside a "..." region $ is not an expansion
+                        // introducer before ' and the ' is data. Emit the $
+                        // self-escaped (\$ = literal $ for the later
+                        // unescape pass) and the ' as the ANSI-C data-quote
+                        // marker (CTLESC-analog), then keep processing the
+                        // region normally so `"$'a$y'"` still expands $y
+                        // (issue #109 class).
+                        output.push_str("\\$");
+                        output.push(crate::lexer::ANSI_C_QUOTE_MARKER);
+                    } else {
                     let mut quoted = String::new();
                     let mut escaped = false;
                     let mut closed = false;
@@ -672,7 +722,16 @@ impl Executor {
                     }
                     if closed {
                         let decoded = crate::lexer::decode_ansi_c_quoted(&quoted);
-                        if alternate {
+                        if decoded.is_empty() {
+                            // GNU parse.y:5566 wraps the ansiexpand result in
+                            // sh_single_quote, so $'' stays a QUOTED empty
+                            // word: `x=($'')` stores an empty element and
+                            // `echo a$''b` still yields `ab` after quote
+                            // removal. Emit a quoted-empty token so the word
+                            // is not dropped from the word list (issue #109
+                            // class: decoded $'...' array elements).
+                            output.push_str("\"\"");
+                        } else if alternate {
                             for ch in decoded.chars() {
                                 if matches!(ch, ' ' | '\t' | '\n') {
                                     output.push('\x1c');
@@ -736,6 +795,7 @@ impl Executor {
                         output.push('$');
                         output.push('\'');
                         output.push_str(&quoted);
+                    }
                     }
                 }
                 Some(other) => {
