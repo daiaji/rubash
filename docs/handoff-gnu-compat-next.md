@@ -1,5 +1,13 @@
 # GNU Bash Compatibility Handoff
 
+> **SUPERSEDED (2026-09-19).** This document dates from the 5.2.21-baseline
+> era. The contractual oracle is now owner-compiled GNU Bash **5.3.0** at
+> WSL `/usr/local/bin/bash` (see `AGENTS.md`). Current state:
+> `docs/audit-baseline-2026-09-19.md` (83-suite ledger @ `652c1042`,
+> 1247 diff lines / 45 zero-diff) and `docs/COMPATIBILITY-STATUS.md`
+> (authoritative status). Kept for historical detail on the mapfile/IFS/
+> posixexp2-era repairs below.
+
 Repository: D:/repo/rubash
 Branch: fresh-master
 Scope: strict GNU Bash source-driven compatibility repair
