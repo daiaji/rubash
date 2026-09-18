@@ -731,7 +731,7 @@ impl Executor {
             loop_depth: 0,
             function_depth: self.function_depth,
             dollar_vars_changed_by_set: self.dollar_vars_changed_by_set,
-            random_state: Cell::new(self.random_state.get()),
+            random_state: self.random_state.clone_state(),
             shell_pid: self.shell_pid,
             subshell_depth: Cell::new(self.subshell_depth.get() + 1),
             owns_signal_mailbox: false,

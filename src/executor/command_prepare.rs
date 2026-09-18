@@ -219,6 +219,9 @@ impl Executor {
         }
         let mut status = 0;
         for (name, value) in &cmd.assignments {
+            if std::env::var("RUBASH_DEBUG_ASSIGN").is_ok() {
+                eprintln!("EMPTY-ASSIGN {name}={value:?}");
+            }
             let assignment_result = self.expand_assignment_value_result(value);
             let expanded_value = assignment_result.value;
             let substitution_status = assignment_result.substitution_status;

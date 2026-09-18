@@ -966,6 +966,13 @@ impl Executor {
             }
         }
         let result = self.with_command_input_redirects(cmd, |executor| executor.execute_ast(&body));
+        // GNU execute_cmd.c execute_in_subshell: expr.c evalerror's
+        // jump_to_top_level(DISCARD) reaches only the forked subshell's own
+        // top level — the abort dies with the subshell (status 1) and cannot
+        // discard parent commands (`( a[$bad]=v ); echo after` prints
+        // `after` — verified GNU 5.3).
+        self.evalerror_pending.set(false);
+        self.evalerror_line.set(None);
         // Bash runs a subshell with errexit active; a failing command exits
         // the subshell with that status but the parent script continues.
         // Catch ExitCode errors at the subshell boundary. `return N` inside a

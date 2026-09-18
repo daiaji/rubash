@@ -20,35 +20,16 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     let prior_words_are_array_assignments = cmd.words.is_empty()
         || (!cmd.array_element_assignments.is_empty()
             && cmd.array_element_assignments.len() == cmd.words.len());
-    let array_element_assignment = if prior_words_are_array_assignments {
-        record_array_element_assignment_for_word(cmd, word_index, &token.value, &token.raw)
-    } else {
-        false
-    };
-    // An escaped quote in an ordinary array-assignment word is malformed
-    // arithmetic syntax, but Bash accepts the same spelling when it enters
-    // through declare/typeset or let, where the argument is evaluated by the
-    // corresponding arithmetic-aware owner. Quoted assignment-looking strings
-    // passed as arguments, such as eval payloads, must remain ordinary words.
-    // The escaped quote must be UNQUOTED: inside a quoted subscript the
-    // escape is ordinary data, and an associative array subscript is a string
-    // key, not an arithmetic expression (assoc6.sub:44
-    // `foo["bar\"bie"]="doll"` is a valid assoc assignment in 5.3.0).
-    let arithmetic_aware_command = matches!(
-        cmd.words.first().map(String::as_str),
-        Some("declare" | "typeset" | "let")
-    );
-    let embedded_arithmetic = token.raw.contains("$((") || token.raw.contains("$[");
-    if prior_words_are_array_assignments
-        && array_element_assignment
-        && !arithmetic_aware_command
-        && !embedded_arithmetic
-        && crate::parser::array_element_subscript_has_escaped_quote(&token.raw)
-    {
-        cmd.insert_assignment(
-            "__RUBASH_PARSE_ERROR__".to_string(),
-            "arithmetic syntax error: operand expected".to_string(),
-        );
+    if prior_words_are_array_assignments {
+        // NOTE: an escaped quote inside an array-element subscript
+        // (`a[\" \"]=v`) is NOT a parse-time error: the literal `"` survives
+        // word expansion as subscript data and fails inside
+        // array_expand_index's evalexp with `expr: arithmetic syntax error:
+        // operand expected (error token is "expr")` plus the DISCARD abort
+        // (verified GNU 5.3). Routing it through the real subscript evaluator
+        // also preserves the associative key case (`foo["bar\"bie"]` is
+        // valid data — assoc6.sub:44).
+        record_array_element_assignment_for_word(cmd, word_index, &token.value, &token.raw);
     }
     cmd.word_metadata
         .push(build_word_metadata(word_index, &token.value, &token.raw));

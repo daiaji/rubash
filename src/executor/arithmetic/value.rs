@@ -1,4 +1,4 @@
-use super::{ArithLValue, ConditionalArithParser};
+use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser};
 use crate::executor::arithmetic::{
     bash_arith, checked_arithmetic_pow, eval_mutable_arith_value_with_random,
     strip_arith_double_quotes,
@@ -24,10 +24,28 @@ impl ConditionalArithParser<'_> {
                 let value = value.unwrap_or_default();
                 self.evaluate_variable_text(&format!("{name}[{index}]"), &value)
             }
-            ArithLValue::IndexedRaw { .. } => {
-                // Should have been resolved by resolve_raw_subscript before
-                // reaching here; treat as a value fetch failure.
-                None
+            ArithLValue::IndexedRaw { name, subscript } => {
+                // Read context: GNU expr_streval evaluates the subscript at
+                // STR-token time (expr.c:1183 array_variable_part ->
+                // array_expand_index), once — `a[i++]` reads a[0] and
+                // increments i once (verified GNU 5.3).
+                let index = self.eval_subscript_index(subscript)?;
+                let value = self.env_vars.get(name).and_then(|value| {
+                    resolve_indexed_array_subscript(value, index)
+                        .and_then(|index| array_value_at(value, index))
+                });
+                let value = value.unwrap_or_default();
+                self.evaluate_variable_text(&format!("{name}[{index}]"), &value)
+            }
+            ArithLValue::InvalidElement { display } => {
+                // `a[]` read: GNU reports `a[]: bad array subscript` twice —
+                // array_variable_part and get_array_value each diagnose the
+                // empty subscript (expr.c:1183/1224) — then yields 0.
+                self.diags
+                    .push(ArithEvalDiag::BadSubscript(display.clone()));
+                self.diags
+                    .push(ArithEvalDiag::BadSubscript(display.clone()));
+                Some(0)
             }
             ArithLValue::Assoc { name, key } => {
                 let value = self
@@ -40,8 +58,120 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// Evaluate a raw array-subscript expression, adopting the nested
+    /// evaluation's evalerror record (GNU array_expand_index runs the
+    /// subscript through its own evalexp frame, so the diagnostic names
+    /// the subscript text — arrayfunc.c:1356-1391 — and a failure jumps
+    /// DISCARD, which the `__RUBASH_ARITH_SUBSCRIPT_EXPR` marker lets the
+    /// caller reproduce).
+    pub(super) fn eval_subscript_index(&mut self, subscript: &str) -> Option<i128> {
+        // \x1e-marker subscripts were already expanded by the caller's
+        // array_expand_index-equivalent pass (mod.rs
+        // expand_arith_indexed_subscripts); an empty expansion evaluates
+        // to 0, not to a bad subscript.
+        let stripped = match super::super::decode_arithmetic_assoc_key(subscript) {
+            Some(decoded) => decoded,
+            None => {
+                // GNU expr.c:1171: when `array_expand_once` is set and the
+                // operand was already expanded (EXP_EXPANDED — `let`'s
+                // operand; the `__RUBASH_ARITH_EXP_EXPANDED` marker is set
+                // by eval_arithmetic_command_value_with_flags), the
+                // subscript reaches evalexp verbatim (AV_NOEXPAND) — a
+                // `""`/`" "` subscript is junk, not a quote-removed empty
+                // (`let 'a[""]=26'` -> `""`: operand expected, verified GNU
+                // 5.3). Otherwise the subscript's expand_arith_string pass
+                // removes the double quotes here.
+                if self
+                    .env_vars
+                    .get("__RUBASH_ARITH_EXP_EXPANDED")
+                    .is_some_and(|v| v == "1")
+                {
+                    subscript.to_string()
+                } else {
+                    strip_arith_double_quotes(subscript)
+                }
+            }
+        };
+        if stripped.trim().is_empty() {
+            return Some(0);
+        }
+        let (value, _cat) = eval_mutable_arith_value_with_random(
+            &stripped,
+            self.env_vars,
+            self.random_state,
+        );
+        self.adopt_error(super::super::take_arith_eval_error());
+        self.adopt_diags(super::super::take_arith_eval_diags());
+        if value.is_none() {
+            self.env_vars.insert(
+                "__RUBASH_ARITH_SUBSCRIPT_EXPR".to_string(),
+                stripped.clone(),
+            );
+        }
+        value
+    }
+
+    /// GNU expr.c:269-272 pushexp: evaluation depth reaching
+    /// MAX_EXPR_RECURSION_LEVEL (1024) evalerrors "expression recursion
+    /// level exceeded" — and since pushexp runs before subexpr installs the
+    /// new frame's globals, the diagnostic still describes frame 1023: its
+    /// expression text and lasttp.
+    ///
+    /// Rubash detects the same failure either on a variable-value cycle
+    /// (the C equivalent of GNU's longjmp arriving when the depth limit is
+    /// reached inside the cycle) or on sheer depth. For a cycle
+    /// `C = resolving[j..k]` of length L detected at depth k, frame 1023
+    /// evaluates the value of `C[(1022 - k) mod L]` and its error token is
+    /// the STR read there, `C[(1023 - k) mod L]` — for `a=b; b=a` GNU
+    /// prints `b: expression recursion level exceeded (error token is
+    /// "b")`.
+    fn record_recursion_error(&mut self, name: &str) {
+        if self.error.is_some() {
+            return;
+        }
+        let (expr, tok_name) = match self.resolving.iter().position(|r| r == name) {
+            Some(j) => {
+                let l = self.resolving.len() - j;
+                // The cycle resolving[j..] repeats: name at depth d is
+                // resolving[j + (d - j) % l]. GNU fails in pushexp before
+                // frame 1024 installs, so the diagnostic describes frame
+                // 1023: the expression is the value of the name resolved at
+                // depth 1022, the error token the STR read at depth 1023.
+                let expr_name = self.resolving[j + (1022usize - j) % l].clone();
+                let tok_name = self.resolving[j + (1023usize - j) % l].clone();
+                (
+                    self.env_vars
+                        .get(&expr_name)
+                        .cloned()
+                        .unwrap_or(expr_name),
+                    tok_name,
+                )
+            }
+            // Depth hit without a detected cycle: this frame is 1023, so
+            // its own input is the displayed expression and the STR being
+            // resolved is the error token.
+            None => (
+                String::from_utf8_lossy(self.input).into_owned(),
+                name.to_string(),
+            ),
+        };
+        let tok_start = expr.find(tok_name.as_str()).unwrap_or(0);
+        let display_end = expr.len();
+        self.error = Some(super::ArithEvalError {
+            expr,
+            msg: "expression recursion level exceeded".to_string(),
+            tok_start,
+            display_end,
+        });
+    }
+
     pub(super) fn variable_value(&mut self, name: &str) -> Option<i128> {
-        if self.resolving.iter().any(|resolving| resolving == name) {
+        // GNU expr.c:271 pushexp: only DEPTH is bounded — a name resolving
+        // to itself is legal while the recursion converges
+        // (arith6.sub: `a[0]` holding `(a[n]=++n)<7&&a[0]` recurses until
+        // n reaches 7; `a=a` errors only at depth 1024).
+        if self.resolving.len() >= 1023 {
+            self.record_recursion_error(name);
             return None;
         }
         if name == "RANDOM" {
@@ -97,11 +227,10 @@ impl ConditionalArithParser<'_> {
         resolving_name: &str,
         value: &str,
     ) -> Option<i128> {
-        if self
-            .resolving
-            .iter()
-            .any(|resolving| resolving == resolving_name)
-        {
+        // GNU expr.c:271: same depth-only bound as variable_value —
+        // re-entering a name is how convergent self-recursion works.
+        if self.resolving.len() >= 1023 {
+            self.record_recursion_error(resolving_name);
             return None;
         }
 
@@ -118,19 +247,38 @@ impl ConditionalArithParser<'_> {
         let mut parser = ConditionalArithParser {
             input: value.as_bytes(),
             pos: 0,
-            env_vars: self.env_vars,
+            env_vars: &mut *self.env_vars,
             resolving,
             random_state: self.random_state,
             error_category: None,
             no_expand: false,
+            error: None,
+            diags: Vec::new(),
+            last_tok_start: 0,
+            last_tok_operand: false,
         };
-        let value = parser.parse_comma()?;
+        let value = parser.parse_comma();
         parser.skip_ws();
-        let category = parser.error_category;
-        if category.is_some() {
-            self.error_category = category;
+        let complete = parser.pos == parser.input.len();
+        if !complete {
+            // GNU expr.c:484-485: the nested frame's subexpr evalerrors on
+            // its own trailing input ("in expression") before unwinding.
+            parser.record_trailing();
         }
-        (parser.pos == parser.input.len()).then_some(value)
+        if let Some(category) = parser.error_category {
+            self.error_category = Some(category);
+        }
+        // GNU expr.c: the nested subexpr frame's evalerror ran through the
+        // shared globals — its expression text and lasttp are what the
+        // diagnostic prints (expr.c:1241 expr_streval -> subexpr).
+        let inner_error = parser.error.take();
+        let inner_diags = std::mem::take(&mut parser.diags);
+        self.adopt_error(inner_error);
+        self.adopt_diags(inner_diags);
+        if !complete {
+            return None;
+        }
+        value
     }
 
     pub(super) fn update_lvalue(
@@ -139,12 +287,16 @@ impl ConditionalArithParser<'_> {
         delta: i128,
         prefix: bool,
     ) -> Option<i128> {
-        if !self.lvalue_is_writable(lvalue) {
+        // GNU expr.c:1081-1105: post-inc/dec reads the STR's value via
+        // expr_streval first (an IndexedRaw subscript evaluates here, once),
+        // then binds the saved lvalue.
+        let lvalue = self.resolve_raw_subscript(lvalue)?;
+        if !self.lvalue_is_writable(&lvalue) {
             return None;
         }
-        let current = self.lvalue_value(lvalue)?;
+        let current = self.lvalue_value(&lvalue)?;
         let updated = bash_arith(current + delta);
-        self.set_lvalue(lvalue, updated);
+        self.set_lvalue(&lvalue, updated);
         Some(if prefix { updated } else { current })
     }
 
@@ -197,29 +349,10 @@ impl ConditionalArithParser<'_> {
     fn resolve_raw_subscript(&mut self, lvalue: &ArithLValue) -> Option<ArithLValue> {
         match lvalue {
             ArithLValue::IndexedRaw { name, subscript } => {
-                let stripped = strip_arith_double_quotes(subscript);
-                if stripped.trim().is_empty() {
-                    return Some(ArithLValue::Indexed {
-                        name: name.clone(),
-                        index: 0,
-                    });
-                }
-                let (value, _cat) = eval_mutable_arith_value_with_random(
-                    &stripped,
-                    self.env_vars,
-                    self.random_state,
-                );
-                if value.is_none() {
-                    // GNU expr.c evalerror from the nested subscript evalexp
-                    // (array_expand_index) reports the subscript text.
-                    self.env_vars.insert(
-                        "__RUBASH_ARITH_SUBSCRIPT_EXPR".to_string(),
-                        stripped.clone(),
-                    );
-                }
+                let index = self.eval_subscript_index(subscript)?;
                 Some(ArithLValue::Indexed {
                     name: name.clone(),
-                    index: value?,
+                    index,
                 })
             }
             other => Some(other.clone()),
@@ -232,6 +365,9 @@ impl ConditionalArithParser<'_> {
             | ArithLValue::Indexed { name, .. }
             | ArithLValue::IndexedRaw { name, .. }
             | ArithLValue::Assoc { name, .. } => name,
+            // `a[]` has no writable name — GNU's bind fails later with
+            // `not a valid identifier`; there is no readonly check.
+            ArithLValue::InvalidElement { .. } => return true,
         };
         if is_marked_var(self.env_vars, READONLY_VARS, name) {
             self.env_vars
@@ -247,6 +383,14 @@ impl ConditionalArithParser<'_> {
             ArithLValue::Indexed { name, index } => self.set_array_element(name, *index, value),
             ArithLValue::IndexedRaw { .. } => {
                 // Should have been resolved by resolve_raw_subscript; no-op.
+            }
+            ArithLValue::InvalidElement { display } => {
+                // `a[]` on the bind side: GNU expr_bind_variable ->
+                // bind_variable fails the `a[]` name via sh_invalidid —
+                // `` `a[]': not a valid identifier `` (non-fatal; the
+                // expression value is unaffected).
+                self.diags
+                    .push(ArithEvalDiag::InvalidIdentifier(display.clone()));
             }
             ArithLValue::Assoc { name, key } => self.set_assoc_element(name, key, value),
         }
@@ -275,7 +419,14 @@ impl ConditionalArithParser<'_> {
         }
         if name == "RANDOM" {
             if let Some(state) = self.random_state {
-                state.set(value.parse::<u32>().unwrap_or(0));
+                // GNU variables.c:1393-1408 assign_random: a non-numeric
+                // value fails valid_number and returns without reseeding;
+                // a numeric seed runs sbrand — rseed = seed,
+                // last_random_value = 0.
+                if let Ok(seed) = value.trim().parse::<i64>() {
+                    state.rseed.set(seed as u32);
+                    state.last_value.set(0);
+                }
             }
         }
         if name == "SRANDOM" {

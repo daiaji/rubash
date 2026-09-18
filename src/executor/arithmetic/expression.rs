@@ -5,17 +5,24 @@ use crate::executor::arithmetic::{
 use crate::executor::{is_shell_name_char, is_shell_name_start};
 
 impl ConditionalArithParser<'_> {
+    /// GNU expr.c:496-508 expcomma.
     pub(in crate::executor::arithmetic) fn parse_comma(&mut self) -> Option<i128> {
         let mut value = self.parse_assignment()?;
         loop {
             self.skip_ws();
-            if !self.consume(",") {
+            if self.peek() != Some(b',') {
                 return Some(value);
             }
+            self.note_op(self.pos);
+            self.pos += 1;
             value = self.parse_assignment()?;
         }
     }
 
+    /// GNU expr.c:511-626 expassign. A bare assignment target behind
+    /// `&&`/`||` or a ternary branch is still a parse-level "attempted
+    /// assignment to non-variable" (expr.c:528-529) — the assignment
+    /// operator trails an operand position whose lasttok is not STR.
     pub(super) fn parse_assignment(&mut self) -> Option<i128> {
         self.skip_ws();
         let start = self.pos;
@@ -28,23 +35,46 @@ impl ConditionalArithParser<'_> {
             // (e.g. `a[n]=++n` stores at a[1], not a[0]).
             let lvalue = self.parse_lvalue_for_assignment()?;
             self.skip_ws();
+            let op_start = self.pos;
             if let Some(op) = self.consume_assignment_operator() {
+                self.note_op(op_start);
+                self.skip_ws();
+                let rhs_start = self.pos;
                 let rhs = self.parse_assignment()?;
+                // GNU expr.c:549-555: `a /= 0` / `a %= 0` evalerrors
+                // "division by 0" with lasttp at the RHS operand.
+                if matches!(op, "/=" | "%=") && rhs == 0 {
+                    return self.fail("division by 0", rhs_start);
+                }
                 return self.assign_lvalue(&lvalue, op, rhs);
             }
         }
         self.pos = start;
-        self.parse_conditional()
+        let value = self.parse_conditional()?;
+        self.skip_ws();
+        if assignment_operator_at(self.input, self.pos).is_some() {
+            // GNU expr.c:521-529: curtok is EQ/OP_ASSIGN but lasttok is not
+            // STR — any preceding reduction (`x + y = 9`, `(x) = 5`,
+            // `a ? b : c = 5`, `x++ = 7`, `9 = 8`) set lasttok to the
+            // operator/NUM/RPAR/COND kind, so this is "attempted assignment
+            // to non-variable" with lasttp at the operator. The failure
+            // fires inside the RHS's own expassign call, so an outer
+            // pending bind (`x = 9 = 8`) never happens.
+            return self.fail("attempted assignment to non-variable", self.pos);
+        }
+        Some(value)
     }
 
-    pub(super) fn assignment_lvalue_is_next(&self) -> bool {
+    /// Byte offset of the assignment operator following an lvalue-shaped
+    /// run of text, or None when the text is not `name[...]? OP=`. Used to
+    /// point lasttp at the operator for "attempted assignment to
+    /// non-variable" (GNU expr.c:528-529).
+    pub(super) fn assignment_op_start(&self) -> Option<usize> {
         let mut pos = self.pos;
         skip_arith_ws(self.input, &mut pos);
-        let Some(first) = self.input.get(pos).copied().map(char::from) else {
-            return false;
-        };
+        let first = self.input.get(pos).copied().map(char::from)?;
         if !is_shell_name_start(first) {
-            return false;
+            return None;
         }
         pos += 1;
         while self
@@ -73,63 +103,109 @@ impl ConditionalArithParser<'_> {
                 pos += 1;
             }
             if depth != 0 {
-                return false;
+                return None;
             }
         }
         skip_arith_ws(self.input, &mut pos);
-        assignment_operator_at(self.input, pos).is_some()
+        assignment_operator_at(self.input, pos).map(|_| pos)
     }
 
+    pub(super) fn assignment_lvalue_is_next(&self) -> bool {
+        self.assignment_op_start().is_some()
+    }
+
+    /// GNU expr.c:630-674 expcond. The `?` branch is parsed with
+    /// EXP_LOWEST (commas allowed); the `:` branch is parsed with expcond
+    /// only, so a trailing assignment operator there is caught by the outer
+    /// expassign with lasttok==COND -> "attempted assignment to
+    /// non-variable" (`1 ? 20 : x+=2` reports `+=2`).
     pub(super) fn parse_conditional(&mut self) -> Option<i128> {
         let condition = self.parse_logical_or()?;
         self.skip_ws();
-        if !self.consume("?") {
+        if self.peek() != Some(b'?') {
             return Some(condition);
+        }
+        self.note_op(self.pos);
+        self.pos += 1;
+        self.skip_ws();
+        // GNU expr.c:645-647: `?` followed by `:` or end-of-input ->
+        // "expression expected", checked before the true branch regardless
+        // of the condition value.
+        if self.pos >= self.input.len() || self.peek() == Some(b':') {
+            let tok = if self.pos < self.input.len() {
+                self.pos
+            } else {
+                self.last_tok_start
+            };
+            return self.fail("expression expected", tok);
         }
 
         if condition == 0 {
             self.skip_arithmetic_conditional_branch(&[":"]);
             self.skip_ws();
-            if !self.consume(":") {
-                return None;
+            // GNU expr.c:653-654: no `:` -> "`:' expected for conditional
+            // expression" with lasttp at the current token.
+            if self.peek() != Some(b':') {
+                let tok = if self.pos < self.input.len() {
+                    self.pos
+                } else {
+                    self.last_tok_start
+                };
+                return self.fail("`:' expected for conditional expression", tok);
+            }
+            self.note_op(self.pos);
+            self.pos += 1;
+            self.skip_ws();
+            // GNU expr.c:663-665: `:` at end-of-input -> "expression
+            // expected" (token is the `:`).
+            if self.pos >= self.input.len() {
+                return self.fail("expression expected", self.last_tok_start);
             }
             return self.parse_conditional();
         }
 
         let true_value = self.parse_comma()?;
         self.skip_ws();
-        if !self.consume(":") {
-            return None;
+        if self.peek() != Some(b':') {
+            let tok = if self.pos < self.input.len() {
+                self.pos
+            } else {
+                self.last_tok_start
+            };
+            return self.fail("`:' expected for conditional expression", tok);
         }
-        if self.assignment_lvalue_is_next() {
+        self.note_op(self.pos);
+        self.pos += 1;
+        self.skip_ws();
+        if self.pos >= self.input.len() {
+            return self.fail("expression expected", self.last_tok_start);
+        }
+        if let Some(op_pos) = self.assignment_op_start() {
+            // GNU expr.c:528-529 via 666: the false branch is expcond, so an
+            // assignment operator trails it -> non-variable (token = the op).
             self.skip_arithmetic_conditional_branch(&[",", ")", ":"]);
-            return None;
+            return self.fail("attempted assignment to non-variable", op_pos);
         }
-        let false_start = self.pos;
         self.skip_arithmetic_conditional_branch(&[",", ")", ":"]);
-        if self.input[false_start..self.pos]
-            .iter()
-            .all(|byte| byte.is_ascii_whitespace())
-        {
-            return None;
-        }
         Some(true_value)
     }
 
+    /// GNU expr.c:678-702 explor.
     pub(super) fn parse_logical_or(&mut self) -> Option<i128> {
         let mut left = self.parse_logical_and()?;
         loop {
             self.skip_ws();
-            if !self.consume("||") {
+            if !self.starts_with("||") {
                 return Some(left);
             }
+            self.note_op(self.pos);
+            self.pos += 2;
             self.skip_ws();
-            if self.assignment_lvalue_is_next() {
+            if let Some(op_pos) = self.assignment_op_start() {
                 // GNU names this case explicitly: assignment targets must be
-                // variables even behind || evaluation.
-                self.error_category =
-                    Some(super::super::ArithmeticErrorCategory::NonVariableAssignment);
-                return None;
+                // variables even behind || evaluation (expr.c:528-529, the
+                // `=` trails the `||` operand -> lasttok is LOR, not STR).
+                return self.fail("attempted assignment to non-variable", op_pos);
             }
             if left != 0 {
                 self.skip_arithmetic_rhs(&["||", ",", "?", ":", ")"]);
@@ -141,18 +217,19 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// GNU expr.c:705-729 expland.
     pub(super) fn parse_logical_and(&mut self) -> Option<i128> {
         let mut left = self.parse_bitwise_or()?;
         loop {
             self.skip_ws();
-            if !self.consume("&&") {
+            if !self.starts_with("&&") {
                 return Some(left);
             }
+            self.note_op(self.pos);
+            self.pos += 2;
             self.skip_ws();
-            if self.assignment_lvalue_is_next() {
-                self.error_category =
-                    Some(super::super::ArithmeticErrorCategory::NonVariableAssignment);
-                return None;
+            if let Some(op_pos) = self.assignment_op_start() {
+                return self.fail("attempted assignment to non-variable", op_pos);
             }
             if left == 0 {
                 self.skip_arithmetic_rhs(&["&&", "||", ",", "?", ":", ")"]);
@@ -163,14 +240,27 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// GNU expr.c:1497-1500: `x=` where `x` is one of `*/%+-&^|` (or the
+    /// `<<`/`>>`/`**` compounds) tokenizes as a single OP_ASSIGN — never as
+    /// a binary operator followed by `=`. Binary-op loops must therefore
+    /// leave `op=` text alone so expassign can report "attempted assignment
+    /// to non-variable" with lasttp at the whole operator (`x + y += 9`
+    /// reports `+= 9 `, not an operand-expected `=`).
+    fn at_assignment_op(&self) -> bool {
+        assignment_operator_at(self.input, self.pos).is_some()
+    }
+
+    /// GNU expr.c:732-746 expbitor.
     pub(super) fn parse_bitwise_or(&mut self) -> Option<i128> {
         let mut left = self.parse_bitwise_xor()?;
         loop {
             self.skip_ws();
-            if self.starts_with("||") {
+            if self.starts_with("||") || self.at_assignment_op() {
                 return Some(left);
             }
-            if self.consume("|") {
+            if self.peek() == Some(b'|') {
+                self.note_op(self.pos);
+                self.pos += 1;
                 left = bash_arith(left | self.parse_bitwise_xor()?);
             } else {
                 return Some(left);
@@ -178,11 +268,17 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// GNU expr.c:749-763 expbitxor.
     pub(super) fn parse_bitwise_xor(&mut self) -> Option<i128> {
         let mut left = self.parse_bitwise_and()?;
         loop {
             self.skip_ws();
-            if self.consume("^") {
+            if self.at_assignment_op() {
+                return Some(left);
+            }
+            if self.peek() == Some(b'^') {
+                self.note_op(self.pos);
+                self.pos += 1;
                 left = bash_arith(left ^ self.parse_bitwise_and()?);
             } else {
                 return Some(left);
@@ -190,14 +286,17 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// GNU expr.c:766-780 expbitand.
     pub(super) fn parse_bitwise_and(&mut self) -> Option<i128> {
         let mut left = self.parse_comparison()?;
         loop {
             self.skip_ws();
-            if self.starts_with("&&") {
+            if self.starts_with("&&") || self.at_assignment_op() {
                 return Some(left);
             }
-            if self.consume("&") {
+            if self.peek() == Some(b'&') {
+                self.note_op(self.pos);
+                self.pos += 1;
                 left = bash_arith(left & self.parse_comparison()?);
             } else {
                 return Some(left);
@@ -205,38 +304,58 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// GNU expr.c:783-831 expcompar.
     pub(super) fn parse_comparison(&mut self) -> Option<i128> {
         let mut left = self.parse_shift()?;
         loop {
             self.skip_ws();
-            let result = if self.consume("==") {
-                left == self.parse_shift()?
-            } else if self.consume("!=") {
-                left != self.parse_shift()?
-            } else if self.consume(">=") {
-                left >= self.parse_shift()?
-            } else if self.consume("<=") {
-                left <= self.parse_shift()?
-            } else if self.consume(">") {
-                left > self.parse_shift()?
-            } else if self.consume("<") {
-                left < self.parse_shift()?
+            let op_start = self.pos;
+            let result = if self.starts_with("==") {
+                self.pos += 2;
+                Some(left == self.parse_shift()?)
+            } else if self.starts_with("!=") {
+                self.pos += 2;
+                Some(left != self.parse_shift()?)
+            } else if self.starts_with(">=") {
+                self.pos += 2;
+                Some(left >= self.parse_shift()?)
+            } else if self.starts_with("<=") {
+                self.pos += 2;
+                Some(left <= self.parse_shift()?)
+            } else if self.peek() == Some(b'>') {
+                self.pos += 1;
+                Some(left > self.parse_shift()?)
+            } else if self.peek() == Some(b'<') {
+                self.pos += 1;
+                Some(left < self.parse_shift()?)
             } else {
+                None
+            };
+            let Some(result) = result else {
                 return Some(left);
             };
+            self.note_op(op_start);
             left = i128::from(result);
         }
     }
 
+    /// GNU expr.c:834-848 expshift.
     pub(super) fn parse_shift(&mut self) -> Option<i128> {
         let mut value = self.parse_expr()?;
         loop {
             self.skip_ws();
-            if self.consume("<<") {
+            if self.at_assignment_op() {
+                return Some(value);
+            }
+            if self.starts_with("<<") {
+                self.note_op(self.pos);
+                self.pos += 2;
                 let rhs = self.parse_expr()?;
                 let shift = u32::try_from(rhs).ok()?;
                 value = bash_arith((value as i64).wrapping_shl(shift) as i128);
-            } else if self.consume(">>") {
+            } else if self.starts_with(">>") {
+                self.note_op(self.pos);
+                self.pos += 2;
                 let rhs = self.parse_expr()?;
                 let shift = u32::try_from(rhs).ok()?;
                 value = bash_arith((value as i64).wrapping_shr(shift) as i128);
@@ -246,16 +365,22 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// GNU expr.c:851-865 expaddsub.
     pub(super) fn parse_expr(&mut self) -> Option<i128> {
         let mut value = self.parse_term()?;
         loop {
             self.skip_ws();
+            if self.at_assignment_op() {
+                return Some(value);
+            }
             match self.peek() {
                 Some(b'+') => {
+                    self.note_op(self.pos);
                     self.pos += 1;
                     value = bash_arith(value + self.parse_term()?);
                 }
                 Some(b'-') => {
+                    self.note_op(self.pos);
                     self.pos += 1;
                     value = bash_arith(value - self.parse_term()?);
                 }
@@ -264,35 +389,43 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// GNU expr.c:868-937 expmuldiv — "division by 0" evalerrors with
+    /// lasttp at the RHS operand start (unary sign included, expr.c:911).
     pub(super) fn parse_term(&mut self) -> Option<i128> {
         let mut value = self.parse_power()?;
         loop {
             self.skip_ws();
+            if self.at_assignment_op() {
+                return Some(value);
+            }
             match self.peek() {
                 Some(b'*') => {
                     if self.starts_with("**") {
                         return Some(value);
                     }
+                    self.note_op(self.pos);
                     self.pos += 1;
                     value = bash_arith(value * self.parse_power()?);
                 }
                 Some(b'/') => {
+                    self.note_op(self.pos);
                     self.pos += 1;
+                    self.skip_ws();
+                    let rhs_start = self.pos;
                     let rhs = self.parse_power()?;
                     if rhs == 0 {
-                        self.error_category =
-                            Some(super::super::ArithmeticErrorCategory::DivisionByZero);
-                        return None;
+                        return self.fail("division by 0", rhs_start);
                     }
                     value = bash_arith((value as i64).wrapping_div(rhs as i64) as i128);
                 }
                 Some(b'%') => {
+                    self.note_op(self.pos);
                     self.pos += 1;
+                    self.skip_ws();
+                    let rhs_start = self.pos;
                     let rhs = self.parse_power()?;
                     if rhs == 0 {
-                        self.error_category =
-                            Some(super::super::ArithmeticErrorCategory::DivisionByZero);
-                        return None;
+                        return self.fail("division by 0", rhs_start);
                     }
                     // GNU expr.c:923-926: INTMAX_MIN % -1 is 0 (avoids
                     // SIGFPE from undefined behavior on x86).
@@ -307,11 +440,27 @@ impl ConditionalArithParser<'_> {
         }
     }
 
+    /// GNU expr.c:940-1000 exppower — a negative exponent evalerrors
+    /// "exponent less than 0" with lasttp at the exponent's NUM token
+    /// (`2 ** -1` reports `1`, not `-1`).
     pub(super) fn parse_power(&mut self) -> Option<i128> {
         let value = self.parse_factor()?;
         self.skip_ws();
-        if self.consume("**") {
+        if self.starts_with("**") && !self.at_assignment_op() {
+            self.note_op(self.pos);
+            self.pos += 2;
+            self.skip_ws();
+            // GNU lasttp is the first digit of the exponent: unary `-`
+            // is its own token.
+            let mut tok = self.pos;
+            if matches!(self.input.get(tok), Some(b'-') | Some(b'+')) {
+                tok += 1;
+                skip_arith_ws(self.input, &mut tok);
+            }
             let rhs = self.parse_power()?;
+            if rhs < 0 {
+                return self.fail("exponent less than 0", tok);
+            }
             checked_arithmetic_pow(value, rhs)
         } else {
             Some(value)

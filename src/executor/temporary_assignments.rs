@@ -9,11 +9,19 @@ impl Executor {
         assignments: &[(String, String)],
     ) {
         for (name, value) in assignments {
+            if std::env::var("RUBASH_DEBUG_ASSIGN").is_ok() {
+                eprintln!("ASSIGN {name}={value:?}");
+            }
             let expanded_value = self.expand_assignment_value(value);
             // GNU subst.c:10404+ expand_word_error -> DISCARD: a failed
             // assignment word (failglob no-match, readonly violation, ...)
             // abandons the rest of this command's assignment list.
             if !self.apply_shell_assignment(name, expanded_value) {
+                // GNU subst.c:10404+ expand_word_error -> DISCARD: the failed
+                // assignment reports status 1 and the evalerror abort armed
+                // inside the apply path bounds the discard to this command
+                // list.
+                self.exit_code = 1;
                 break;
             }
             // GNU variables.c make_variable_value: an integer-attribute
@@ -312,14 +320,23 @@ impl Executor {
                 if integer {
                     // Real evaluator: resolves shell variables like GNU's
                     // expr.c evaluation (flix=9 -> 9, not the storage-shape 0).
-                    (self.eval_integer_assignment_value(&existing)
-                        + self.eval_integer_assignment_value(value))
-                    .to_string()
+                    // evalerror here DISCARDs like any make_variable_value
+                    // failure (variables.c:2920-2952).
+                    let Some(existing) = self.eval_integer_assignment_checked(&existing) else {
+                        return false;
+                    };
+                    let Some(value) = self.eval_integer_assignment_checked(value) else {
+                        return false;
+                    };
+                    (existing + value).to_string()
                 } else {
                     append_scalar_value(&existing, value)
                 }
             } else if integer {
-                self.eval_integer_assignment_value(value).to_string()
+                match self.eval_integer_assignment_checked(value) {
+                    Some(result) => result.to_string(),
+                    None => return false,
+                }
             } else {
                 value.to_string()
             };
@@ -381,14 +398,22 @@ impl Executor {
         let current_element = entries.get(&index).cloned().unwrap_or_default();
         let element = if append {
             if integer {
-                (self.eval_integer_assignment_value(&current_element)
-                    + self.eval_integer_assignment_value(value))
-                .to_string()
+                let Some(current_element) = self.eval_integer_assignment_checked(&current_element)
+                else {
+                    return false;
+                };
+                let Some(value) = self.eval_integer_assignment_checked(value) else {
+                    return false;
+                };
+                (current_element + value).to_string()
             } else {
                 append_scalar_value(&current_element, value)
             }
         } else if integer {
-            self.eval_integer_assignment_value(value).to_string()
+            match self.eval_integer_assignment_checked(value) {
+                Some(result) => result.to_string(),
+                None => return false,
+            }
         } else {
             value.to_string()
         };
@@ -397,6 +422,41 @@ impl Executor {
             .insert(elem_base.to_string(), format_indexed_array_storage(entries));
         self.exit_code = 0;
         true
+    }
+
+    /// GNU variables.c:2920-2952 make_variable_value: an integer-attribute
+    /// assignment evaluates the word through evalexp — for `name+=value` the
+    /// CURRENT cell is evaluated first (ksh93 semantics), then the rhs. A
+    /// failure runs evalerror and, without ASS_NOLONGJMP (only internal
+    /// rebinds set it), jump_to_top_level(DISCARD): the variable keeps its
+    /// old value and the rest of the command list is discarded
+    /// (`declare -i x; x=4+; x+=7; echo after` prints the diagnostic, leaves
+    /// x alone, and never reaches `echo after`). Returns None on failure
+    /// after reporting and arming the evalerror abort.
+    fn eval_integer_assignment_checked(&mut self, value: &str) -> Option<i128> {
+        if let Some(result) =
+            crate::executor::arithmetic::eval_conditional_arith_value(value, &self.env_vars)
+        {
+            return Some(result);
+        }
+        let message =
+            crate::executor::arithmetic::take_arith_eval_error().map(|record| record.render(true));
+        let message = message.or_else(|| {
+            crate::executor::arithmetic::arithmetic_error_message(value, false, &self.env_vars)
+        });
+        if let Some(message) = message {
+            let line = format!("{}{}\n", self.assignment_diagnostic_prefix(), message);
+            self.emit_assignment_diag(line);
+        }
+        // Do NOT set arithmetic_expansion_error here: every caller maps the
+        // None return to `false`, so the flag has no promotion consumer and
+        // would survive into the NEXT command's expand_assignment_value_result
+        // (assignment_expansion.rs:295), silently aborting it as if its own
+        // expansion had failed (`declare -i i; i=0#4\ni=3+` lost the `3+`
+        // diagnostic). The DISCARD abort is already armed by
+        // raise_evalerror_abort (GNU expr.c evalerror -> jump_to_top_level).
+        self.raise_evalerror_abort();
+        None
     }
 
     /// GNU builtins call bind_variable while `this_command_name` is the
@@ -683,8 +743,13 @@ impl Executor {
             return true;
         }
         if base_name == "RANDOM" && !append {
-            self.random_state
-                .set(value.trim().parse::<u32>().unwrap_or(0));
+            // GNU variables.c:1393-1408 assign_random: a non-numeric value
+            // fails valid_number and returns without reseeding; a numeric
+            // seed runs sbrand — rseed = seed, last_random_value = 0.
+            if let Ok(seed) = value.trim().parse::<i64>() {
+                self.random_state.rseed.set(seed as u32);
+                self.random_state.last_value.set(0);
+            }
             set_process_env(base_name, value);
             return true;
         }
@@ -766,8 +831,15 @@ impl Executor {
                     }
                 }
             } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
-                let current = self.eval_integer_assignment_value(&current);
-                let value = self.eval_integer_assignment_value(&value);
+                // GNU variables.c:2922-2935: `x+=v` on an integer variable
+                // evaluates the current value first — its evalerror is just
+                // as fatal as the rhs one, and neither bind happens.
+                let Some(current) = self.eval_integer_assignment_checked(&current) else {
+                    return false;
+                };
+                let Some(value) = self.eval_integer_assignment_checked(&value) else {
+                    return false;
+                };
                 (current + value).to_string()
             } else {
                 append_scalar_value(&current, &value)
@@ -814,8 +886,10 @@ impl Executor {
             // assignment becomes an array only when it contains indexed o
             // multiple elements; the single arithmetic expression is still
             // assigned through the integer attribute.
-            self.eval_integer_assignment_value(&value[1..value.len() - 1])
-                .to_string()
+            match self.eval_integer_assignment_checked(&value[1..value.len() - 1]) {
+                Some(result) => result.to_string(),
+                None => return false,
+            }
         } else if compound_assignment
             && value.starts_with('(')
             && value.ends_with(')')
@@ -838,24 +912,12 @@ impl Executor {
                 }
             }
         } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
-            // GNU variables.c make_variable_value with integer attribute calls
-            // evalexp -> strlong, which reports "invalid number" / "invalid
-            // arithmetic base" etc. via evalerror. We mirror that here: if the
-            // arithmetic evaluation fails, report the error and store empty.
-            let (result, _category) =
-                eval_conditional_arith_value_categorized(&value, &self.env_vars);
-            if result.is_none() {
-                if let Some(msg) =
-                    crate::executor::arithmetic::arithmetic_error_message(&value, false, &self.env_vars)
-                {
-                    let line = format!("{}{}
-", self.assignment_diagnostic_prefix(), msg);
-                    self.emit_assignment_diag(line);
-                }
-                self.arithmetic_expansion_error.set(true);
-                String::new()
-            } else {
-                result.unwrap_or(0).to_string()
+            // GNU variables.c:2937-2946 make_variable_value: evalexp failure
+            // reports through evalerror and jump_to_top_level(DISCARD)s — the
+            // variable keeps its previous value, it is not stored as empty.
+            match self.eval_integer_assignment_checked(&value) {
+                Some(result) => result.to_string(),
+                None => return false,
             }
         } else {
             value
