@@ -623,7 +623,25 @@ impl Executor {
         *subshell.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
         subshell.stdout_capture = Some(Vec::new());
 
-        let result = subshell.execute_ast(&ast);
+        // GNU subst.c:7356-7359 command_substitute: without inherit_errexit
+        // the substitution child runs `builtin_ignoring_errexit = 0` and
+        // `change_flag ('e', FLAG_OFF)` — it clears the -e *flag itself*, so
+        // an explicit `set -e` inside the body re-enables it (set-e.tests
+        // `x=$(set -e; false; echo bad)` prints nothing). A suppression
+        // counter would keep -e dead even after `set -e`. POSIX mode
+        // enables inherit_errexit (set-e1.sub).
+        let posix_mode =
+            subshell.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
+        let inherit_errexit =
+            crate::builtins::shopt::option_enabled(&subshell.env_vars, "inherit_errexit");
+        let result = if posix_mode || inherit_errexit {
+            subshell.execute_ast(&ast)
+        } else {
+            subshell.suppress_errexit = 0;
+            subshell.env_vars.remove("__RUBASH_ERREXIT");
+            crate::builtins::set::set_shell_option(&mut subshell.env_vars, "errexit", false);
+            subshell.execute_ast(&ast)
+        };
         let mut status = command_substitution_result_status(result, subshell.exit_code);
         // Bash runs EXIT in the command-substitution child, so an EXIT trap
         // installed by the body contributes its output to captured stdout.

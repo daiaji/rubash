@@ -298,7 +298,7 @@ pub(super) fn matching_brace_group_end(tokens: &[Token], start: usize) -> Option
             continue;
         }
 
-        if is_boundary_keyword(tokens, index, "{") {
+        if is_boundary_keyword(tokens, index, "{") || word_command_open_brace(tokens, index) {
             depth += 1;
         } else if is_boundary_keyword(tokens, index, "}") {
             // GNU parse.y requires a completed command before a brace-group
@@ -320,6 +320,62 @@ pub(super) fn matching_brace_group_end(tokens: &[Token], start: usize) -> Option
     }
 
     None
+}
+
+/// GNU's grammar puts `{` in command position after constructs whose
+/// rubash token stream shows it following a WORD or a non-boundary
+/// keyword, so `command_boundary_keyword_allowed` alone misses it:
+/// `coproc [NAME] {` (parse.y:1125-1174 `coproc: COPROC [WORD]
+/// shell_command`), `function NAME {` (function_def `FUNCTION WORD
+/// command`), and the pipeline prefixes `!`, `time`, `time -p`,
+/// `time --` (parse.y `time_pipeline`, `BANG`). Without this, the `{` is
+/// invisible to the depth scan and that group's `}` is mistaken for the
+/// enclosing brace's close (type4.sub `mkcoprocs`: `coproc a { cat
+/// <<EOF1 ... }` aborted the whole function parse).
+/// The walk leftwards consumes only genuine command prefixes, so
+/// `echo coproc a {` and `foo bar {` keep `{` as a plain word.
+fn word_command_open_brace(tokens: &[Token], index: usize) -> bool {
+    if !is_keyword(tokens, index, "{") {
+        return false;
+    }
+    let mut j = index;
+    let mut saw_prefix = false;
+    while j > 0 {
+        let prev = &tokens[j - 1];
+        match prev.kind {
+            TokenKind::Keyword => match prev.value.as_str() {
+                // BANG negation, TIME, and `coproc {`/`function {`
+                // (the latter malformed in GNU but harmless to accept).
+                "!" | "time" | "coproc" | "function" => {
+                    saw_prefix = true;
+                    j -= 1;
+                }
+                _ => return false,
+            },
+            TokenKind::Word => match prev.value.as_str() {
+                // `time -p` / `time --` options (TIMEOPT/TIMEIGN).
+                "-p" | "--" => j -= 1,
+                _ => {
+                    // A WORD directly before `{` is a command argument
+                    // (`echo a {`) unless it is a coproc/function name,
+                    // which must directly follow its keyword.
+                    if j >= 2
+                        && matches!(tokens[j - 2].kind, TokenKind::Keyword)
+                        && matches!(tokens[j - 2].value.as_str(), "coproc" | "function")
+                    {
+                        saw_prefix = true;
+                        j -= 2;
+                        continue;
+                    }
+                    return false;
+                }
+            },
+            // A separator or other non-word token: `{` opens a group only
+            // when the walk consumed at least one command prefix.
+            _ => return saw_prefix,
+        }
+    }
+    saw_prefix
 }
 
 pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {

@@ -20,7 +20,9 @@ pub(crate) const SHOPT_OPTIONS: &[&str] = &[
     "compat43",
     "compat44",
     "complete_fullquote",
-    "completion_strip_exe",
+    // GNU builtins/shopt.def:178-270 (shopt_vars): `completion_strip_exe`
+    // is a Cygwin-only entry; upstream GNU 5.3 has no such shopt option, so
+    // it must not be enumerated or accepted.
     "direxpand",
     "dirspell",
     "dotglob",

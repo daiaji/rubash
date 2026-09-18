@@ -725,19 +725,29 @@ impl Printer {
     fn print_coproc_command(&mut self, coproc: &CoprocCommand) {
         self.cprintf("coproc ");
         if coproc.body.is_some() {
-            if let Some(name) = &coproc.name {
-                self.cprintf(&format!("{name} "));
-            }
+            // GNU print_cmd.c:357-361 prints the coproc name for every
+            // non-simple body; unnamed coprocs are stored with the implicit
+            // name "COPROC" (parse.y:1127 make_coproc_command("COPROC", ...)).
+            let name = coproc.name.as_deref().unwrap_or("COPROC");
+            self.cprintf(&format!("{name} "));
         }
-        self.skip_this_indent += 1;
+        // GNU does `skip_this_indent++` before make_command_string_internal
+        // on the coproc's inner command node (print_cmd.c:360). This port
+        // calls the group/subshell printers directly rather than through
+        // make_command_string, so no skip is taken here — a stray skip would
+        // leak into the body's first command and eat its indent.
         if let Some(body) = &coproc.body {
             match coproc.body_kind {
                 crate::parser::CoprocBodyKind::Subshell => {
+                    // Same shape as the cm_subshell case in
+                    // make_command_string_internal (print_cmd.c:346-355),
+                    // including was_heredoc = 0 after the close paren.
                     self.cprintf("( ");
                     self.skip_this_indent += 1;
                     self.print_command_list(body);
                     self.print_deferred_heredocs("");
                     self.cprintf(" )");
+                    self.was_heredoc = false;
                 }
                 _ => self.print_group_command(body),
             }

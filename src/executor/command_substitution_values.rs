@@ -280,14 +280,7 @@ impl Executor {
         let mut status = 0;
         for name in &words[1 + first_name..] {
             let name = self.expand_word(name);
-            match self.describe_name_with_io(
-                &name,
-                mode,
-                use_standard_path,
-                false,
-                false,
-                &mut stdout,
-            ) {
+            match self.describe_name_with_io(&name, mode, use_standard_path, false, &mut stdout) {
                 Ok(true) => {}
                 Ok(false) => status = 1,
                 Err(_) => status = 1,
