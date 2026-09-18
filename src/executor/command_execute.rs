@@ -266,7 +266,21 @@ impl Executor {
             None => cmd,
         };
 
-        let mut expanded = self.expand_command_words(cmd)?;
+        // GNU execute_cmd.c execute_arith_command: the `(( ... ))`
+        // expression is expanded once (expand_arith_string, parameter and
+        // command substitutions only — no word splitting/globbing) and the
+        // expanded text is handed to evalexp. Rubash's evaluator performs
+        // that expansion itself on the raw captured expression
+        // (eval_arithmetic_command_value), so running the generic word
+        // expansion on cmd.words here would expand `$RANDOM`/`$(...)`
+        // TWICE — the first draws discarded, the second evaluated
+        // (arith3.sub `(( dice[$RANDOM...]++ ))` lost its dice[6]/dice[7]
+        // hits to doubled draws).
+        let mut expanded = if cmd.arithmetic_command.is_some() {
+            cmd.clone()
+        } else {
+            self.expand_command_words(cmd)?
+        };
         // histexp1: `echo "$( echo "\!" )"` and `echo "\!"` with `set -H` should
         // keep `\!` (with backslash) inside double quotes. `remove_shell_quotes`
         // + `expand_word` currently strips the backslash for `"\!"` when the

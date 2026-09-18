@@ -1,7 +1,5 @@
 use super::{ArithLValue, ConditionalArithParser};
-use crate::executor::arithmetic::{
-    assignment_operator_at, eval_mutable_arith_value_with_random, strip_arith_double_quotes,
-};
+use crate::executor::arithmetic::{assignment_operator_at, skip_arith_ws};
 use crate::executor::{
     is_marked_var, is_shell_name, is_shell_name_char, is_shell_name_start, strip_matching_quotes,
     ASSOC_VARS, NAMEREF_VARS,
@@ -9,9 +7,13 @@ use crate::executor::{
 use std::collections::HashSet;
 
 impl ConditionalArithParser<'_> {
-    /// Parse an lvalue for an assignment target. When the lvalue has an array
-    /// subscript, the subscript expression text is captured raw (not evaluated)
-    /// so it can be re-evaluated after the RHS, matching GNU expr.c:1395-1401.
+    /// Parse an lvalue for an assignment target. GNU expr.c:1395-1401: the
+    /// STR's value (and subscript) is evaluated at token time only when the
+    /// next token is NOT `=` — `a[sub] = rhs` keeps the raw subscript text
+    /// and the assignment machinery re-expands it at bind time, after the
+    /// RHS (`a[n]=++n` stores at a[1]). Compound assignment operators
+    /// (`a[sub] += rhs`) are not EQ, so expr_streval runs early and the
+    /// precomputed index is bound (`a[n]+=++n` stores at a[0]).
     pub(super) fn parse_lvalue_for_assignment(&mut self) -> Option<ArithLValue> {
         self.skip_ws();
         let start = self.pos;
@@ -27,11 +29,13 @@ impl ConditionalArithParser<'_> {
             .ok()?
             .to_string();
 
-        self.skip_ws();
-        if !self.consume("[") {
+        // GNU expr.c:1350: `[` must immediately follow the name — `a [0]`
+        // is STR `a` followed by the junk char `[`.
+        if self.peek() != Some(b'[') {
             let name = self.resolved_lvalue_name(&name);
             return Some(ArithLValue::Scalar(name));
         }
+        self.pos += 1;
 
         let resolved_name = self.resolved_lvalue_name(&name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
@@ -43,17 +47,42 @@ impl ConditionalArithParser<'_> {
             });
         }
 
-        // Capture the raw subscript text for deferred evaluation.
-        let subscript = self.collect_raw_subscript()?;
-        Some(ArithLValue::IndexedRaw {
-            name: resolved_name,
-            subscript,
-        })
+        if self.peek() == Some(b']') {
+            // `a[]` — STR token `a[]`; the bind fails with
+            // `` `a[]': not a valid identifier `` (expr_bind_variable ->
+            // sh_invalidid) but the expression keeps evaluating.
+            self.pos += 1;
+            return Some(ArithLValue::InvalidElement {
+                display: format!("{resolved_name}[]"),
+            });
+        }
+
+        let subscript = self.collect_raw_subscript(start)?;
+
+        // GNU readtok's peektok: `=` (exactly EQ) defers the subscript;
+        // any other assignment operator evaluated it during expr_streval.
+        let mut op_pos = self.pos;
+        skip_arith_ws(self.input, &mut op_pos);
+        match assignment_operator_at(self.input, op_pos) {
+            Some("=") => Some(ArithLValue::IndexedRaw {
+                name: resolved_name,
+                subscript,
+            }),
+            _ => {
+                let index = self.eval_subscript_index(&subscript)?;
+                Some(ArithLValue::Indexed {
+                    name: resolved_name,
+                    index,
+                })
+            }
+        }
     }
 
     /// Collect the raw text between `[` and `]` without evaluating it.
-    fn collect_raw_subscript(&mut self) -> Option<String> {
-        self.skip_ws();
+    /// `str_start` is the position of the STR token's name — GNU's lasttp
+    /// for an unterminated subscript (expr.c:1365-1367 evalerror
+    /// `bad array subscript`).
+    fn collect_raw_subscript(&mut self, str_start: usize) -> Option<String> {
         let start = self.pos;
         let mut depth = 1usize;
         let mut single = false;
@@ -82,6 +111,7 @@ impl ConditionalArithParser<'_> {
             }
             self.pos += 1;
         }
+        self.fail("bad array subscript", str_start);
         None
     }
 
@@ -100,11 +130,15 @@ impl ConditionalArithParser<'_> {
             .ok()?
             .to_string();
 
-        self.skip_ws();
-        if !self.consume("[") {
+        // GNU expr.c:1350: `[` must immediately follow the name
+        // characters — `a [0]` is STR `a` then junk `[` -> "invalid
+        // arithmetic operator" (verified: `(( a [0] ))` reports
+        // `(error token is "[0] ")`).
+        if self.peek() != Some(b'[') {
             let name = self.resolved_lvalue_name(&name);
             return Some(ArithLValue::Scalar(name));
         }
+        self.pos += 1;
 
         let resolved_name = self.resolved_lvalue_name(&name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
@@ -115,100 +149,28 @@ impl ConditionalArithParser<'_> {
             });
         }
 
-        let index = {
-            self.skip_ws();
-            if self.consume("]") {
-                0
-            } else if self.peek() == Some(b'"') || self.peek() == Some(b'\'') {
-                let expression = self.collect_quoted_index_expression()?;
-                let expression = strip_arith_double_quotes(&expression);
-                if expression.is_empty() {
-                    self.error_category =
-                        Some(super::super::ArithmeticErrorCategory::EmptyArraySubscript);
-                    return None;
-                }
-                match eval_mutable_arith_value_with_random(
-                    &expression,
-                    self.env_vars,
-                    self.random_state,
-                )
-                .0
-                {
-                    Some(index) => index,
-                    None => {
-                        // GNU expr.c evalerror from the nested subscript
-                        // evalexp reports the SUBSCRIPT text, not the whole
-                        // expression (arrayfunc.c array_expand_index).
-                        self.env_vars.insert(
-                            "__RUBASH_ARITH_SUBSCRIPT_EXPR".to_string(),
-                            expression,
-                        );
-                        return None;
-                    }
-                }
-            } else {
-                // Capture the subscript text before evaluating so a failure
-                // can be reported with the subscript as expr_name, matching
-                // GNU's nested evalexp inside array_expand_index.
-                let subscript_start = self.pos;
-                let index = match self.parse_comma() {
-                    Some(index) => index,
-                    None => {
-                        if let Some(text) =
-                            raw_subscript_text_at(self.input, subscript_start)
-                        {
-                            self.env_vars.insert(
-                                "__RUBASH_ARITH_SUBSCRIPT_EXPR".to_string(),
-                                text,
-                            );
-                        }
-                        return None;
-                    }
-                };
-                self.skip_ws();
-                if !self.consume("]") {
-                    return None;
-                }
-                index
-            }
-        };
-        Some(ArithLValue::Indexed {
-            name: resolved_name,
-            index,
-        })
-    }
-
-    fn collect_quoted_index_expression(&mut self) -> Option<String> {
-        let start = self.pos;
-        let mut bracket_depth = 0usize;
-        let mut single = false;
-        let mut double = false;
-        let mut escaped = false;
-        while let Some(ch) = self.peek() {
+        if self.peek() == Some(b']') {
+            // `a[]` — STR `a[]`; reads report `a[]: bad array subscript`
+            // (twice — array_variable_part and get_array_value), writes
+            // report `` `a[]': not a valid identifier ``. `a[ ]`/`a[""]`
+            // are NOT this: their subscript text is non-empty and
+            // evaluates to 0.
             self.pos += 1;
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == b'\\' && !single {
-                escaped = true;
-                continue;
-            }
-            match ch {
-                b'\'' if !double => single = !single,
-                b'"' if !single => double = !double,
-                b'[' if !single && !double => bracket_depth += 1,
-                b']' if !single && !double && bracket_depth > 0 => bracket_depth -= 1,
-                b']' if !single && !double => {
-                    let expression = std::str::from_utf8(&self.input[start..self.pos - 1])
-                        .ok()?
-                        .to_string();
-                    return Some(expression);
-                }
-                _ => {}
-            }
+            return Some(ArithLValue::InvalidElement {
+                display: format!("{resolved_name}[]"),
+            });
         }
-        None
+
+        // The subscript expression is captured raw; it is evaluated when
+        // the lvalue's value is fetched (readtok's STR processing runs
+        // expr_streval, expr.c:1397) — once, not twice, since GNU's
+        // get_array_value reuses array_variable_part's work for the
+        // side-effectful cases.
+        let subscript = self.collect_raw_subscript(start)?;
+        Some(ArithLValue::IndexedRaw {
+            name: resolved_name,
+            subscript,
+        })
     }
 
     pub(super) fn resolved_lvalue_name(&self, name: &str) -> String {
@@ -322,34 +284,4 @@ impl ConditionalArithParser<'_> {
         self.pos += op.len();
         Some(op)
     }
-}
-
-/// Return the raw subscript text between `[`-depth boundaries starting at
-/// `start` (which is just past the opening `[`). Used for GNU expr.c
-/// evalerror reporting: a failed nested subscript evalexp names the
-/// subscript text, not the enclosing expression.
-fn raw_subscript_text_at(input: &[u8], start: usize) -> Option<String> {
-    let mut pos = start;
-    let mut depth = 1usize;
-    let mut single = false;
-    let mut double = false;
-    while pos < input.len() {
-        match input[pos] {
-            b'\\' => pos += 1,
-            b'\'' if !double => single = !single,
-            b'"' if !single => double = !double,
-            b'[' if !single && !double => depth += 1,
-            b']' if !single && !double => {
-                depth -= 1;
-                if depth == 0 {
-                    return std::str::from_utf8(&input[start..pos])
-                        .ok()
-                        .map(str::to_string);
-                }
-            }
-            _ => {}
-        }
-        pos += 1;
-    }
-    None
 }

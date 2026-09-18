@@ -184,9 +184,13 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                     out.push('\x17');
                 } else if escaped == '"' {
                     if subscript_depth > 0 {
-                        // Inside a subscript the de-escaped quote is data for
-                        // the subscript parser (`a[\" \"]=15` keeps `a[" "]=15`).
-                        out.push('"');
+                        // Inside a subscript the escaped quote is still CTLESC
+                        // data: `a[\" \"]=15` reaches array_expand_index as the
+                        // literal text `" "` and fails "operand expected"
+                        // (GNU 5.3 verified). Emit the data-double-quote
+                        // marker — a bare `"` is re-read as a quote delimiter
+                        // by the expansion walker and silently stripped.
+                        out.push('\x18');
                     } else {
                         // `\"` outside quotes is a literal double quote that
                         // must survive as data: downstream expansion scanners

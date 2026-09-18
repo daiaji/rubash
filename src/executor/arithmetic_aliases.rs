@@ -44,10 +44,20 @@ impl Executor {
         expression: &str,
         trailing_space: bool,
     ) {
-        // GNU expr.c evalerror -> jump_to_top_level (DISCARD): the rest of
-        // the failing command's list is discarded.
-        self.raise_evalerror_abort();
-        if let Some(token) = arithmetic_division_by_zero_token(expression) {
+        // GNU expr.c evalerror longjmps only to the innermost evalexp
+        // (expr.c:429-445). For `((`/`let`/`[[` that frame belongs to the
+        // command itself — expok==0 makes it a status-1 continuation
+        // (execute_cmd.c:3940+, let.def, test.c arithcomp), not a command
+        // list abort; DISCARD is chosen only by array_expand_index /
+        // make_variable_value / word-expansion callers.
+        if let Some(record) = crate::executor::arithmetic::take_arith_eval_error() {
+            eprintln!(
+                "{}{}: {}",
+                self.diagnostic_prefix(),
+                label,
+                record.render(true)
+            );
+        } else if let Some(token) = arithmetic_division_by_zero_token(expression) {
             eprintln!(
                 "{}{}: {expression}: division by 0 (error token is \"{token}\")",
                 self.diagnostic_prefix(),
@@ -145,7 +155,17 @@ impl Executor {
         if self.report_subscript_eval_failure() {
             return;
         }
-        self.raise_evalerror_abort();
+        // Nonfatal: `((` and arithmetic-for sections return status 1 and
+        // continue (the evalerror longjmp only reaches the command's own
+        // evalexp frame).
+        let record_opt = crate::executor::arithmetic::take_arith_eval_error();
+        if let Some(record) = record_opt {
+            let rendered = record.render(true);
+            eprintln!("{}((: {}", self.diagnostic_prefix(), rendered);
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+            return;
+        }
         let display = raw_display.trim_start_matches([' ', '\t']);
         if let Some(message) =
             crate::executor::arithmetic::arithmetic_command_error_message(display, false)
@@ -181,15 +201,18 @@ impl Executor {
         // legal_variable_starter(c) is ISALPHA(c) || (c == '_'), so '$' is
         // not a valid operand character. When the evaluator sees '$var'
         // after an operator, it reports "operand expected" with the '$var'
-        // token. Detect ANY $var reference (defined or not) for let context.
-        if let Some(token) = dollar_var_operand_token(expression) {
-            eprintln!(
-                "{}let: {expression}: arithmetic syntax error: operand expected (error token is \"{token}\")",
-                self.diagnostic_prefix()
-            );
-            use std::io::Write;
-            let _ = std::io::stderr().flush();
-            return;
+        // token. The recorded evalerror carries that token already; the
+        // text scan is the fallback for paths that never reached the parser.
+        if crate::executor::arithmetic::peek_arith_eval_error().is_none() {
+            if let Some(token) = dollar_var_operand_token(expression) {
+                eprintln!(
+                    "{}let: {expression}: arithmetic syntax error: operand expected (error token is \"{token}\")",
+                    self.diagnostic_prefix()
+                );
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+                return;
+            }
         }
         self.report_arithmetic_error_with_label("let", expression, true);
     }
@@ -244,7 +267,12 @@ impl Executor {
         // preserve original whitespace.
         let xtrace_expr = raw_expression.unwrap_or(expression);
         self.xtrace_print_arith_cmd(xtrace_expr);
-        let eval_result = self.eval_arithmetic_command_value(expression);
+        // GNU parse.y parse_arith_cmd captures the text between `((` and `))`
+        // verbatim (whitespace included) and execute_arith_command hands it to
+        // evalexp after expand_arith_string. The parser's joined `expression`
+        // loses that whitespace (`x ++ = 7 ` keeps the blank before `))` in
+        // every GNU diagnostic), so the raw slice is the faithful eval input.
+        let eval_result = self.eval_arithmetic_command_value(raw_expression.unwrap_or(expression));
         // An invalid nameref-cell assignment inside `((` fails the command
         // with status 1 even though the expression itself evaluated.
         if self.report_arithmetic_nameref_error(Some("((")) {
@@ -404,20 +432,12 @@ impl Executor {
             }
             let expression = arithmetic_expression_arg(&expression);
             // GNU let.def:102 evalexp(arg, EXP_EXPANDED): the operand was
-            // word-expanded once already. With array_expand_once that is the
-            // final text — expr.c:1171 AV_NOEXPAND feeds it to evalexp
-            // verbatim (a surviving `$(...)` is "operand expected"). Without
-            // the option, array_expand_index expand_arith_string re-expands
-            // the subscript, so a `$(...)` produced by the first expansion
-            // executes here.
-            value = if crate::builtins::shopt::option_enabled(
-                &self.env_vars,
-                "array_expand_once",
-            ) {
-                self.eval_arithmetic_command_value_no_expand(&expression)
-            } else {
-                self.eval_arithmetic_command_value(&expression)
-            };
+            // word-expanded once already — top-level `$name`/`$(...)` is
+            // readtok junk ("operand expected"), never re-expanded. Indexed
+            // subscripts still expand inside array_expand_index unless
+            // `shopt -s array_expand_once` (expr.c:1171 AV_NOEXPAND);
+            // eval handles that internally.
+            value = self.eval_arithmetic_command_value_no_expand(&expression);
             if value.is_none() {
                 self.report_let_arithmetic_error(&expression);
                 return 1;

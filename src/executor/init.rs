@@ -136,7 +136,7 @@ impl Executor {
             loop_depth: 0,
             function_depth: 0,
             dollar_vars_changed_by_set: false,
-            random_state: Cell::new(current_epoch_micros() as u32),
+            random_state: RandomGen::seeded(),
             shell_pid,
             subshell_depth: Cell::new(0),
             owns_signal_mailbox,

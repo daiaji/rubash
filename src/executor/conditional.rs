@@ -593,28 +593,38 @@ impl Executor {
     ) -> i32 {
         let left_expanded = self.expand_word(left);
         let right_expanded = self.expand_word(right);
-        // GNU conditional.c -> test.c arithcomp -> evalexp: the operands are
-        // already word-expanded, so a surviving `$name`/`$(...)` is data —
-        // expr.c readtok fails it "operand expected" rather than executing
-        // it again. Evaluate under the no-expand rules.
+        // GNU execute_cmd.c:4049-4068 -> test.c:357-372 arithcomp -> evalexp:
+        // the operands were word-expanded by cond_expand_word (mode 3,
+        // Q_ARITH). Under compat>51 arithcomp passes eflag=0, so
+        // already_expanded is false and array_expand_index expands indexed
+        // subscripts unconditionally (expr.c:1171 — the array_expand_once
+        // gate needs already_expanded set). A surviving top-level
+        // `$name`/`$(...)` is still readtok junk -> "operand expected"
+        // (expr.c:1502-1510), hence no_expand inside the parser.
+        let left_eval = self.expand_arith_indexed_subscripts(&left_expanded);
         let (Some(left_val), _) = eval_mutable_arith_value_with_random_flags(
-            &left_expanded,
+            &left_eval,
             &mut self.env_vars,
             Some(&self.random_state),
             true,
         ) else {
-            self.report_conditional_arithmetic_error(&left_expanded);
+            self.flush_arith_diags(Some("[["));
+            self.report_conditional_arithmetic_error(&left_eval);
             return 1;
         };
+        self.flush_arith_diags(Some("[["));
+        let right_eval = self.expand_arith_indexed_subscripts(&right_expanded);
         let (Some(right_val), _) = eval_mutable_arith_value_with_random_flags(
-            &right_expanded,
+            &right_eval,
             &mut self.env_vars,
             Some(&self.random_state),
             true,
         ) else {
-            self.report_conditional_arithmetic_error(&right_expanded);
+            self.flush_arith_diags(Some("[["));
+            self.report_conditional_arithmetic_error(&right_eval);
             return 1;
         };
+        self.flush_arith_diags(Some("[["));
         let matched = match op {
             "-eq" => left_val == right_val,
             "-ne" => left_val != right_val,

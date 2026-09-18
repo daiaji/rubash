@@ -101,6 +101,65 @@ impl Executor {
             // failing command's list — the commands sharing its source
             // line (`a[$x]=v; echo after` never prints `after`).
             if self.evalerror_pending.get() {
+                // An evalerror raised INSIDE a `( )` subshell reaches only
+                // that subshell's own top level: GNU forked it, so
+                // jump_to_top_level(DISCARD) discards the subshell's
+                // remaining commands and the parent list continues
+                // (`( a[$bad]=v; echo skipped ); echo after` prints
+                // `after` — verified GNU 5.3). The subshell's commands share
+                // this flat list, so discard forward and let the boundary
+                // marker restore the saved parent state.
+                if subshell_env.is_some() {
+                    if command.subshell_end {
+                        if let Some((old_stdin, old_offset)) = subshell_stdin.take() {
+                            if old_stdin.is_empty() {
+                                self.env_vars.remove(FUNCTION_STDIN);
+                                self.env_vars.remove(FUNCTION_STDIN_OFFSET);
+                            } else {
+                                self.env_vars.insert(FUNCTION_STDIN.to_string(), old_stdin);
+                                self.env_vars
+                                    .insert(FUNCTION_STDIN_OFFSET.to_string(), old_offset);
+                            }
+                        }
+                        if let Some(saved_env) = subshell_env.take() {
+                            self.restore_shell_env(saved_env);
+                        }
+                        if let Some(saved_pipestatus) = subshell_pipestatus.take() {
+                            self.pipestatus = saved_pipestatus;
+                        }
+                        if let Some(saved_depth) = subshell_depth.take() {
+                            self.subshell_depth.set(saved_depth);
+                        }
+                        if let Some(saved_dir) = subshell_cwd.take() {
+                            let _ = env::set_current_dir(saved_dir);
+                        }
+                        if let Some(saved_variables) = subshell_variables.take() {
+                            self.shell_state.variables = saved_variables;
+                        }
+                        if let Some(saved_positional) = subshell_positional.take() {
+                            self.set_positional_params(saved_positional);
+                        }
+                        if let Some(saved_loop_depth) = subshell_loop_depth.take() {
+                            self.loop_depth = saved_loop_depth;
+                        }
+                        self.evalerror_pending.set(false);
+                        self.evalerror_line.set(None);
+                    }
+                    index += 1;
+                    continue;
+                }
+                // The subshell-boundary error arm already tore the subshell
+                // down (subshell_env is None) but left this list's closing
+                // marker behind: skip the marker and end the abort — GNU's
+                // jump_to_top_level(DISCARD) cannot cross the forked
+                // subshell boundary, so same-line parent commands still run
+                // (`( a[\" \"]=v ); echo after` prints `after`).
+                if command.subshell_end {
+                    self.evalerror_pending.set(false);
+                    self.evalerror_line.set(None);
+                    index += 1;
+                    continue;
+                }
                 if self.evalerror_exec_depth.get() > 1 {
                     return Ok(());
                 }
@@ -108,6 +167,14 @@ impl Executor {
                     self.evalerror_line.set(self.reader_command_line.get());
                 }
                 let boundary = self.evalerror_line.get();
+                if std::env::var("RUBASH_DEBUG_EVALERR").is_ok() {
+                    eprintln!(
+                        "EVALERR-SKIP? cmd.line={:?} boundary={:?} reader={:?}",
+                        command.line,
+                        boundary,
+                        self.reader_command_line.get()
+                    );
+                }
                 if boundary.is_some() && command.line == boundary {
                     index += 1;
                     continue;
@@ -978,6 +1045,12 @@ impl Executor {
             self.maybe_run_error_trap(command)?;
 
             if command.subshell_end {
+                // A pending evalerror was raised inside the subshell that just
+                // ended: GNU's jump_to_top_level(DISCARD) cannot cross the
+                // forked process boundary, so the abort dies with the
+                // subshell (`( a[$bad]=v ); echo after` runs `after`).
+                self.evalerror_pending.set(false);
+                self.evalerror_line.set(None);
                 if let Some((old_stdin, old_offset)) = subshell_stdin.take() {
                     if old_stdin.is_empty() {
                         self.env_vars.remove(FUNCTION_STDIN);

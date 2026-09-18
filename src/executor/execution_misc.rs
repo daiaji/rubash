@@ -591,16 +591,81 @@ fn protect_unmatched_double_quoted_backticks(source: &str) -> String {
     output
 }
 
-pub(in crate::executor) fn next_random_from_state(state: &Cell<u32>) -> u32 {
-    let next = state.get().wrapping_mul(1_103_515_245).wrapping_add(12_345);
-    state.set(next);
-    (next / 65_536) % 32_768
+/// GNU lib/sh/random.c state: `rseed` is RANDOM's Park-Miller seed
+/// (random.c:51), `last_value` backs get_random_number's resample-on-repeat
+/// loop (variables.c:1428-1431, reset to 0 by sbrand on every `RANDOM=`
+/// assignment), and `rseed32` is SRANDOM's separate seed (random.c:132) so
+/// SRANDOM draws never perturb the RANDOM sequence.
+#[derive(Debug)]
+pub(in crate::executor) struct RandomGen {
+    pub rseed: Cell<u32>,
+    pub last_value: Cell<u32>,
+    pub rseed32: Cell<u32>,
 }
 
-pub(in crate::executor) fn next_srandom_from_state(state: &Cell<u32>) -> u32 {
-    let high = next_random_from_state(state);
-    let low = next_random_from_state(state);
-    (high << 17) ^ (low << 2) ^ (current_epoch_micros() as u32)
+impl RandomGen {
+    /// GNU variables.c:663-664 seeds both generators from genseed()
+    /// (time/uid/pid mix) at startup; epoch microseconds is the rubash
+    /// equivalent of that entropy.
+    pub(in crate::executor) fn seeded() -> Self {
+        let seed = current_epoch_micros() as u32;
+        Self {
+            rseed: Cell::new(seed),
+            last_value: Cell::new(0),
+            rseed32: Cell::new(seed ^ 0x9e37_79b9),
+        }
+    }
+
+    /// Command/process substitution clones carry the seeds over (GNU
+    /// reseeds from genseed on pid change, which rubash cannot observe).
+    pub(in crate::executor) fn clone_state(&self) -> Self {
+        Self {
+            rseed: Cell::new(self.rseed.get()),
+            last_value: Cell::new(self.last_value.get()),
+            rseed32: Cell::new(self.rseed32.get()),
+        }
+    }
+}
+
+/// GNU lib/sh/random.c:57-78 intrand32 — the Park-Miller "minimal standard"
+/// generator x(n+1) = 16807*x(n) mod 2147483647 with Schrage splitting
+/// (q=127773, r=2836); a zero seed is replaced by 123459876.
+fn intrand32(last: u32) -> u32 {
+    let ret = if last == 0 { 123_459_876u32 } else { last };
+    let h = ret / 127_773;
+    let l = ret % 127_773;
+    let t = 16_807i64 * i64::from(l) - 2_836i64 * i64::from(h);
+    if t < 0 {
+        (t + 0x7fff_ffff) as u32
+    } else {
+        t as u32
+    }
+}
+
+/// GNU lib/sh/random.c:99-113 brand() + variables.c:1424-1431
+/// get_random_number: fold the 31-bit seed to 15 bits via
+/// `(rseed >> 16) ^ (rseed & 65535)` (the shell_compatibility_level > 50
+/// path) and resample while the draw repeats the previous value.
+pub(in crate::executor) fn next_random_from_state(state: &RandomGen) -> u32 {
+    loop {
+        let rseed = intrand32(state.rseed.get());
+        state.rseed.set(rseed);
+        let ret = ((rseed >> 16) ^ (rseed & 65_535)) & 32_767;
+        if ret != state.last_value.get() {
+            state.last_value.set(ret);
+            return ret;
+        }
+    }
+}
+
+/// GNU lib/sh/random.c:140-146 brand32. SRANDOM on Linux reads
+/// getrandom(2) (random.c:226-240 get_urandom32) so its values are entropy
+/// and unseedable; this deterministic fallback only needs to stay off
+/// RANDOM's rseed.
+pub(in crate::executor) fn next_srandom_from_state(state: &RandomGen) -> u32 {
+    let rseed = intrand32(state.rseed32.get());
+    state.rseed32.set(rseed);
+    rseed & 0x7fff_ffff
 }
 
 pub(in crate::executor) fn strip_shebang(source: &str) -> &str {

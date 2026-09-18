@@ -472,7 +472,7 @@ pub struct Executor {
     /// GNU source.def: dollar vars changed by the set builtin during a
     /// sourced script (ARGS_SETBLTIN); gates whether source restores them.
     pub(crate) dollar_vars_changed_by_set: bool,
-    random_state: Cell<u32>,
+    random_state: RandomGen,
     shell_pid: u32,
     subshell_depth: Cell<usize>,
     owns_signal_mailbox: bool,
