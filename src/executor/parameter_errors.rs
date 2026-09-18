@@ -692,6 +692,45 @@ impl Executor {
                             1,
                         ));
                     }
+                    // GNU subst.c:7924-7934 parameter_brace_expand_indir:
+                    // for `${!name[sub]}` an unresolvable BASE variable is
+                    // an error — array_variable_part reduces to
+                    // find_variable(base), which follows namerefs, so a
+                    // nameref whose target is unset reports
+                    // `name[sub]: invalid indirect expansion` while a set
+                    // scalar/array base expands silently even when the
+                    // element itself is unset.
+                    if head_end > 0
+                        && is_shell_name(head)
+                        && tail.starts_with('[')
+                        && tail.ends_with(']')
+                    {
+                        let base_exists = match self.nameref_resolution(head) {
+                            NamerefResolution::Target(target) => {
+                                let base = target
+                                    .split('[')
+                                    .next()
+                                    .unwrap_or(target.as_str());
+                                self.env_vars.contains_key(base)
+                                    || self.shell_state.variables.get(base).is_some()
+                            }
+                            NamerefResolution::NotNameref => {
+                                self.env_vars.contains_key(head)
+                                    || self.shell_state.variables.get(head).is_some()
+                            }
+                            // Unresolved (empty/unresolvable cell), Circular,
+                            // and MaxDepth all mean find_variable returned
+                            // NULL for the base.
+                            _ => false,
+                        };
+                        if !base_exists {
+                            return Some((
+                                indirect.to_string(),
+                                "invalid indirect expansion".to_string(),
+                                1,
+                            ));
+                        }
+                    }
                 }
                 if Self::is_indirect_array_operator_expression(indirect) {
                     // GNU treats `${!name[@]<op>...}` as indirection through

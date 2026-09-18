@@ -152,6 +152,37 @@ impl Executor {
                 .get(index.saturating_sub(1))
                 .cloned()
                 .unwrap_or_default()
+        } else if let Some((base, sub)) = indirect_name
+            .split_once('[')
+            .and_then(|(base, rest)| rest.strip_suffix(']').map(|sub| (base, sub)))
+            .filter(|(base, _)| is_shell_name(base))
+        {
+            // GNU subst.c:7883-7935 parameter_brace_expand_indir: for
+            // `${!name[sub]}` the ELEMENT value becomes the indirect name
+            // — the ksh93 nameref-cell shortcut above applies to a bare
+            // name only. The base is resolved through namerefs
+            // (find_variable in array_variable_part), so `declare -n m=a`
+            // reads a[sub]; an unresolvable base was already reported as
+            // "invalid indirect expansion" by the word error scan and
+            // expands empty here.
+            let element = match self.resolved_variable_name(base) {
+                Some(resolved) => {
+                    let base_is_array = is_marked_var(&self.env_vars, ARRAY_VARS, &resolved)
+                        || is_marked_var(&self.env_vars, ASSOC_VARS, &resolved)
+                        || self.parameter_array_storage(&resolved).is_some();
+                    if base_is_array {
+                        self.array_element_parameter_value(&format!("{resolved}[{sub}]"))
+                    } else if sub == "0" {
+                        // A scalar is element [0] of an implicit array
+                        // (array_value, arrayfunc.c).
+                        self.shell_variable_value(&resolved)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
+            element.unwrap_or_default()
         } else {
             self.env_vars
                 .get(indirect_name)
