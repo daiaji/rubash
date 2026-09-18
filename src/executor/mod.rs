@@ -428,6 +428,7 @@ struct VarAttrs {
     array: bool,
     assoc: bool,
     trace: bool,
+    declared_unset: bool,
 }
 
 #[derive(Debug)]

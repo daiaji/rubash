@@ -137,6 +137,7 @@ pub(in crate::executor) fn capture_var_attrs(
         array: is_marked_var(env_vars, ARRAY_VARS, name),
         assoc: is_marked_var(env_vars, ASSOC_VARS, name),
         trace: is_marked_var(env_vars, TRACE_VARS, name),
+        declared_unset: is_marked_var(env_vars, DECLARED_UNSET_VARS, name),
     }
 }
 
@@ -154,6 +155,10 @@ pub(in crate::executor) fn set_var_attrs(
     set_marked_var(env_vars, ARRAY_VARS, name, attrs.array);
     set_marked_var(env_vars, ASSOC_VARS, name, attrs.assoc);
     set_marked_var(env_vars, TRACE_VARS, name, attrs.trace);
+    // GNU variables.c pop_scope: the frame owns the declared-but-unset
+    // mark too — a valueless `local x` (and `readonly`/`export` binding one)
+    // must not leave the name visible to `declare -p` after return.
+    set_marked_var(env_vars, DECLARED_UNSET_VARS, name, attrs.declared_unset);
 }
 
 pub(in crate::executor) fn is_valid_process_env(name: &str, value: &str) -> bool {
