@@ -1110,3 +1110,40 @@ select 3528、case 3668、arith 3920、cond 4153、simple 4506、函数入口
 调度竞态（GNU fork 即时、RB 线程启动有延迟，`{ echo g; } & wait` 两侧
 各自稳定但顺序相反）；`time` 输出格式（`real\t0m0.000s` + 前导空行 vs
 `real 0.00`）为既有格式差异。
+
+## 第二十五节：2026-09-19 ExitCode 传播修正（`exit`/errexit  unwind 语义，master `c5c97683`）
+
+**问题**：`Err(ExecuteError::ExitCode)` 在 `execute_ast_inner_body` 的每个
+复合分派臂（inverted/time/pipeline/and_or_list/brace_group）被吞成
+`self.exit_code = code`——把「shell 必须退出」错当成「命令状态」。实测：
+`set -e; { false; }` 继续跑、`{ exit 3; }` rc=0、`exit 3 && x`、
+`false || exit 3`、`time exit 3`、`if { exit 3; }; then`、
+`f() { false || exit 3; }; f` 全部违规继续。
+
+**GNU 依据**：`exit`/errexit 经 `jump_to_top_level` 展开当前 shell
+（`exit.def:152` EXITBLTIN、`execute_cmd.c:1174` ERREXIT），只有 fork 边界
+能接住——`( )` 节点（`execute_subshell_command_with_redirects`）、
+pipeline stage、comsub、`f() ( )` 扁平区域（`execute_cmd.c:1576`
+execute_in_subshell）。`{ }`/`&&`/`||`/`if`/`time` 都不构成边界。
+
+**修法（不变量修正，非逐症状）**：
+- 新 `handle_exit_code!`：`subshell_env.is_none()`（本 frame 不持有扁平
+  `( )` 区域）→ `return Err` 展开；`is_some()` → 在区域边界吸收
+  （exit_code + 快进到 `subshell_end` 之后 + 恢复保存态 + 父侧 errexit
+  复查，execute_cmd.c:1170-1175）。
+- 扁平区域的 env 保存点从 fall-through 段提升到所有类型分派之前——
+  `subshell` 标记的复合命令（`f() ( { exit 3; } )`）此前从未到达保存点，
+  导致无隔离 + ExitCode 被吞。
+
+**附带修好的存量 bug**（同族）：`f() ( { exit 3; } )` 状态丢失、
+`f() ( a=in; exit 3; echo M )` 静默退出、`f() ( exit 3 )` 死循环
+（失败命令自身即区域标记时原吸收逻辑会重入执行）。
+另：`f() ( A || exit 3 )` 等扁平区域内 `exit` 现在正确止于区域边界。
+
+**验证**：WSL GNU Bash 5.3.0 脚本文件矩阵 27/28 字节一致（仅 `time`
+缺 `real/user/sys` 计时报告——独立内建缺口，rc 已一致）。套件：
+**set-e 2→0**、trap 0、errors 3、func 0、lastpipe 0、redir 55、
+comsub 17、procsub 13、jobs 63→59、comsub2 48→44、cond 19——无回归。
+
+**已知边界**：`time cmd` 的计时报告未实现（GNU `real/user/sys` 三行，
+语义无关 ExitCode）；`select` 空 stdin 菜单重绘差异为既有项。
