@@ -1552,6 +1552,64 @@ fn grouped_background_trap_receives_kill_from_parent() {
 }
 
 #[test]
+fn background_redirected_job_releases_stdout_pipe_at_exit() {
+    // niubash#122: `sleep 2 >/dev/null 2>&1 &` must leave no copy of the
+    // caller's stdout/stderr pipe write ends in the background child, so a
+    // caller draining the pipe sees EOF when the shell exits — not when the
+    // sleep finishes. GNU leaves the async subshell's descriptors already
+    // redirected (execute_cmd.c:1761 do_redirections in execute_in_subshell).
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("sleep 2 >/dev/null 2>&1 & echo ok")
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn rubash");
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+    child.wait().expect("wait for shell exit");
+    let buf = rx
+        .recv_timeout(Duration::from_millis(1500))
+        .expect("stdout pipe must reach EOF well before the 2s sleep ends");
+    assert_eq!(buf.replace("\r\n", "\n"), "ok\n");
+}
+
+#[test]
+fn background_dup_redirects_share_one_file_description() {
+    // niubash#122 companion invariant: for `{ ...; } >f 2>&1 &` GNU runs
+    // do_redirections then dispose_redirects in the async subshell
+    // (execute_cmd.c:1761-1763), so fd1/fd2 name the SAME open file
+    // description and "err" must append after "out", not overwrite it.
+    use std::fs;
+    let dir = env::temp_dir().join(format!("rubash-bg-dup-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create bg dup temp dir");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("{ echo out; echo err >&2; } >bg-log.txt 2>&1 & wait; cat bg-log.txt")
+        .current_dir(&dir)
+        .output()
+        .expect("run background shared-file-description probe");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "out\nerr\n"
+    );
+}
+
+#[test]
 fn external_pipeline_preserves_quoted_awk_field_separator_argument() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
