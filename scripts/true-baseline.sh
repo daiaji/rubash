@@ -63,7 +63,7 @@ export LC_ALL=en_US.UTF-8
 mkdir -p "$BASE"
 if [ ! -f "$BASE/recho" ] && [ -d "$TESTS_SRC" ]; then
   cp -r "$TESTS_SRC/." "$BASE/"
-  find "$BASE" -type f \( -name "*.tests" -o -name "run-*" -o -name "*.right" -o -name "*.sub" \) \
+  find "$BASE" -type f \( -name "*.tests" -o -name "run-*" -o -name "*.right" -o -name "*.sub" -o -name "*.in" \) \
     -exec sh -c 'tr -d "\r" < "$1" > "$1.lf" && mv "$1.lf" "$1"' _ {} \;
 fi
 # always re-normalize requested suites (the repo file is the source of truth)

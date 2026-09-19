@@ -23,10 +23,16 @@ pub(in crate::executor) fn initialize_shell_level(env_vars: &mut HashMap<String,
 pub(in crate::executor) fn is_initial_export_candidate(name: &str) -> bool {
     // Test runs share one process environment; ignore shell-local names that
     // previous Executor instances may have written there.
-    !name.starts_with("__RUBASH_")
-        && name.len() > 1
-        && name.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
-        && !is_bash_managed_shell_var(name)
+    if name.starts_with("__RUBASH_") || name.len() <= 1 || is_bash_managed_shell_var(name) {
+        return false;
+    }
+    // GNU variables.c:3307 bind_invalid_envvar: an environment entry whose
+    // name is not a valid identifier never becomes a shell variable but
+    // stays in the export environment — `env 'v[0]=help' sh -c ...`
+    // propagates `v[0]` to the child (varenv13.sub). The uppercase-first
+    // heuristic for valid identifiers keeps shell-local names from
+    // leaking; invalid names could only have arrived via environ.
+    !is_shell_name(name) || name.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
 }
 
 pub(in crate::executor) fn is_bash_managed_shell_var(name: &str) -> bool {
