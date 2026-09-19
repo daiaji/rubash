@@ -189,6 +189,15 @@ where
     E: Write,
 {
     let mut status = EXECUTION_SUCCESS;
+    // Operand-less `shopt -o` listing goes through GNU's minus-o print path:
+    // builtins/shopt.def:553-559 list_shopt_o_options(list=0) ->
+    // list_minus_o_opts -> builtins/set.def:281 print_minus_o_option with
+    // MINUS_O_FORMAT "%-15s\t%s\n". That is width 15, NOT the OPTFMT
+    // "%-20s\t%s\n" of shopt.def:73 used by plain `shopt` and by
+    // `shopt -o <name>` (shopt.def:579). Verified against the WSL GNU Bash
+    // 5.3.0 oracle (/usr/local/bin/bash): tab lands at byte 15 for `set -o`
+    // and `shopt -o`, at byte 20 for plain `shopt`.
+    const MINUS_O_PRINT_WIDTH: usize = crate::builtins::set::SET_O_PRINT_WIDTH;
     if names.is_empty() {
         match mode {
             ShoptMode::Set if print => {
@@ -196,7 +205,7 @@ where
                     env_vars,
                     true,
                     true,
-                    crate::builtins::set::SHOPT_O_PRINT_WIDTH,
+                    MINUS_O_PRINT_WIDTH,
                     stdout,
                 )?;
             }
@@ -205,7 +214,7 @@ where
                     env_vars,
                     false,
                     true,
-                    crate::builtins::set::SHOPT_O_PRINT_WIDTH,
+                    MINUS_O_PRINT_WIDTH,
                     stdout,
                 )?;
             }
@@ -214,14 +223,14 @@ where
                     env_vars,
                     false,
                     false,
-                    crate::builtins::set::SHOPT_O_PRINT_WIDTH,
+                    MINUS_O_PRINT_WIDTH,
                     stdout,
                 )?;
             }
             _ => crate::builtins::set::print_shell_options(
                 env_vars,
                 print,
-                crate::builtins::set::SHOPT_O_PRINT_WIDTH,
+                MINUS_O_PRINT_WIDTH,
                 stdout,
             )?,
         }
