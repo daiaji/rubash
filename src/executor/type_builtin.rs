@@ -11,6 +11,12 @@ impl Executor {
         let saved_path = self.use_standard_path_for_lookup(use_standard_path);
         let mut status = 0;
         for name in &args[first_name..] {
+            // GNU findcmd.c:364-365: phash_search is skipped for absolute
+            // names and CMDSRCH_STDPATH (`command -p`) lookups; a hit bumps
+            // times_found (hashlib.c:254).
+            if !use_standard_path && !name.contains('/') && !name.contains('\\') {
+                crate::builtins::hash::bump_hashed_path_hit(&mut self.env_vars, name);
+            }
             if !self.describe_name(name, mode, false, false) {
                 status = 1;
                 if mode == TypeDescribeMode::Verbose {
@@ -65,6 +71,9 @@ impl Executor {
         let saved_path = self.use_standard_path_for_lookup(use_standard_path);
         let mut status = 0;
         for name in &args[first_name..] {
+            if !use_standard_path && !name.contains('/') && !name.contains('\\') {
+                crate::builtins::hash::bump_hashed_path_hit(&mut self.env_vars, name);
+            }
             if !self.describe_name_with_io(name, mode, false, false, stdout)? {
                 status = 1;
                 if mode == TypeDescribeMode::Verbose {
@@ -184,6 +193,12 @@ impl Executor {
 
         let mut status = 0;
         for name in &args[index..] {
+            // GNU type.def -> describe_command -> find_user_command: each
+            // non-absolute name lookup runs phash_search, whose hit bumps
+            // times_found (hashlib.c:254). `-P` (force_path) skips the table.
+            if !force_path && !name.contains('/') && !name.contains('\\') {
+                crate::builtins::hash::bump_hashed_path_hit(&mut self.env_vars, name);
+            }
             let found = if all {
                 self.describe_name_all_with_io(name, mode, force_path, skip_functions, stdout)?
             } else {

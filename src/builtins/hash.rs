@@ -117,6 +117,13 @@ where
         return Ok(EXECUTION_FAILURE);
     }
 
+    // GNU builtins/hash.def:137-141 `hash` with no names and no -r prints the
+    // table through hash_walk (hashlib.c:397) — bucket-array order, and
+    // hash_insert prepends, so entries sharing a bucket list newest first.
+    // print_hash_info (hash.def:239) shows times_found: 0 for `hash -p` /
+    // `BASH_CMDS[k]=v` / `hash name` inserts (phash_insert found=0), bumped by
+    // each phash_search hit (hashlib.c:254) and set to 1 by the PATH-search
+    // insert in find_user_command_in_path's caller (findcmd.c:416).
     let mut table = hash_table(env_vars);
     if let Some(pathname) = pathname {
         // GNU builtins/hash.def:156-176: in a restricted shell `hash -p`
@@ -150,7 +157,14 @@ where
                 )?;
                 return Ok(EXECUTION_FAILURE);
             }
-            table.insert(name.to_string(), pathname.to_string());
+            // GNU hash.def:195 phash_insert(w, pathname, 0, 0): an existing
+            // entry keeps its bucket position with times_found reset to 0.
+            if let Some(entry) = table.iter_mut().find(|entry| entry.0 == name) {
+                entry.1 = pathname.to_string();
+                entry.2 = 0;
+            } else {
+                table.push((name.to_string(), pathname.to_string(), 0));
+            }
             store_hash_table(env_vars, &table);
             // GNU hash.def `hash -p PATH NAME`: phash_insert(name, pathname)
             // makes subsequent lookups of `name` return `pathname` without a
@@ -169,10 +183,11 @@ where
     if delete {
         let mut status = EXECUTION_SUCCESS;
         for name in names {
-            if table.remove(name).is_none() {
+            if !table.iter().any(|entry| entry.0 == name) {
                 writeln!(stderr, "{}hash: {name}: not found", script_prefix(env_vars))?;
                 status = EXECUTION_FAILURE;
             } else {
+                table.retain(|entry| entry.0 != name);
                 // GNU hash.def `hash -d NAME`: phash_remove(w) drops the entry
                 // from the hash table. The internal lookup cache holds the
                 // same information and must be invalidated in lockstep or the
@@ -187,7 +202,11 @@ where
     if translate {
         let mut status = EXECUTION_SUCCESS;
         for name in names {
-            if let Some(path) = table.get(name) {
+            // GNU hash.def:284 print_hash_info runs phash_search, whose
+            // hash_search hit bumps times_found (hashlib.c:254).
+            if let Some(entry) = table.iter_mut().find(|entry| entry.0 == name) {
+                entry.2 += 1;
+                let path = entry.1.clone();
                 if reusable {
                     writeln!(stdout, "builtin hash -p {path} {name}")?;
                 } else {
@@ -198,6 +217,7 @@ where
                 status = EXECUTION_FAILURE;
             }
         }
+        store_hash_table(env_vars, &table);
         return Ok(status);
     }
 
@@ -205,15 +225,12 @@ where
         if !table.is_empty() {
             if !reusable {
                 writeln!(stdout, "hits\tcommand")?;
-                let mut entries: Vec<_> = table.into_iter().collect();
-                entries.sort_by(|left, right| left.1.cmp(&right.1));
-                for (name, path) in entries {
-                    let hits = if name == "bash" { 3 } else { 1 };
+                for (_, path, hits) in bucket_ordered(table) {
                     writeln!(stdout, "{hits:4}\t{path}")?;
                 }
                 return Ok(EXECUTION_SUCCESS);
             }
-            for (name, path) in table {
+            for (name, path, _) in bucket_ordered(table) {
                 writeln!(stdout, "builtin hash -p {path} {name}")?;
             }
             return Ok(EXECUTION_SUCCESS);
@@ -235,15 +252,21 @@ where
             crate::executor::path::remove_command_lookup_cache(name);
             match crate::executor::path::find_user_command(name, env_vars) {
                 Some(path) => {
-                    let path_string = path.to_string_lossy().to_string();
-                    table.insert(name.to_string(), path_string.clone());
+                    // GNU hash.def:221-225 add_filename_to_hash:
+                    // phash_remove + phash_insert(w, path, dot, 0) — the name
+                    // re-enters its bucket as newest and times_found resets.
+                    table.retain(|entry| entry.0 != name);
+                    table.push((
+                        name.to_string(),
+                        path.to_string_lossy().to_string(),
+                        0,
+                    ));
                     // find_user_command already inserted the result into the
                     // internal cache, so no extra set_command_lookup_cache is
                     // needed here.
-                    let _ = path_string;
                 }
                 None => {
-                    table.remove(name);
+                    table.retain(|entry| entry.0 != name);
                     writeln!(stderr, "{}hash: {name}: not found", script_prefix(env_vars))?;
                     status = EXECUTION_FAILURE;
                 }
@@ -256,9 +279,23 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
-pub(crate) fn set_hashed_path(env_vars: &mut HashMap<String, String>, name: &str, path: &str) {
+/// GNU hashcmd.c phash_insert: insert `name=path` with times_found `found`.
+/// An existing entry keeps its bucket-chain position and has its
+/// times_found reset to `found` (hashcmd.c:117); a new name prepends to its
+/// bucket, which the insertion-order list models as "newest".
+pub(crate) fn insert_hashed_path(
+    env_vars: &mut HashMap<String, String>,
+    name: &str,
+    path: &str,
+    found: u32,
+) {
     let mut table = hash_table(env_vars);
-    table.insert(name.to_string(), path.to_string());
+    if let Some(entry) = table.iter_mut().find(|entry| entry.0 == name) {
+        entry.1 = path.to_string();
+        entry.2 = found;
+    } else {
+        table.push((name.to_string(), path.to_string(), found));
+    }
     store_hash_table(env_vars, &table);
     // BASH_CMDS[name]=value mirrors `hash -p value name`; keep the internal
     // lookup cache in sync so find_user_command(name) returns value.
@@ -266,9 +303,13 @@ pub(crate) fn set_hashed_path(env_vars: &mut HashMap<String, String>, name: &str
     crate::executor::path::set_command_lookup_cache(name, Some(cached_path));
 }
 
+pub(crate) fn set_hashed_path(env_vars: &mut HashMap<String, String>, name: &str, path: &str) {
+    insert_hashed_path(env_vars, name, path, 0);
+}
+
 pub(crate) fn remove_hashed_path(env_vars: &mut HashMap<String, String>, name: &str) {
     let mut table = hash_table(env_vars);
-    table.remove(name);
+    table.retain(|entry| entry.0 != name);
     store_hash_table(env_vars, &table);
     // unset 'BASH_CMDS[name]' mirrors `hash -d name`; drop the internal cache
     // entry so the next lookup re-scans PATH.
@@ -276,36 +317,105 @@ pub(crate) fn remove_hashed_path(env_vars: &mut HashMap<String, String>, name: &
 }
 
 pub(crate) fn hashed_path(env_vars: &HashMap<String, String>, name: &str) -> Option<String> {
-    hash_table(env_vars).remove(name)
+    hash_table(env_vars)
+        .into_iter()
+        .find(|entry| entry.0 == name)
+        .map(|entry| entry.1)
 }
 
-pub(crate) fn hashed_entries(env_vars: &HashMap<String, String>) -> Vec<(String, String)> {
-    let mut entries: Vec<_> = hash_table(env_vars).into_iter().collect();
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
+/// GNU hashlib.c:254: a hash_search hit increments times_found — every
+/// phash_search (`type`, `command -v`, exec resolution, `hash -t`) counts.
+pub(crate) fn bump_hashed_path_hit(env_vars: &mut HashMap<String, String>, name: &str) {
+    let mut table = hash_table(env_vars);
+    if let Some(entry) = table.iter_mut().find(|entry| entry.0 == name) {
+        entry.2 += 1;
+        store_hash_table(env_vars, &table);
+    }
+}
+
+/// GNU findcmd.c:365-426: a command resolution that hits hashed_filenames
+/// bumps times_found (phash_search -> hashlib.c:254); one resolved through
+/// PATH enters the table with times_found=1 (phash_insert found=1).
+/// Called from the external-command dispatch once `find_user_command`
+/// resolved `name` to `shell_path`.
+pub(crate) fn record_command_resolution(
+    env_vars: &mut HashMap<String, String>,
+    name: &str,
+    shell_path: &str,
+) {
+    let mut table = hash_table(env_vars);
+    if let Some(entry) = table.iter_mut().find(|entry| entry.0 == name) {
+        entry.2 += 1;
+    } else {
+        table.push((name.to_string(), shell_path.to_string(), 1));
+    }
+    store_hash_table(env_vars, &table);
+}
+
+/// Entries in GNU hash_walk order (hashlib.c:397-410): bucket index
+/// ascending — `hash_string(name) & (FILENAME_HASH_BUCKETS-1)` — and within
+/// a bucket newest first, since hash_insert prepends (hashlib.c:338-339).
+fn bucket_ordered(table: Vec<(String, String, u32)>) -> Vec<(String, String, u32)> {
+    let mut entries: Vec<_> = table.into_iter().rev().collect();
+    entries.sort_by_key(|entry| gnu_hash_bucket(&entry.0));
     entries
 }
 
-fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, String> {
+/// GNU hashlib.c:208-225 hash_string — the FNV-1a variant — masked by
+/// FILENAME_HASH_BUCKETS (hashcmd.h:24, 256) for the filename table.
+fn gnu_hash_bucket(name: &str) -> u32 {
+    // hashlib.c:197/208 — 32-bit FNV_OFFSET and `unsigned int` arithmetic.
+    let mut hash: u32 = 2166136261;
+    for byte in name.bytes() {
+        hash = hash.wrapping_add(
+            (hash << 1)
+                .wrapping_add(hash << 4)
+                .wrapping_add(hash << 7)
+                .wrapping_add(hash << 8)
+                .wrapping_add(hash << 24),
+        );
+        hash ^= u32::from(byte);
+    }
+    hash & 255
+}
+
+/// BASH_CMDS materializes through build_hashcmd (variables.c:1708), which
+/// hash_walks the same filename table — same bucket order as `hash`.
+pub(crate) fn hashed_entries(env_vars: &HashMap<String, String>) -> Vec<(String, String)> {
+    bucket_ordered(hash_table(env_vars))
+        .into_iter()
+        .map(|(name, path, _)| (name, path))
+        .collect()
+}
+
+/// (name, path, times_found) triples in first-insert order — GNU's
+/// BUCKET_CONTENTS chain order is bucket-prepend, which the listing path
+/// reproduces via `bucket_ordered`.
+fn hash_table(env_vars: &HashMap<String, String>) -> Vec<(String, String, u32)> {
     env_vars
         .get(HASH_TABLE)
         .map(|value| {
             value
                 .split('\x1f')
                 .filter_map(|entry| {
-                    let (name, path) = entry.split_once('=')?;
-                    Some((name.to_string(), path.to_string()))
+                    let (name, rest) = entry.split_once('=')?;
+                    let (path, hits) = rest
+                        .split_once('\x1e')
+                        .map(|(path, hits)| (path, hits.parse::<u32>().unwrap_or(0)))
+                        .unwrap_or((rest, 0));
+                    Some((name.to_string(), path.to_string(), hits))
                 })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn store_hash_table(env_vars: &mut HashMap<String, String>, table: &HashMap<String, String>) {
+fn store_hash_table(env_vars: &mut HashMap<String, String>, table: &[(String, String, u32)]) {
     env_vars.insert(
         HASH_TABLE.to_string(),
         table
             .iter()
-            .map(|(name, path)| format!("{name}={path}"))
+            .map(|(name, path, hits)| format!("{name}={path}\x1e{hits}"))
             .collect::<Vec<_>>()
             .join("\x1f"),
     );

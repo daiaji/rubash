@@ -394,9 +394,20 @@ impl Executor {
                 // word expansion on this path, so the resolver runs its
                 // non-preexpanded (declare) model.
                 let assoc = assoc_hint || is_marked_var(&self.env_vars, ASSOC_VARS, lhs);
-                let rewritten = self
-                    .rewrite_compound_element_subscripts(lhs, compound, assoc, false)
-                    .ok_or(())?;
+                let rewritten = match self.rewrite_compound_element_subscripts(
+                    lhs, compound, assoc, false,
+                ) {
+                    Ok(rewritten) => rewritten,
+                    // GNU assign_compound_array_list breaks on the failing
+                    // element but binds the ones processed before it; the
+                    // operand still carries the partial list. The command
+                    // fails overall — recorded on the executor for the
+                    // caller to merge into the exit status.
+                    Err(partial) => {
+                        self.declare_compound_element_failed.set(true);
+                        partial
+                    }
+                };
                 let marker = if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
                     COMPOUND_ASSIGNMENT_MARKER
                 } else {
@@ -422,12 +433,14 @@ impl Executor {
             self.sync_dirstack_cell();
         }
         let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
+        self.declare_compound_element_failed.set(false);
         let mut args = match self.rewrite_declare_operand_subscripts(&args, &cmd.word_metadata) {
             Ok(args) => args,
             // array_expand_index -> evalexp failure: diagnostic + evalerror
             // abort already raised; GNU discards the rest of the list.
             Err(()) => return Ok(1),
         };
+        let compound_element_failed = self.declare_compound_element_failed.replace(false);
         if declare_args_request_integer(&args) {
             args = self.evaluate_declare_integer_assignment_args(&args);
         }
@@ -572,7 +585,14 @@ impl Executor {
                 stderr
             };
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-            Ok(status)
+            // GNU declare.def any_failed: an element failure inside a
+            // compound operand still fails the command even though the
+            // earlier elements bound.
+            Ok(if compound_element_failed && status == 0 {
+                1
+            } else {
+                status
+            })
         })();
         if result.as_ref().is_ok_and(|status| *status == 0) {
             // Mirror the through-the-nameref assignments into the typed owner:

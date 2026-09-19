@@ -782,10 +782,43 @@ impl Executor {
         // (`\"`) must also survive as literal `"` — the walker strips bare
         // `"` via toggle mode, so `\"` → `\` + removed quote. \x18 is the
         // walker's literal-double-quote marker.
-        let protected = expression
-            .replace("\\\"", "\x18")
-            .replace('\'', "\x17")
-            .replace("\\$", "\x1f");
+        // Quotes INSIDE a ${...}/$(...)/`...` span are not arith-text data —
+        // they belong to the nested substitution's own expansion, where
+        // expand_subscript_string strips them (assoc16.sub:
+        // $(( ${A['lit']} )) keys on `lit`, not `'lit'`).
+        let bytes = expression.as_bytes();
+        let mut protected = String::with_capacity(expression.len());
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let ch = bytes[index];
+            if ch == b'`'
+                || (ch == b'$' && matches!(bytes.get(index + 1), Some(b'(') | Some(b'{')))
+            {
+                let end = assoc_skip_substitution(bytes, index);
+                protected.push_str(&expression[index..end]);
+                index = end;
+                continue;
+            }
+            match ch {
+                b'\\' if bytes.get(index + 1) == Some(&b'"') => {
+                    protected.push('\x18');
+                    index += 2;
+                }
+                b'\\' if bytes.get(index + 1) == Some(&b'$') => {
+                    protected.push('\x1f');
+                    index += 2;
+                }
+                b'\'' => {
+                    protected.push('\x17');
+                    index += 1;
+                }
+                _ => {
+                    let next = expression[index..].chars().next().unwrap_or_default();
+                    protected.push(next);
+                    index += next.len_utf8();
+                }
+            }
+        }
         self.expand_embedded_parameters(&protected)
             .replace("\x1f", "$")
     }

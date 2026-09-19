@@ -405,7 +405,11 @@ impl Executor {
     pub(in crate::executor) fn xtrace_command_text(&mut self, cmd: &CommandNode) -> String {
         let mut parts: Vec<String> = Vec::new();
         parts.extend(self.xtrace_assignment_text(cmd));
-        parts.extend(cmd.words.iter().map(|w| xtrace_quote_word(w)));
+        parts.extend(cmd.words.iter().map(|w| {
+            // W_ARRAYREF (in-band ARRAYREF_FLAG) is node metadata in GNU —
+            // invisible in xtrace output.
+            xtrace_quote_word(crate::builtins::arrayref::take_arrayref_flag(w).1)
+        }));
         parts.join(" ")
     }
 

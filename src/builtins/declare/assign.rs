@@ -301,12 +301,25 @@ where
             continue;
         }
         if readonly.contains(var_name) {
-            writeln!(
-                stderr,
-                "{}{command_name}: {}: readonly variable",
-                diagnostic_prefix(variables),
-                var_name
-            )?;
+            // GNU declare.def:881-890: ASSIGN_DISALLOWED assignments fail via
+            // sh_readonly (bare `name: readonly variable`). Scalar operands
+            // fail earlier through the builtin_error path, which keeps the
+            // `declare:` command prefix.
+            if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+                writeln!(
+                    stderr,
+                    "{}{}: readonly variable",
+                    diagnostic_prefix(variables),
+                    var_name
+                )?;
+            } else {
+                writeln!(
+                    stderr,
+                    "{}{command_name}: {}: readonly variable",
+                    diagnostic_prefix(variables),
+                    var_name
+                )?;
+            }
             status = EXECUTION_FAILURE;
             continue;
         }
@@ -410,6 +423,18 @@ where
                         continue;
                     }
                 }
+                // GNU assign_assoc_from_kvlist (arrayfunc.c:644-650): a
+                // kvpair word whose expanded key is empty reports `<word>:
+                // bad array subscript` but does NOT set any_failed — the
+                // pair is skipped and the assignment still succeeds.
+                for word in crate::executor::assignment_helpers::assoc_empty_key_words(value) {
+                    writeln!(
+                        stderr,
+                        "{}{}: bad array subscript",
+                        diagnostic_prefix(variables),
+                        word
+                    )?;
+                }
                 append_assoc_value(&current, value, integer, variables)
             } else if compound_marked
                 || array
@@ -459,6 +484,16 @@ where
                 )?;
                 status = EXECUTION_FAILURE;
                 continue;
+            }
+            // GNU assign_assoc_from_kvlist (arrayfunc.c:644-650): same
+            // kvpair empty-key diagnostic as the append path above.
+            for word in crate::executor::assignment_helpers::assoc_empty_key_words(value) {
+                writeln!(
+                    stderr,
+                    "{}{}: bad array subscript",
+                    diagnostic_prefix(variables),
+                    word
+                )?;
             }
             append_assoc_value("()", value, integer, variables)
         } else if integer {

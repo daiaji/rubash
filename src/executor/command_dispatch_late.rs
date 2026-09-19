@@ -15,7 +15,13 @@ impl Executor {
         args: &[String],
         bracket: bool,
     ) -> Result<i32, ExecuteError> {
-        let mut args = args.to_vec();
+        // W_ARRAYREF (in-band ARRAYREF_FLAG) is a no-op for test/[ — GNU
+        // marks arrayref-shaped operands (execute_cmd.c:4366) but test.def
+        // never consults it; strip so operand text compares clean.
+        let mut args: Vec<String> = args
+            .iter()
+            .map(|arg| crate::builtins::arrayref::take_arrayref_flag(arg).1.to_string())
+            .collect();
         let mut index = 0;
         while index + 1 < args.len() {
             if args[index] == "-v" {

@@ -744,6 +744,7 @@ impl Executor {
             arithmetic_fatal_error: Cell::new(false),
             arithmetic_nounset_error: Cell::new(false),
             arithmetic_last_error_category: Cell::new(None),
+            declare_compound_element_failed: Cell::new(false),
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),
             assignment_command_name: None,

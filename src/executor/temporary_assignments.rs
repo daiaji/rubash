@@ -813,8 +813,31 @@ impl Executor {
                 is_marked_var(&self.env_vars, ASSOC_VARS, base_name),
                 true,
             ) {
-                Some(rewritten) => rewritten,
-                None => {
+                Ok(rewritten) => rewritten,
+                Err(partial) => {
+                    // GNU assign_compound_array_list breaks on the failing
+                    // element but keeps every element processed before it
+                    // and materializes the array — store the partial list
+                    // rather than abandoning the assignment.
+                    let current = self
+                        .env_vars
+                        .get(base_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let integer = is_marked_var(&self.env_vars, INTEGER_VARS, base_name);
+                    let stored = if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
+                        append_assoc_value(&current, &partial, integer, &self.env_vars)
+                    } else {
+                        append_array_value(
+                            &current,
+                            &partial,
+                            integer,
+                            self.env_vars.get("IFS").map(String::as_str),
+                            &self.env_vars,
+                        )
+                        .unwrap_or(current)
+                    };
+                    self.env_vars.insert(base_name.to_string(), stored);
                     self.exit_code = 1;
                     return false;
                 }
@@ -870,6 +893,7 @@ impl Executor {
             && is_marked_var(&self.env_vars, ASSOC_VARS, base_name)
         {
             let bare_elements = assoc_bare_elements(&value);
+            let empty_keys = assoc_empty_key_words(&value);
             // GNU assign_compound_array_list (arrayfunc.c:838-843): a bare
             // element in an assoc compound assignment reports an error and
             // breaks the loop, but elements already processed ARE stored.
@@ -888,6 +912,19 @@ impl Executor {
                     self.assignment_diagnostic_prefix(),
                     base_name,
                     bare
+                );
+                self.emit_assignment_diag(line);
+            }
+            // GNU assign_assoc_from_kvlist (arrayfunc.c:644-650): a kvpair
+            // word whose expanded key is empty reports `<word>: bad array
+            // subscript` but does NOT set any_failed — the pair is skipped
+            // and the assignment still succeeds.
+            for word in &empty_keys {
+                let line = format!(
+                    "{}{}: bad array subscript
+",
+                    self.assignment_diagnostic_prefix(),
+                    word
                 );
                 self.emit_assignment_diag(line);
             }

@@ -407,6 +407,33 @@ impl Executor {
             return Ok(());
         };
 
+        // GNU findcmd.c:365/416 (search_for_command): a name resolved through
+        // hashed_filenames bumps times_found; one resolved via PATH enters
+        // the table with times_found=1 (phash_insert found=1). Skipped for
+        // absolute names (absolute_program gate), `set +h`, and command-local
+        // PATH — the same gates find_user_command applies to its cache.
+        // Internally-emulated commands (external_file_builtins) never reach
+        // here, so they stay out of the table rather than diverting to a
+        // missing host binary.
+        if !cmd.words[0].contains('/')
+            && !cmd.words[0].contains('\\')
+            && crate::builtins::set::shell_option_enabled(&self.env_vars, "hashall")
+            && self
+                .env_vars
+                .get("__RUBASH_TEMP_PATH")
+                .map(String::as_str)
+                != Some("1")
+        {
+            let display = super::execution_misc::shell_display_path(
+                &program.to_string_lossy().replace('\\', "/"),
+            );
+            crate::builtins::hash::record_command_resolution(
+                &mut self.env_vars,
+                &cmd.words[0],
+                &display,
+            );
+        }
+
         // GNU execute_cmd.c:6139-6233 (shell_execve): the OS-level exec is
         // attempted first, and only a file the OS refuses to exec is
         // classified by its first bytes: an unresolvable #! interpreter is

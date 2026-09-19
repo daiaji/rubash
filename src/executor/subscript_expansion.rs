@@ -423,18 +423,24 @@ impl Executor {
     /// Returns `None` after printing the GNU diagnostic when an indexed
     /// subscript fails evaluation ("operand expected") — the caller must
     /// abandon the whole assignment with status 1.
+    /// Returns Err(partial) on an element failure: GNU
+    /// assign_compound_array_list (arrayfunc.c:765-830) reports the error
+    /// and BREAKS — elements already processed still bind and the array is
+    /// materialized (`b=([k]=v [""]=x [k2]=v2)` leaves `b=([k]="v")`, rc=1).
+    /// Callers must store the partial text instead of dropping the
+    /// assignment wholesale.
     pub(in crate::executor) fn rewrite_compound_element_subscripts(
         &mut self,
         name: &str,
         value: &str,
         assoc: bool,
         preexpanded: bool,
-    ) -> Option<String> {
+    ) -> Result<String, String> {
         let Some(inner) = value
             .strip_prefix('(')
             .and_then(|value| value.strip_suffix(')'))
         else {
-            return Some(value.to_string());
+            return Ok(value.to_string());
         };
         let mut out = String::with_capacity(inner.len());
         let mut index = 0usize;
@@ -480,11 +486,15 @@ impl Executor {
                                 self.expand_subscript_string(sub)
                             };
                             if key.is_empty() {
-                                // GNU err_badarraysub prints the element word.
-                                self.report_bad_array_subscript(compound_element_word(
-                                    inner, index,
-                                ));
-                                return None;
+                                // GNU err_badarraysub prints the element
+                                // word as rebuilt by
+                                // expand_compound_array_assignment.
+                                self.report_bad_array_subscript(
+                                    &compound_element_diagnostic_word(
+                                        inner, index, sub_end, &key, true,
+                                    ),
+                                );
+                                return Err(format!("({out})"));
                             }
                             out.push('[');
                             out.push_str(&encode_compound_assoc_key(&key));
@@ -508,13 +518,17 @@ impl Executor {
                             self.expand_subscript_string(&once)
                         };
                         if resolved.is_empty() {
-                            self.report_bad_array_subscript(compound_element_word(inner, index));
-                            return None;
+                            self.report_bad_array_subscript(
+                                &compound_element_diagnostic_word(
+                                    inner, index, sub_end, &resolved, false,
+                                ),
+                            );
+                            return Err(format!("({out})"));
                         }
                         let Some(index_value) = self.eval_indexed_subscript_expression(&resolved)
                         else {
                             self.report_indexed_subscript_error(&resolved);
-                            return None;
+                            return Err(format!("({out})"));
                         };
                         out.push('[');
                         out.push_str(&index_value.to_string());
@@ -529,7 +543,7 @@ impl Executor {
             index += ch.len_utf8();
             token_start = ch.is_ascii_whitespace();
         }
-        Some(format!("({out})"))
+        Ok(format!("({out})"))
     }
 }
 
@@ -599,9 +613,8 @@ pub(super) fn scan_compound_subscript(
     None
 }
 
-/// The `[sub]=value` element word starting at `start` — the text GNU's
-/// `err_badarraysub` prints for a failing compound element (the whole
-/// word, `[]=v` style), up to the next unquoted whitespace.
+/// The `[sub]=value` element word starting at `start` — the raw text span
+/// up to the next unquoted whitespace.
 fn compound_element_word(text: &str, start: usize) -> &str {
     let bytes = text.as_bytes();
     let mut pos = start;
@@ -618,6 +631,54 @@ fn compound_element_word(text: &str, start: usize) -> &str {
         pos += 1;
     }
     &text[start..pos]
+}
+
+/// The element word as GNU's `err_badarraysub` sees it: the assoc compound
+/// word list was rebuilt by expand_compound_array_assignment with each
+/// expanded part quote_string'd, so `[""]="v"` reports as `['']='v'`;
+/// indexed elements keep the expanded-but-unquoted text (`[]=v`).
+/// `sub_end` indexes the `]` closing the subscript in `text`; `subscript`
+/// is the expanded/dequoted subscript text.
+fn compound_element_diagnostic_word(
+    text: &str,
+    start: usize,
+    sub_end: usize,
+    subscript: &str,
+    assoc: bool,
+) -> String {
+    let element = compound_element_word(text, start);
+    let tail = &element[sub_end - start + 1..];
+    let (op, value) = tail
+        .strip_prefix("+=")
+        .map(|value| ("+=", value))
+        .unwrap_or_else(|| ("=", tail.strip_prefix('=').unwrap_or(tail)));
+    let dequoted = dequote_compound_subscript(value);
+    if assoc {
+        format!(
+            "[{}]{}{}",
+            diagnostic_single_quote(subscript),
+            op,
+            diagnostic_single_quote(&dequoted)
+        )
+    } else {
+        format!("[{subscript}]{op}{dequoted}")
+    }
+}
+
+/// lib/sh/shquote.c sh_single_quote: wrap in single quotes, rendering each
+/// embedded quote as `'\''`.
+fn diagnostic_single_quote(s: &str) -> String {
+    let mut quoted = String::with_capacity(s.len() + 2);
+    quoted.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// Dequote a compound-element subscript the way GNU's re-parse of the

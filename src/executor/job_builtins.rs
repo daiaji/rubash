@@ -129,7 +129,19 @@ impl Executor {
         // an invalid identifier or a readonly name fails immediately, and a
         // name that never gets bound stays unset.
         if let Some(name) = wait_assign_var(&cmd.words[1..]) {
-            if !is_shell_name(&name) {
+            // GNU wait.def:150-156: `valid_identifier || valid_array_reference`
+            // under SET_VFLAGS — the operand's W_ARRAYREF flag (in-band
+            // ARRAYREF_FLAG prefix) upgrades to VA_ONEWORD only when
+            // array_expand_once is set (assoc18.sub `wait -p A[$rkey]`).
+            let (w_arrayref, name) = crate::builtins::arrayref::take_arrayref_flag(&name);
+            let name = name.to_string();
+            if !is_shell_name(&name)
+                && !crate::builtins::arrayref::valid_array_reference_for_env(
+                    &name,
+                    &self.env_vars,
+                    w_arrayref,
+                )
+            {
                 let mut stderr = Vec::new();
                 writeln!(
                     stderr,
@@ -245,7 +257,10 @@ impl Executor {
                 // GNU wait.def:338-339: -p binds the pid of the LAST operand
                 // waited for (pstat.pid; NO_PID when the last operand
                 // failed, leaving the pre-unbound variable unset).
-                let wait_var = wait_assign_var(&cmd.words[1..]);
+                let wait_var = wait_assign_var(&cmd.words[1..])
+                    .map(|name| {
+                        crate::builtins::arrayref::take_arrayref_flag(&name).1.to_string()
+                    });
                 let status =
                     self.wait_for_background_operands(&operands, cmd, wait_var.as_deref())?;
                 return Ok(status);
@@ -1516,7 +1531,12 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
                         index += 1;
                         words.get(index)?
                     };
-                    if !is_shell_name(name) {
+                    // execute_wait already ran wait.def:150-156 validation
+                    // (identifier || flag-aware valid_array_reference); here
+                    // the in-band W_ARRAYREF prefix just needs stripping so
+                    // `wait -p A[$rkey] -n` binds the `]` element.
+                    let (_, name) = crate::builtins::arrayref::take_arrayref_flag(name);
+                    if !is_shell_name(name) && !name.contains('[') {
                         return None;
                     }
                     assign_var = Some(name.to_string());
@@ -1567,7 +1587,14 @@ fn wait_background_operands(words: &[String]) -> Option<Vec<String>> {
         index += 1;
     }
 
-    Some(words[index..].to_vec())
+    // Jobspec operands keep no W_ARRAYREF consumer — strip the in-band
+    // flag so `wait: A[]]: ...` diagnostics print clean text.
+    Some(
+        words[index..]
+            .iter()
+            .map(|word| crate::builtins::arrayref::take_arrayref_flag(word).1.to_string())
+            .collect(),
+    )
 }
 
 /// The `-p` variable name from a wait command's option cluster, mirroring

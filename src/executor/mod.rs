@@ -151,7 +151,7 @@ mod unset_arrays;
 mod variable_state;
 
 mod alias_helpers;
-mod assignment_helpers;
+pub(crate) mod assignment_helpers;
 mod ast_exec;
 mod builtin_names;
 mod command_subst_helpers;
@@ -520,6 +520,10 @@ pub struct Executor {
     debug_trap_function_line: Option<usize>,
     arithmetic_expansion_error: Cell<bool>,
     arithmetic_nonfatal_error: Cell<bool>,
+    /// A `[sub]=` element inside a `declare -aA name=(...)` operand failed
+    /// err_badarraysub — GNU assign_compound_array_list stores the elements
+    /// processed before the break and still fails the command (any_failed).
+    declare_compound_element_failed: Cell<bool>,
     arithmetic_fatal_error: Cell<bool>,
     /// `set -u` unbound-variable error raised during arithmetic evaluation.
     /// A Cell because word-expansion paths hold `&self` (GNU expr.c raises

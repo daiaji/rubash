@@ -12,21 +12,51 @@
 
 use std::collections::HashMap;
 
+/// In-band W_ARRAYREF carrier (GNU execute_cmd.c:4366 fix_arrayref_words):
+/// an operand word of an ARRAYREF_BUILTIN whose pre-expansion text passed
+/// valid_array_reference(.., 0) carries this flag through expansion, where
+/// SET_VFLAGS (common.h:279) / builtin_arrayref_flags (common.c:1050) turn
+/// it into VA_ONEWORD|VA_NOEXPAND for post-expansion validation. That is
+/// what distinguishes `read A[$rkey]` (marked pre-expansion, expands to the
+/// valid `]` subscript `A[]]`) from literal `read A[]]` and quoted
+/// `read "A[$rkey]"` (both unmarked, both invalid) under assoc_expand_once.
+/// The byte travels inside the word string so it survives word splitting
+/// the same way GNU copies word->flags to each expanded output word; every
+/// consumer strips it before use.
+pub(crate) const ARRAYREF_FLAG: char = '\x02';
+
+/// Split a possibly-marked operand word into (w_arrayref, text).
+pub(crate) fn take_arrayref_flag(word: &str) -> (bool, &str) {
+    match word.strip_prefix(ARRAYREF_FLAG) {
+        Some(rest) => (true, rest),
+        None => (false, word),
+    }
+}
+
+/// GNU builtins/mkbuiltins.c:180 arrayvar_builtins — the builtins whose
+/// operand words get W_ARRAYREF in fix_arrayref_words.
+pub(crate) fn is_arrayref_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "declare" | "let" | "local" | "printf" | "read" | "test" | "[" | "typeset" | "unset"
+            | "wait"
+    )
+}
+
 /// Return true when `word` is a well-formed `name[sub]` array reference:
 /// a valid identifier base, a non-empty subscript, and the closing `]`
-/// as the last byte. `expand_once` is the array_expand_once shopt state
-/// (VA_NOEXPAND); `base_is_assoc` is assoc_p(base) — GNU only performs the
-/// assoc lookup when VA_NOEXPAND is set, so callers may pass the raw
-/// marked state and this function gates it on `expand_once`.
-///
-/// GNU's VA_ONEWORD branch (whole-tail accept when the operand word carries
-/// W_ARRAYREF) is not modeled: W_ARRAYREF only survives expansion when the
-/// word text is unchanged (subst.c:12419), so it cannot apply to the
-/// expanded operands this checks.
+/// as the last byte. `noexpand` is VA_NOEXPAND (SET_VFLAGS maps the
+/// array_expand_once shopt; builtin_arrayref_flags also sets it for
+/// W_ARRAYREF words); `oneword` is the effective
+/// (VA_NOEXPAND|VA_ONEWORD) == both condition — GNU arrayfunc.c:1307-1309
+/// then takes `len = strlen(t) - 1`, accepting any `]`-terminated
+/// subscript for an assoc base. `base_is_assoc` is assoc_p(base) — GNU
+/// only performs the assoc lookup when VA_NOEXPAND is set.
 pub(crate) fn valid_array_reference(
     word: &str,
-    expand_once: bool,
+    noexpand: bool,
     base_is_assoc: bool,
+    oneword: bool,
 ) -> bool {
     let Some(open) = word.find('[') else {
         return false;
@@ -35,7 +65,11 @@ pub(crate) fn valid_array_reference(
         return false;
     }
     let tail = &word.as_bytes()[open..];
-    let close = if expand_once && base_is_assoc {
+    let close = if base_is_assoc && oneword {
+        // ONEWORD (arrayfunc.c:1307-1310): len = strlen(t) - 1 — the tail
+        // is accepted wholesale as long as it ends with `]`.
+        Some(tail.len() - 1)
+    } else if noexpand && base_is_assoc {
         // skipsubscript(t, 0, ssflags|1): skip_matched_pair flags&1
         // disables escapes, quote spans, substitutions, and bracket
         // nesting — the first `]` closes the subscript.
@@ -45,7 +79,7 @@ pub(crate) fn valid_array_reference(
     };
     // GNU arrayfunc.c:1319: t[len] must be `]`, the subscript must be
     // non-empty (len > 1), and `]` must be the last byte.
-    matches!(close, Some(index) if index > 1 && index + 1 == tail.len())
+    matches!(close, Some(index) if index > 1 && index + 1 == tail.len() && tail[index] == b']')
 }
 
 /// GNU subst.c:2086 skip_matched_pair(string, 0, '[', ']', 0): scan a
@@ -167,19 +201,48 @@ fn skip_balanced_substitution(text: &[u8], start: usize) -> usize {
     index
 }
 
-/// Convenience for builtin operands: resolve the two inputs GNU derives
-/// from live shell state — the array_expand_once shopt (SET_VFLAGS'
-/// VA_NOEXPAND) and assoc_p(base) — then run valid_array_reference.
+/// Convenience for builtin operands: resolve the inputs GNU derives from
+/// live shell state — the array_expand_once shopt and assoc_p(base) — then
+/// run valid_array_reference. `w_arrayref` is the operand word's in-band
+/// W_ARRAYREF flag; `one_word_gated` mirrors SET_VFLAGS (common.h:279),
+/// which only lets W_ARRAYREF set VA_ONEWORD when array_expand_once is on —
+/// read.def:404/1036/1089, printf.def:305, wait.def:156 all use it.
+/// unset (set.def:887) instead uses builtin_arrayref_flags (common.c:1050),
+/// which applies VA_ONEWORD|VA_NOEXPAND unconditionally; that caller passes
+/// `one_word_gated: false` and pre-ORs its own noexpand.
 pub(crate) fn valid_array_reference_for_env(
     word: &str,
     env_vars: &HashMap<String, String>,
+    w_arrayref: bool,
+) -> bool {
+    let Some(open) = word.find('[') else {
+        return false;
+    };
+    // SET_VFLAGS (common.h:279): vflags = expand_once ? VA_NOEXPAND : 0;
+    // if (expand_once && W_ARRAYREF) vflags |= VA_ONEWORD|VA_NOEXPAND.
+    // Without array_expand_once a marked word still gets the arithmetic
+    // subscript scan (`read A[$rkey]` -> `A[]]` is then invalid).
+    let expand_once = crate::builtins::shopt::option_enabled(env_vars, "array_expand_once");
+    let oneword = w_arrayref && expand_once;
+    let base_is_assoc = expand_once && is_marked_assoc(env_vars, &word[..open]);
+    valid_array_reference(word, expand_once, base_is_assoc, oneword)
+}
+
+/// GNU common.c builtin_arrayref_flags semantics for unset (set.def:887):
+/// VA_ONEWORD|VA_NOEXPAND is applied whenever the operand carried
+/// W_ARRAYREF — no array_expand_once gate.
+pub(crate) fn valid_array_reference_for_unset(
+    word: &str,
+    env_vars: &HashMap<String, String>,
+    w_arrayref: bool,
 ) -> bool {
     let Some(open) = word.find('[') else {
         return false;
     };
     let expand_once = crate::builtins::shopt::option_enabled(env_vars, "array_expand_once");
-    let base_is_assoc = is_marked_assoc(env_vars, &word[..open]);
-    valid_array_reference(word, expand_once, base_is_assoc)
+    let noexpand = expand_once || w_arrayref;
+    let base_is_assoc = noexpand && is_marked_assoc(env_vars, &word[..open]);
+    valid_array_reference(word, noexpand, base_is_assoc, w_arrayref)
 }
 
 /// GNU general.c legal_identifier: a shell variable name — leading

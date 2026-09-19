@@ -75,6 +75,13 @@ pub(in crate::executor) fn append_assoc_value(
                 continue;
             };
             let key = unquote_storage_value(key);
+            // GNU assign_assoc_from_kvlist (arrayfunc.c:644-650): an empty
+            // expanded key reports `<word>: bad array subscript` and skips
+            // only that pair (continue, not break) — no any_failed, so the
+            // assignment itself still succeeds.
+            if key.is_empty() {
+                continue;
+            }
             let value = pair
                 .get(1)
                 .map(|value| unquote_storage_value(value))
@@ -164,6 +171,46 @@ pub(in crate::executor) fn assoc_bare_elements(value: &str) -> Vec<String> {
         .find(|token| assoc_assignment_token(token).is_none())
         .map(|token| unquote_storage_value(token));
     first_bare.into_iter().collect()
+}
+
+/// Key words of a kvpair-mode assoc compound assignment whose expanded
+/// key is empty — GNU assign_assoc_from_kvlist (arrayfunc.c:644-650)
+/// reports each as `<word>: bad array subscript` and skips just that pair.
+/// The word text is the re-quoted form from the rebuilt word list (`""`
+/// prints `''`). Returns empty for the strict `[key]=value` form, whose
+/// empty key is handled by rewrite_compound_element_subscripts'
+/// err_badarraysub instead.
+pub(crate) fn assoc_empty_key_words(value: &str) -> Vec<String> {
+    let tokens = merge_assoc_subscript_tokens(array_assignment_tokens(value));
+    let strict_mode = tokens
+        .first()
+        .map(|token| token.starts_with('['))
+        .unwrap_or(false);
+    if strict_mode {
+        return Vec::new();
+    }
+    tokens
+        .chunks(2)
+        .filter_map(|pair| {
+            let key = pair.first()?;
+            unquote_storage_value(key)
+                .is_empty()
+                .then(|| {
+                    // GNU's word list rebuilt each element with quote_string.
+                    let dequoted = unquote_storage_value(key);
+                    let mut quoted = String::from("'");
+                    for ch in dequoted.chars() {
+                        if ch == '\'' {
+                            quoted.push_str("'\\''");
+                        } else {
+                            quoted.push(ch);
+                        }
+                    }
+                    quoted.push('\'');
+                    quoted
+                })
+        })
+        .collect()
 }
 
 /// Split an assoc assignment token (`[key]=value` / `[key]+=value`) at the

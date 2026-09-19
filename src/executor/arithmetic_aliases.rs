@@ -420,7 +420,11 @@ impl Executor {
         let mut value = None;
         let mut index = 0;
         while index < expressions.len() {
-            let mut expression = expressions[index].clone();
+            // W_ARRAYREF (in-band ARRAYREF_FLAG) is a no-op for let — GNU
+            // marks `let a[k]` operands but let.def never consults it.
+            let mut expression = crate::builtins::arrayref::take_arrayref_flag(&expressions[index])
+                .1
+                .to_string();
             if expression.contains(COMPOUND_ASSIGNMENT_MARKER)
                 && expressions
                     .get(index + 1)

@@ -358,6 +358,60 @@ impl Executor {
         Ok(())
     }
 
+    /// GNU execute_cmd.c:4366 fix_arrayref_words: for a command word list
+    /// headed by an ARRAYREF_BUILTIN (after leading assignment words and
+    /// `command` prefixes are skipped), mark each operand whose
+    /// pre-expansion text is a valid_array_reference(.., 0) — the
+    /// arithmetic-mode scan on the raw word, quotes included, so `"A[$k]"`
+    /// is not a reference while `A[$k]` is. The flag is consumed
+    /// post-expansion as VA_ONEWORD|VA_NOEXPAND (see arrayref.rs).
+    ///
+    /// GNU attaches W_ARRAYREF even when a function shadows the builtin —
+    /// the flag is invisible there. rubash carries it in-band, so a
+    /// function-bound command must not be marked (the byte would leak into
+    /// positional parameters); `command` still runs the real builtin, so
+    /// its operands keep their marks.
+    fn arrayref_operand_marks(&self, cmd: &CommandNode) -> Vec<bool> {
+        let mut marks = vec![false; cmd.words.len()];
+        let mut index = 0usize;
+        // fix_arrayref_words: "Skip over assignment statements preceding a
+        // command name" — W_ASSIGNMENT words, including `name[sub]=value`.
+        while index < cmd.words.len()
+            && (split_assignment_word(&cmd.words[index]).is_some()
+                || cmd
+                    .array_element_assignments
+                    .iter()
+                    .any(|assignment| assignment.word_index == Some(index)))
+        {
+            index += 1;
+        }
+        let mut saw_command = false;
+        while cmd.words.get(index).map(String::as_str) == Some("command") {
+            saw_command = true;
+            index += 1;
+        }
+        let Some(name) = cmd.words.get(index) else {
+            return marks;
+        };
+        if !crate::builtins::arrayref::is_arrayref_builtin(name)
+            || (!saw_command && self.functions.contains_key(name.as_str()))
+        {
+            return marks;
+        }
+        for (operand, mark) in marks.iter_mut().enumerate().skip(index + 1) {
+            let raw = cmd
+                .word_metadata
+                .get(operand)
+                .map(|metadata| metadata.raw.as_str())
+                .filter(|raw| !raw.is_empty())
+                .unwrap_or(cmd.words[operand].as_str());
+            // flags = 0: no VA_NOEXPAND — the arithmetic skipsubscript scan
+            // on the pre-expansion text (arrayfunc.c:1317 `else` branch).
+            *mark = crate::builtins::arrayref::valid_array_reference(raw, false, false, false);
+        }
+        marks
+    }
+
     pub(in crate::executor) fn expand_command_words(
         &mut self,
         cmd: &CommandNode,
@@ -423,6 +477,19 @@ impl Executor {
             line: cmd.line,
             ..CommandNode::new()
         };
+        // GNU execute_cmd.c:4366 fix_arrayref_words (called at
+        // execute_cmd.c:4612 immediately before expand_words): operand words
+        // of ARRAYREF_BUILTINs (mkbuiltins.c:180 arrayvar_builtins) whose
+        // pre-expansion text is a valid_array_reference(.., 0) carry
+        // W_ARRAYREF through expansion. SET_VFLAGS (common.h:279) and
+        // builtin_arrayref_flags (common.c:1050) then turn it into
+        // VA_ONEWORD|VA_NOEXPAND, which is what makes the post-expansion
+        // `A[]]` from `read A[$rkey]`/`unset -v A[$rkey]`/`wait -p A[$rkey]`
+        // a valid `]`-key reference while literal `A[]]` and quoted
+        // `"A[$rkey]"` operands stay invalid. The flag is carried in-band
+        // as an ARRAYREF_FLAG prefix so it survives word splitting the way
+        // GNU copies word->flags to each output word.
+        let arrayref_marks = self.arrayref_operand_marks(cmd);
         let expanded_words = cmd
             .words
             .iter()
@@ -435,9 +502,17 @@ impl Executor {
                     || word.starts_with('\x1d')
                     || raw_word_suppresses_pathname_expansion(raw, metadata)
                     || compound_assignment_operand_word(cmd, index, word);
+                let arrayref_marked = arrayref_marks.get(index).copied().unwrap_or(false);
                 self.expand_command_word(cmd, index, word, raw)
                     .into_iter()
-                    .map(move |word| (word, suppress_glob))
+                    .map(move |word| {
+                        let word = if arrayref_marked {
+                            format!("{}{word}", crate::builtins::arrayref::ARRAYREF_FLAG)
+                        } else {
+                            word
+                        };
+                        (word, suppress_glob)
+                    })
             })
             .collect::<Vec<_>>();
         // GNU subst.c:9955-9956 + 4288-4296: a bad array subscript in a
@@ -459,16 +534,33 @@ impl Executor {
         if !is_test_cmd {
             let mut words = Vec::new();
             for (word, suppress_glob) in expanded_words {
+                // W_ARRAYREF rides as an in-band prefix through expansion;
+                // strip it for pathname matching and re-attach to each
+                // result the way GNU copies word->flags to every output
+                // word of expand_word_list_internal.
+                let (arrayref_marked, word_text) =
+                    crate::builtins::arrayref::take_arrayref_flag(&word);
+                let remark = |word: String| {
+                    if arrayref_marked {
+                        format!("{}{word}", crate::builtins::arrayref::ARRAYREF_FLAG)
+                    } else {
+                        word
+                    }
+                };
                 if suppress_glob {
                     let materialized =
-                        materialize_expanded_command_word(&word).replace('\x17', "'");
-                    words.push(materialized);
+                        materialize_expanded_command_word(word_text).replace('\x17', "'");
+                    words.push(remark(materialized));
                 } else {
-                    match pathname_expand_word(&word, &self.env_vars) {
-                        PathnameExpansion::Matches(matches) => words
-                            .extend(matches.into_iter().map(|value| value.replace('\x17', "'"))),
-                        PathnameExpansion::NoMatch => words
-                            .push(materialize_expanded_command_word(&word).replace('\x17', "'")),
+                    match pathname_expand_word(word_text, &self.env_vars) {
+                        PathnameExpansion::Matches(matches) => words.extend(
+                            matches
+                                .into_iter()
+                                .map(|value| remark(value.replace('\x17', "'"))),
+                        ),
+                        PathnameExpansion::NoMatch => words.push(remark(
+                            materialize_expanded_command_word(word_text).replace('\x17', "'"),
+                        )),
                         PathnameExpansion::Fail(pattern) => {
                             self.report_failglob(&pattern);
                             // GNU failglob is a fatal word-expansion error:

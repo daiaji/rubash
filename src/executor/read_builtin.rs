@@ -9,11 +9,15 @@ const READ_USAGE: &str =
 /// tokenize_array_reference (arrayfunc.c:1288): without
 /// array_expand_once it runs the arithmetic scan, so `a[80's]` is
 /// rejected as `not a valid identifier` even when `a` is associative.
-fn is_valid_read_name(name: &str, env_vars: &HashMap<String, String>) -> bool {
+fn is_valid_read_name(
+    name: &str,
+    env_vars: &HashMap<String, String>,
+    w_arrayref: bool,
+) -> bool {
     if is_shell_name(name) {
         return true;
     }
-    crate::builtins::arrayref::valid_array_reference_for_env(name, env_vars)
+    crate::builtins::arrayref::valid_array_reference_for_env(name, env_vars, w_arrayref)
 }
 
 impl Executor {
@@ -42,14 +46,16 @@ impl Executor {
                             index += 1;
                             continue;
                         }
-                        if is_valid_read_name(&cmd.words[index], &self.env_vars) {
-                            scalar_names.push(cmd.words[index].clone());
+                        let (w_arrayref, name) =
+                            crate::builtins::arrayref::take_arrayref_flag(&cmd.words[index]);
+                        if is_valid_read_name(name, &self.env_vars, w_arrayref) {
+                            scalar_names.push(name.to_string());
                             scalar_field_count += 1;
                         } else {
                             report_read_invalid_identifier(
                                 &mut stderr,
                                 &self.diagnostic_prefix(),
-                                &cmd.words[index],
+                                name,
                             );
                             invalid_name = true;
                             scalar_field_count += 1;
@@ -1788,14 +1794,16 @@ impl Executor {
                     return self.finish_read_error(cmd, &stderr, 2);
                 }
                 word if !stop_scalar_names => {
-                    if is_valid_read_name(word, &self.env_vars) {
-                        scalar_names.push(word.to_string());
+                    let (w_arrayref, name) =
+                        crate::builtins::arrayref::take_arrayref_flag(word);
+                    if is_valid_read_name(name, &self.env_vars, w_arrayref) {
+                        scalar_names.push(name.to_string());
                         scalar_field_count += 1;
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
                             &self.diagnostic_prefix(),
-                            word,
+                            name,
                         );
                         invalid_name = true;
                         scalar_field_count += 1;

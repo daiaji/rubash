@@ -61,11 +61,18 @@ impl Executor {
         // GNU builtins/set.def:866-867: `unset -f` cancels -n, and -n is
         // only meaningful for variables anyway.
         let nameref_only = args.iter().any(|arg| arg == "-n") && !function_only;
-        let names: Vec<String> = args
+        // Operand words may carry the in-band W_ARRAYREF flag
+        // (ARRAYREF_FLAG prefix — arrayref.rs); strip it for all downstream
+        // consumers while keeping the per-name flag for the
+        // tokenize_array_reference check (builtin_arrayref_flags) below.
+        let (names, name_arrayref_marks): (Vec<String>, Vec<bool>) = args
             .iter()
             .filter(|arg| !arg.starts_with('-'))
-            .cloned()
-            .collect();
+            .map(|arg| {
+                let (marked, text) = crate::builtins::arrayref::take_arrayref_flag(arg);
+                (text.to_string(), marked)
+            })
+            .unzip();
 
         let mut function_status = 0;
         if !variable_only {
@@ -103,7 +110,37 @@ impl Executor {
         // remaining names are still processed.
         let mut nameref_status = 0;
         let mut element_status = 0;
-        for name in names {
+        for (name, w_arrayref) in names.into_iter().zip(name_arrayref_marks) {
+            // GNU set.def:887 builtin_arrayref_flags + tokenize_array_reference
+            // (arrayfunc.c:1288): a bracketed operand is an element unset only
+            // when it is a valid array reference under the operand's
+            // W_ARRAYREF flag. `unset -v A[$rkey]` marks the word
+            // pre-expansion, so the expanded `A[]]` is a valid `]`-key
+            // reference even without array_expand_once; a literal `A[]]` is
+            // unmarked and invalid — with -v it is "not a valid identifier",
+            // without -v/-f GNU falls back to the function path
+            // (set.def:902-909).
+            if name.contains('[')
+                && !crate::builtins::arrayref::valid_array_reference_for_unset(
+                    &name,
+                    &self.env_vars,
+                    w_arrayref,
+                )
+            {
+                // GNU set.def:912-916: an invalid array reference is not an
+                // element unbind. With -v (unset_function == 0) it reports
+                // sh_invalidid and bumps posix_utility_error; without -v/-f
+                // the name already took the function path above.
+                if variable_only {
+                    writeln!(
+                        stderr,
+                        "{}unset: `{name}': not a valid identifier",
+                        self.diagnostic_prefix()
+                    )?;
+                    element_status = element_status.max(1);
+                }
+                continue;
+            }
             // GNU builtins/set.def:925-968 + 1024 with nameref=1: the
             // non-unsettable and readonly checks run against
             // find_variable_last_nameref (the chain's last nameref, or the

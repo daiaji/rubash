@@ -306,8 +306,13 @@ impl Executor {
         // would wrongly undergo tilde expansion on the second pass.
         let mut expanded_args = Vec::new();
         for arg in args {
+            // W_ARRAYREF (in-band ARRAYREF_FLAG) is a no-op for declare —
+            // GNU marks the operand (execute_cmd.c:4366) but declare.def
+            // never consults builtin_arrayref_flags, so the byte is
+            // stripped here rather than used.
+            let (_, arg) = crate::builtins::arrayref::take_arrayref_flag(arg);
             let Some((name, value)) = split_assignment_word(arg) else {
-                expanded_args.push(arg.clone());
+                expanded_args.push(arg.to_string());
                 continue;
             };
             let value = crate::expand::tilde::tilde::strip_assignment_quote_marker(value);
