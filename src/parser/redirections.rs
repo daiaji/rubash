@@ -524,7 +524,11 @@ pub(super) fn assign_heredoc_body(
     current_cmd.heredoc = Some(body);
 }
 
-fn fill_pending_heredoc_body_recursive(cmd: &mut CommandNode, body: &str, gather_line: usize) -> bool {
+fn fill_pending_heredoc_body_recursive(
+    cmd: &mut CommandNode,
+    body: &str,
+    gather_line: usize,
+) -> bool {
     if fill_pending_heredoc_body(cmd, body, gather_line) {
         return true;
     }
@@ -566,10 +570,9 @@ fn fill_pending_heredoc_body_recursive(cmd: &mut CommandNode, body: &str, gather
                 fill_pending_heredoc_body_in_commands(&mut branch.condition, body, gather_line)
                     || fill_pending_heredoc_body_in_commands(&mut branch.body, body, gather_line)
             })
-            || if_command
-                .else_body
-                .as_mut()
-                .is_some_and(|commands| fill_pending_heredoc_body_in_commands(commands, body, gather_line))
+            || if_command.else_body.as_mut().is_some_and(|commands| {
+                fill_pending_heredoc_body_in_commands(commands, body, gather_line)
+            })
         {
             return true;
         }
@@ -587,11 +590,9 @@ fn fill_pending_heredoc_body_recursive(cmd: &mut CommandNode, body: &str, gather
         }
     }
     if let Some(case_command) = &mut cmd.case_command {
-        if case_command
-            .clauses
-            .iter_mut()
-            .any(|clause| fill_pending_heredoc_body_in_commands(&mut clause.body, body, gather_line))
-        {
+        if case_command.clauses.iter_mut().any(|clause| {
+            fill_pending_heredoc_body_in_commands(&mut clause.body, body, gather_line)
+        }) {
             return true;
         }
     }
@@ -611,11 +612,9 @@ fn fill_pending_heredoc_body_recursive(cmd: &mut CommandNode, body: &str, gather
         }
     }
     if let Some(coproc) = &mut cmd.coproc_command {
-        if coproc
-            .body
-            .as_mut()
-            .is_some_and(|commands| fill_pending_heredoc_body_in_commands(commands, body, gather_line))
-        {
+        if coproc.body.as_mut().is_some_and(|commands| {
+            fill_pending_heredoc_body_in_commands(commands, body, gather_line)
+        }) {
             return true;
         }
     }
@@ -623,13 +622,21 @@ fn fill_pending_heredoc_body_recursive(cmd: &mut CommandNode, body: &str, gather
     false
 }
 
-fn fill_pending_heredoc_body_in_commands(commands: &mut [CommandNode], body: &str, gather_line: usize) -> bool {
+fn fill_pending_heredoc_body_in_commands(
+    commands: &mut [CommandNode],
+    body: &str,
+    gather_line: usize,
+) -> bool {
     commands
         .iter_mut()
         .any(|command| fill_pending_heredoc_body_recursive(command, body, gather_line))
 }
 
-pub(super) fn fill_pending_heredoc_body(cmd: &mut CommandNode, body: &str, gather_line: usize) -> bool {
+pub(super) fn fill_pending_heredoc_body(
+    cmd: &mut CommandNode,
+    body: &str,
+    gather_line: usize,
+) -> bool {
     let Some(redirect) = cmd
         .heredoc_redirects
         .iter_mut()

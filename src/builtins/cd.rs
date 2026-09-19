@@ -81,7 +81,11 @@ where
     };
 
     if args.len().saturating_sub(first_operand) > 1 {
-        writeln!(stderr, "{}cd: too many arguments", diagnostic_prefix(env_vars))?;
+        writeln!(
+            stderr,
+            "{}cd: too many arguments",
+            diagnostic_prefix(env_vars)
+        )?;
         return Ok(EX_USAGE);
     }
 

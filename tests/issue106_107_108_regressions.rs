@@ -148,10 +148,16 @@ fn type_t_explicit_redirect_still_works() {
     let _ = fs::remove_file(&output_path);
     let (stdout, stderr, code) = run_rubash(&[
         "-c",
-        &format!("type -t ls > {}", output_path.to_string_lossy().replace('\\', "/")),
+        &format!(
+            "type -t ls > {}",
+            output_path.to_string_lossy().replace('\\', "/")
+        ),
     ]);
     assert_eq!(code, Some(0), "stderr: {stderr}");
-    assert!(stdout.is_empty(), "redirected type leaked to stdout: {stdout}");
+    assert!(
+        stdout.is_empty(),
+        "redirected type leaked to stdout: {stdout}"
+    );
     let contents = fs::read_to_string(&output_path).expect("read redirect target");
     let _ = fs::remove_file(&output_path);
     assert_eq!(contents, "file\n");

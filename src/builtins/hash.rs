@@ -125,11 +125,19 @@ where
         // (sh_notfound -> "hash: <name>: not found"); both fail the builtin.
         if crate::builtins::set::shell_option_enabled(env_vars, "restricted") {
             if pathname.contains('/') || pathname.contains('\\') {
-                writeln!(stderr, "{}hash: {pathname}: restricted", script_prefix(env_vars))?;
+                writeln!(
+                    stderr,
+                    "{}hash: {pathname}: restricted",
+                    script_prefix(env_vars)
+                )?;
                 return Ok(EXECUTION_FAILURE);
             }
             if crate::executor::path::find_user_command(pathname, env_vars).is_none() {
-                writeln!(stderr, "{}hash: {pathname}: not found", script_prefix(env_vars))?;
+                writeln!(
+                    stderr,
+                    "{}hash: {pathname}: not found",
+                    script_prefix(env_vars)
+                )?;
                 return Ok(EXECUTION_FAILURE);
             }
         }

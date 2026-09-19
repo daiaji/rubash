@@ -154,12 +154,9 @@ impl SessionHistory {
         let content = fs::read_to_string(path)?;
         let lines: Vec<&str> = content.lines().collect();
         // histfile.c:377-381: detect timestamps (# followed by digit).
-        let has_timestamps = lines
-            .first()
-            .is_some_and(|l| {
-                l.starts_with('#')
-                    && l[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
-            });
+        let has_timestamps = lines.first().is_some_and(|l| {
+            l.starts_with('#') && l[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
+        });
         // histfile.c:387: default_skipblanks = 0 when multiline entries.
         let has_multiline = has_timestamps;
         let default_skipblanks = !has_multiline;
@@ -168,10 +165,7 @@ impl SessionHistory {
         let mut count = 0usize;
         for line in &lines {
             let is_timestamp = line.starts_with('#')
-                && line[1..]
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_digit());
+                && line[1..].chars().next().is_some_and(|c| c.is_ascii_digit());
             if is_timestamp {
                 // histfile.c:448-453: save timestamp, skip leading blanks.
                 last_ts = Some(line);

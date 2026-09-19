@@ -159,9 +159,14 @@ pub fn decimal_point() -> char {
         locale_name()
     };
     let lower = locale.to_lowercase();
-    if lower.starts_with("de_de") || lower.starts_with("fr_fr") || lower.starts_with("es_es")
-        || lower.starts_with("it_it") || lower.starts_with("pt_pt") || lower.starts_with("nl_nl")
-        || lower.starts_with("ru_ru") || lower.starts_with("pl_pl")
+    if lower.starts_with("de_de")
+        || lower.starts_with("fr_fr")
+        || lower.starts_with("es_es")
+        || lower.starts_with("it_it")
+        || lower.starts_with("pt_pt")
+        || lower.starts_with("nl_nl")
+        || lower.starts_with("ru_ru")
+        || lower.starts_with("pl_pl")
     {
         ','
     } else {

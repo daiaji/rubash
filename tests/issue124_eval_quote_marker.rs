@@ -64,9 +64,8 @@ fn eval_quoted_variable_printf_has_no_literal_quotes() {
 /// argument, `$?` report — all inside one `eval` argument.
 #[test]
 fn eval_hermes_wrapper_payload_shape() {
-    let (stdout, _stderr, _code) = rubash(
-        r#"eval 'set -e; d='\''/tmp'\''; echo "d=[$d]"; printf "%s\n" "rc=$?"'; echo done"#,
-    );
+    let (stdout, _stderr, _code) =
+        rubash(r#"eval 'set -e; d='\''/tmp'\''; echo "d=[$d]"; printf "%s\n" "rc=$?"'; echo done"#);
     assert_eq!(stdout, "d=[/tmp]\nrc=0\ndone\n");
 }
 

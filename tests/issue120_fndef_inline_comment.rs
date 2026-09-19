@@ -39,7 +39,11 @@ fn assert_ok(script: &str, expected: &str) {
         stdout, expected,
         "stdout mismatch for {script:?} (rc={code:?}, stderr={stderr:?})"
     );
-    assert_eq!(code, Some(0), "rc mismatch for {script:?} (stderr={stderr:?})");
+    assert_eq!(
+        code,
+        Some(0),
+        "rc mismatch for {script:?} (stderr={stderr:?})"
+    );
 }
 
 // ---------------------------------------------------------------------------

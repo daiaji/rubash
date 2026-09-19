@@ -1098,7 +1098,13 @@ pub(super) fn unclosed_brace_eof_node(tokens: &[Token], brace_index: usize) -> C
     } else {
         inner_text.trim_end_matches([' ', '\t']).ends_with('\\')
     };
-    compound_eof_error_node("{", brace_line, region, last_line, eof_line_extra(last_line, continuation))
+    compound_eof_error_node(
+        "{",
+        brace_line,
+        region,
+        last_line,
+        eof_line_extra(last_line, continuation),
+    )
 }
 
 /// `name() (` with no closing `)`: the same EOF reporting names the `(`.
@@ -1110,7 +1116,13 @@ pub(super) fn unclosed_paren_eof_node(tokens: &[Token], paren_index: usize) -> C
         .map(|token| token.position)
         .max()
         .unwrap_or(paren_line);
-    compound_eof_error_node("(", paren_line, region, last_line, eof_line_extra(last_line, false))
+    compound_eof_error_node(
+        "(",
+        paren_line,
+        region,
+        last_line,
+        eof_line_extra(last_line, false),
+    )
 }
 
 fn eof_line_extra(last_line: usize, continuation: bool) -> usize {
@@ -1124,8 +1136,8 @@ fn compound_eof_error_node(
     last_line: usize,
     eof_line: usize,
 ) -> CommandNode {
-    let (name, name_line) = innermost_unclosed_compound(region)
-        .unwrap_or_else(|| (opener.to_string(), open_line));
+    let (name, name_line) =
+        innermost_unclosed_compound(region).unwrap_or_else(|| (opener.to_string(), open_line));
 
     // Heredocs still pending when EOF hit already warned during the GNU
     // parse: pair `<<` delimiters with body tokens exactly like the subshell
@@ -1166,7 +1178,11 @@ fn compound_eof_error_node(
     // warned there (GNU make_cmd.c gather at EOF: `f() { cat <<EOF` warns
     // "at line 4" at prefix line 4).
     for (delimiter, here_line) in pending_delimiters {
-        warned.push((delimiter, last_line.max(here_line), last_line.max(here_line)));
+        warned.push((
+            delimiter,
+            last_line.max(here_line),
+            last_line.max(here_line),
+        ));
     }
 
     let mut command = CommandNode::new();

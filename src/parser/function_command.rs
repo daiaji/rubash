@@ -1,4 +1,7 @@
-use super::parse_loop::{parse_time_prefixed_compound_command, parse_time_prefixed_shell_command, unclosed_brace_eof_node, unclosed_paren_eof_node};
+use super::parse_loop::{
+    parse_time_prefixed_compound_command, parse_time_prefixed_shell_command,
+    unclosed_brace_eof_node, unclosed_paren_eof_node,
+};
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
