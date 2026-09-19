@@ -81,7 +81,7 @@ impl Executor {
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
         for (name, value) in &command.assignments {
             let (base_name, _) = assignment_name_and_append(name);
-            let expanded_value = subshell.expand_assignment_value(value);
+            let expanded_value = subshell.expand_assignment_value(name, value);
             subshell
                 .env_vars
                 .insert(base_name.to_string(), expanded_value);
@@ -439,7 +439,7 @@ impl Executor {
         self.apply_child_environment(&mut process);
         for (var_name, var_value) in &command.assignments {
             let (base_name, _) = assignment_name_and_append(var_name);
-            let expanded_value = self.expand_assignment_value(var_value);
+            let expanded_value = self.expand_assignment_value(var_name, var_value);
             if is_valid_process_env(base_name, &expanded_value) {
                 process.env(base_name, expanded_value);
             }

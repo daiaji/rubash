@@ -12,7 +12,7 @@ impl Executor {
             if std::env::var("RUBASH_DEBUG_ASSIGN").is_ok() {
                 eprintln!("ASSIGN {name}={value:?}");
             }
-            let expanded_value = self.expand_assignment_value(value);
+            let expanded_value = self.expand_assignment_value(name, value);
             // GNU subst.c:10404+ expand_word_error -> DISCARD: a failed
             // assignment word (failglob no-match, readonly violation, ...)
             // abandons the rest of this command's assignment list.
@@ -123,7 +123,7 @@ impl Executor {
                 .insert("__RUBASH_TEMP_PATH".to_string(), "1".to_string());
         }
         for (name, value) in assignments {
-            let expanded_value = self.expand_assignment_value(value);
+            let expanded_value = self.expand_assignment_value(name, value);
             let (base_name, _) = assignment_name_and_append(name);
             let saved_env = self.env_vars.get(base_name).cloned();
             let saved_typed = self.shell_state.variables.get(base_name).cloned();

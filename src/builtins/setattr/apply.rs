@@ -3,7 +3,8 @@ use std::env;
 use std::io::{self, Write};
 
 use super::marks::{
-    mark_array, mark_exported, mark_readonly, marked_vars, nameref_resolved_cell, unmark_exported,
+    mark_array, mark_assoc, mark_exported, mark_readonly, marked_vars, nameref_resolved_cell,
+    unmark_exported,
 };
 use super::value::{
     array_attribute_assignment_value, diagnostic_prefix, eval_arith_value, is_array_value,
@@ -15,6 +16,7 @@ pub(super) fn apply_export_arg<W>(
     arg: &str,
     mode: ExportMode,
     array: bool,
+    assoc: bool,
     env_vars: &mut HashMap<String, String>,
     stderr: &mut W,
 ) -> io::Result<i32>
@@ -62,8 +64,16 @@ where
                 return Ok(EXECUTION_SUCCESS);
             }
 
+            // GNU setattr.def:240-258: `export -a/-A name=value` is
+            // rewritten as `declare -gx{a,A} name=value`, so the array
+            // attribute is applied only for an explicit assignment word;
+            // `export -a name` alone just marks att_exported.
+            let has_assign = value.is_some();
+            let converted = env_vars.contains_key(name) || env::var(name).is_ok();
             let value = value
-                .map(|value| array_attribute_assignment_value(value, array, env_vars, name))
+                .map(|value| {
+                    array_attribute_assignment_value(value, array || assoc, env_vars, name)
+                })
                 .or_else(|| env_vars.get(name).cloned())
                 .or_else(|| env::var(name).ok())
                 .unwrap_or_default();
@@ -81,7 +91,11 @@ where
             env_vars.insert(name.to_string(), value.clone());
             env::set_var(name, value);
             mark_exported(env_vars, name);
-            if array || is_array_value(env_vars.get(name).map(String::as_str).unwrap_or("")) {
+            if assoc && has_assign {
+                mark_assoc(env_vars, name, converted);
+            } else if (array && has_assign)
+                || is_array_value(env_vars.get(name).map(String::as_str).unwrap_or(""))
+            {
                 mark_array(env_vars, name);
             }
         }
@@ -97,6 +111,7 @@ where
 pub(super) fn apply_readonly_arg<W>(
     arg: &str,
     array: bool,
+    assoc: bool,
     env_vars: &mut HashMap<String, String>,
     stderr: &mut W,
     context_name: Option<&str>,
@@ -148,7 +163,7 @@ where
     let readonly = marked_vars(env_vars, READONLY_VARS);
     if readonly.contains(name) && value.is_some() {
         if let Some(subject) =
-            readonly_error_subject(value.unwrap_or_default(), array, context_name)
+            readonly_error_subject(value.unwrap_or_default(), array || assoc, context_name)
         {
             writeln!(
                 stderr,
@@ -168,8 +183,13 @@ where
         return Ok(EXECUTION_SUCCESS);
     }
 
+    // GNU setattr.def:240-258: `readonly -a/-A name=value` is rewritten as
+    // `declare -gr{a,A} name=value`; without `=` the flags only filter the
+    // printed list, so the marks below need the assignment word.
+    let has_assign = value.is_some();
+    let converted = env_vars.contains_key(name) || env::var(name).is_ok();
     let value = value
-        .map(|value| array_attribute_assignment_value(value, array, env_vars, name))
+        .map(|value| array_attribute_assignment_value(value, array || assoc, env_vars, name))
         .or_else(|| env_vars.get(name).cloned())
         .or_else(|| env::var(name).ok())
         .unwrap_or_default();
@@ -187,7 +207,11 @@ where
     env_vars.insert(name.to_string(), value.clone());
     env::set_var(name, value);
     mark_readonly(env_vars, name);
-    if array || is_array_value(env_vars.get(name).map(String::as_str).unwrap_or("")) {
+    if assoc && has_assign {
+        mark_assoc(env_vars, name, converted);
+    } else if (array && has_assign)
+        || is_array_value(env_vars.get(name).map(String::as_str).unwrap_or(""))
+    {
         mark_array(env_vars, name);
     }
     Ok(EXECUTION_SUCCESS)

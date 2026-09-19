@@ -294,10 +294,11 @@ pub(in crate::executor) fn hoist_data_backslashes(value: &str, marker: &str) -> 
 impl Executor {
     pub(in crate::executor) fn expand_assignment_value_result(
         &mut self,
+        name: &str,
         value: &str,
     ) -> AssignmentExpansionResult {
         self.last_command_substitution_status.set(None);
-        let expanded = self.expand_assignment_value(value);
+        let expanded = self.expand_assignment_value(name, value);
         let substitution_status = self.last_command_substitution_status.get();
         self.last_command_substitution_status.set(None);
         let arithmetic_error = self.arithmetic_expansion_error.replace(false);
@@ -317,7 +318,7 @@ impl Executor {
     /// re-scan would re-process it as syntax, so carry those quotes with the
     /// internal DATA_DOUBLE_QUOTE marker across expansion and restore them on
     /// the way out (assignment_expansion hoist/restore contract).
-    pub(in crate::executor) fn expand_assignment_value(&mut self, value: &str) -> String {
+    pub(in crate::executor) fn expand_assignment_value(&mut self, name: &str, value: &str) -> String {
         // GNU subst.c param_expand carries PF_ASSIGNRHS through the whole
         // assignment value expansion (W_ASSIGNMENT words); key-list `@`
         // expansions read this flag to pick the dollar_at join. Command
@@ -325,12 +326,12 @@ impl Executor {
         // the flag does not leak past a substitution boundary, matching
         // GNU dropping PF_ASSIGNRHS there.
         let saved_assignment_rhs = self.inside_assignment_rhs.replace(true);
-        let expanded = self.expand_assignment_value_hoisting(value);
+        let expanded = self.expand_assignment_value_hoisting(name, value);
         self.inside_assignment_rhs.set(saved_assignment_rhs);
         expanded
     }
 
-    fn expand_assignment_value_hoisting(&mut self, value: &str) -> String {
+    fn expand_assignment_value_hoisting(&mut self, name: &str, value: &str) -> String {
         // Only hoist when no command-substitution payload is present: quotes
         // inside a $()/backtick body are syntax for the nested parse, not data.
         if (!value.contains('"') && !value.contains('\'') && !value.contains("\\\\"))
@@ -338,7 +339,7 @@ impl Executor {
             || value.contains("$(")
             || contains_command_substitution_payload(value)
         {
-            return self.expand_assignment_value_inner(value);
+            return self.expand_assignment_value_inner(name, value);
         }
         const DQ_DATA: &str = "\u{E102}";
         // NOTE: \u{E103}/\u{E104} are already taken below by DATA_BACKTICK /
@@ -358,7 +359,7 @@ impl Executor {
         let hoisted_dq = hoist_data_double_quotes(value, DQ_DATA);
         let hoisted_sq = hoist_data_single_quotes(&hoisted_dq, SQ_DATA);
         let hoisted_bs = hoist_data_backslashes(&hoisted_sq, BS_DATA);
-        let expanded = self.expand_assignment_value_inner(&hoisted_bs);
+        let expanded = self.expand_assignment_value_inner(name, &hoisted_bs);
         expanded
             .replace(DQ_DATA, "\"")
             .replace(SQ_DATA, "'")
@@ -372,7 +373,11 @@ impl Executor {
     /// text introduced by parameter expansion is never re-expanded because
     /// this pass sees the raw element text (array.tests: aa=([0]=~/a:~/b)
     /// stores the expanded paths while bb=([0]="~/a:~/b") stays literal).
-    pub(in crate::executor) fn expand_tilde_in_compound_assignment(&self, value: &str) -> String {
+    pub(in crate::executor) fn expand_tilde_in_compound_assignment(
+        &self,
+        name: &str,
+        value: &str,
+    ) -> String {
         let Some(inner) = value
             .strip_prefix('(')
             .and_then(|value| value.strip_suffix(')'))
@@ -380,36 +385,111 @@ impl Executor {
             return value.to_string();
         };
 
+        // GNU arrayfunc.c:630 assign_assoc_from_kvlist: an associative
+        // kv-pair KEY expands through expand_subscript_string (leading `~`
+        // only — `:`-tilde needs the W_ASSIGNMENT internal_tilde flag that
+        // subst.c:11063 deliberately leaves unset), while the VALUE expands
+        // through expand_assignment_string_to_string (`:`-tilde armed). An
+        // indexed bare element goes through expand_words_no_vars
+        // (arrayfunc.c:610) which has no `:`-tilde either. Only `[k]=v`
+        // element values and odd-position assoc kvlist values take `:`-tilde.
+        let base = name.strip_suffix('+').unwrap_or(name);
+        let base = base.split('[').next().unwrap_or(base);
+        let assoc = is_marked_var(&self.env_vars, ASSOC_VARS, base);
+        let tokens: Vec<String> = split_compound_element_words(inner);
+        // kvpair_assignment_p (arrayfunc.c:665): a list is kv-pair form when
+        // its first element does not open a `[subscript]=` element.
+        let kvlist = tokens.first().is_some_and(|token| !token.starts_with('['));
         let mut elements: Vec<String> = Vec::new();
-        for token in split_compound_element_words(inner) {
-            elements.push(self.expand_compound_element_tilde(&token));
+        for (index, token) in tokens.iter().enumerate() {
+            let expand_after_colon =
+                token.starts_with('[') || (assoc && kvlist && index % 2 == 1);
+            elements.push(self.expand_compound_element_tilde(token, expand_after_colon));
         }
         format!("({})", elements.join(" "))
     }
 
-    fn expand_compound_element_tilde(&self, token: &str) -> String {
+    fn expand_compound_element_tilde(&self, token: &str, expand_after_colon: bool) -> String {
         const DQ_DATA: &str = "\u{E102}";
         let (prefix, element) = if token.starts_with('[') {
             match token.find("]=") {
-                Some(offset) => (&token[..offset + 2], &token[offset + 2..]),
-                None => ("", token),
+                Some(offset) => {
+                    // The `[k]` subscript takes the same expand_subscript_string
+                    // pass as a direct element assignment (arrayfunc.c:815/865):
+                    // a leading unquoted `~` in the key tilde-expands while
+                    // `:`-tilde stays unarmed (assoc19.sub `[~/key]=v`).
+                    let key = self.expand_compound_tilde_segment(&token[1..offset]);
+                    (format!("[{key}]="), token[offset + 2..].to_string())
+                }
+                None => (String::new(), token.to_string()),
             }
         } else {
-            ("", token)
+            (String::new(), token.to_string())
         };
-        if element.starts_with('\'') || element.starts_with('"') || element.starts_with(DQ_DATA) {
+        let element = element.as_str();
+        // E107 is the hoisted single-quote sentinel (SQ_DATA) — a hoisted
+        // quoted element is literal like a `'`/`"`-quoted one.
+        if element.starts_with('\'')
+            || element.starts_with('"')
+            || element.starts_with(DQ_DATA)
+            || element.starts_with('\u{E107}')
+        {
             return token.to_string();
         }
-        if !tilde_expand::assignment_value_needs_tilde_expansion(element, true) {
+        if !tilde_expand::assignment_value_needs_tilde_expansion(element, expand_after_colon) {
             return token.to_string();
         }
-        format!(
-            "{prefix}{}",
-            tilde_expand::expand_assignment_tilde_value(element, &self.env_vars, true)
-        )
+        // GNU subst.c:4357 expand_string_assignment: each `:`-separated
+        // segment expands a leading `~`/`~word`; the `/rest` tail keeps
+        // source status so `$x`/`$( )` there still expand later. The
+        // expanded tilde text is DATA — GNU backslash-quotes expanded
+        // subscript text for the same reason (sh_backslash_quote,
+        // subst.c:11147): escape it so re-tokenization keeps `\`,
+        // whitespace and metacharacters verbatim without suppressing the
+        // tail's later expansions.
+        let mut output = String::new();
+        if expand_after_colon {
+            let mut start = 0;
+            for (index, ch) in element.char_indices() {
+                if index == 0 || ch != ':' {
+                    continue;
+                }
+                output.push_str(&self.expand_compound_tilde_segment(&element[start..index]));
+                output.push(':');
+                start = index + ch.len_utf8();
+            }
+            output.push_str(&self.expand_compound_tilde_segment(&element[start..]));
+        } else {
+            // expand_subscript_string / expand_words_no_vars semantics: only
+            // a leading `~` expands; `:`-tilde is not armed.
+            output.push_str(&self.expand_compound_tilde_segment(element));
+        }
+        format!("{prefix}{output}")
     }
 
-    fn expand_assignment_value_inner(&mut self, value: &str) -> String {
+    fn expand_compound_tilde_segment(&self, segment: &str) -> String {
+        if !segment.starts_with('~') {
+            return segment.to_string();
+        }
+        // GNU lib/tilde/tilde.c: the tilde word is `~`/`~word` up to `/`.
+        let word_end = segment[1..]
+            .find('/')
+            .map(|i| i + 1)
+            .unwrap_or(segment.len());
+        let (tilde_word, rest) = segment.split_at(word_end);
+        let expanded = tilde_expand::expand_tilde_segment(tilde_word, &self.env_vars);
+        let mut protected = String::with_capacity(expanded.len() * 2 + rest.len());
+        for ch in expanded.chars() {
+            if !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '/' | '.' | ':' | ',' | '%' | '@' | '+' | '-')) {
+                protected.push('\\');
+            }
+            protected.push(ch);
+        }
+        protected.push_str(rest);
+        protected
+    }
+
+    fn expand_assignment_value_inner(&mut self, name: &str, value: &str) -> String {
         // The verbatim single-element fast path is only for storage-shaped
         // values without expansions: a compound value containing a
         // parameter expansion (e.g. (${!xx})) must reach the compound
@@ -515,7 +595,7 @@ impl Executor {
         // elements stay literal; quoted whole-RHS values skip the pass.
         let tilde_value =
             if compound_assignment && !quoted && value.starts_with('(') && value.ends_with(')') {
-                std::borrow::Cow::Owned(self.expand_tilde_in_compound_assignment(value))
+                std::borrow::Cow::Owned(self.expand_tilde_in_compound_assignment(name, value))
             } else {
                 std::borrow::Cow::Borrowed(value)
             };
@@ -1424,9 +1504,10 @@ impl Executor {
 
     pub(in crate::executor) fn expand_assignment_value_with_status(
         &mut self,
+        name: &str,
         value: &str,
     ) -> (String, Option<i32>) {
-        let result = self.expand_assignment_value_result(value);
+        let result = self.expand_assignment_value_result(name, value);
         (result.value, result.substitution_status)
     }
 }
@@ -1438,6 +1519,10 @@ impl Executor {
 /// separates elements.
 fn split_compound_element_words(value: &str) -> Vec<String> {
     const DQ_DATA: char = '\u{E102}';
+    // The hoisted single-quote sentinel (expand_assignment_value_hoisting):
+    // `'q k'` arrives as E107 q k E107 and must still count as ONE element
+    // or the kv-pair key/value parity in the assoc tilde pass shifts.
+    const SQ_DATA: char = '\u{E107}';
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut single = false;
@@ -1509,6 +1594,10 @@ fn split_compound_element_words(value: &str) -> Vec<String> {
             }
             '"' if !single => {
                 double = !double;
+                token.push(ch);
+            }
+            SQ_DATA if !double => {
+                single = !single;
                 token.push(ch);
             }
             DQ_DATA if !single => {

@@ -160,7 +160,7 @@ pub fn expand_assignment_tilde_value(
     output
 }
 
-fn expand_tilde_segment(segment: &str, env_vars: &HashMap<String, String>) -> String {
+pub(crate) fn expand_tilde_segment(segment: &str, env_vars: &HashMap<String, String>) -> String {
     let Some(rest) = segment.strip_prefix('~') else {
         return segment.to_string();
     };

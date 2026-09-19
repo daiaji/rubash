@@ -212,7 +212,7 @@ impl Executor {
         // elements stay literal; quoted whole-RHS values skip the pass.
         let tilde_raw_owned;
         let raw_value = if !quoted && raw_value.starts_with('(') && raw_value.ends_with(')') {
-            tilde_raw_owned = self.expand_tilde_in_compound_assignment(raw_value);
+            tilde_raw_owned = self.expand_tilde_in_compound_assignment(name, raw_value);
             &tilde_raw_owned
         } else {
             raw_value
@@ -253,7 +253,12 @@ impl Executor {
         // where the value is "~" must stay literal). GNU expands `~` at the
         // start of the RHS and after every `:` in an assignment value
         // (subst.c:11410-11460 internal_tilde + assignoff tracking).
+        // A compound `( ... )` RHS already took its per-element tilde pass
+        // (assign_assoc_from_kvlist key/value split, arrayfunc.c:630) — a
+        // whole-text `:`-tilde would wrongly expand `~` inside key-position
+        // elements like `p:~/r` that GNU leaves literal.
         if !quoted
+            && !compound_assignment
             && !expanded.contains('=')
             && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
             && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")

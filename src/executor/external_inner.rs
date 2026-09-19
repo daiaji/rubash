@@ -452,7 +452,7 @@ impl Executor {
         let mut env_vars = self.env_vars.clone();
         for (var_name, var_value) in &cmd.assignments {
             let (base_name, _) = assignment_name_and_append(var_name);
-            let expanded_value = self.expand_assignment_value(var_value);
+            let expanded_value = self.expand_assignment_value(var_name, var_value);
             // GNU variables.c:3564-3578 assign_in_env -> bind_variable: a
             // prefix assignment to a nameref binds the referenced variable,
             // so the child env carries the TARGET name and the nameref's
@@ -595,7 +595,7 @@ impl Executor {
                 // not 5).
                 continue;
             }
-            let expanded_value = self.expand_assignment_value(var_value);
+            let expanded_value = self.expand_assignment_value(var_name, var_value);
             // GNU variables.c assign_in_env binds a compound `name=(...)`
             // tempenv word as the literal list text; the internal
             // COMPOUND_ASSIGNMENT_MARKER must not leak into the child's

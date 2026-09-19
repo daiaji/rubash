@@ -73,6 +73,7 @@ where
     let mut mode = ExportMode::Set;
     let mut print = false;
     let mut array = false;
+    let mut assoc = false;
     let mut func_export = false;
     let mut index = 0;
 
@@ -91,6 +92,7 @@ where
                 'n' => mode = ExportMode::Unset,
                 'p' => print = true,
                 'a' => array = true,
+                'A' => assoc = true,
                 'f' => {
                     // export -f: mark function for export
                     // Store the function definition in an environment variable
@@ -131,7 +133,7 @@ where
 
     let mut status = EXECUTION_SUCCESS;
     for arg in &args[index..] {
-        if apply_export_arg(arg, mode, array, env_vars, stderr)? != EXECUTION_SUCCESS {
+        if apply_export_arg(arg, mode, array, assoc, env_vars, stderr)? != EXECUTION_SUCCESS {
             status = EXECUTION_FAILURE;
         }
     }
@@ -210,7 +212,9 @@ where
 
     let mut status = EXECUTION_SUCCESS;
     for arg in &args[index..] {
-        if apply_readonly_arg(arg, array, env_vars, stderr, context_name)? != EXECUTION_SUCCESS {
+        if apply_readonly_arg(arg, array, assoc, env_vars, stderr, context_name)?
+            != EXECUTION_SUCCESS
+        {
             status = EXECUTION_FAILURE;
         }
     }

@@ -222,7 +222,7 @@ impl Executor {
             if std::env::var("RUBASH_DEBUG_ASSIGN").is_ok() {
                 eprintln!("EMPTY-ASSIGN {name}={value:?}");
             }
-            let assignment_result = self.expand_assignment_value_result(value);
+            let assignment_result = self.expand_assignment_value_result(name, value);
             let expanded_value = assignment_result.value;
             let substitution_status = assignment_result.substitution_status;
             if assignment_result.arithmetic_error && !assignment_result.arithmetic_nonfatal_error {

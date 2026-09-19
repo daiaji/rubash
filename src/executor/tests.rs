@@ -86,7 +86,7 @@ mod unit_tests {
         let mut executor = Executor::new();
 
         assert_eq!(
-            executor.expand_assignment_value("`echo -n \" ab \"`"),
+            executor.expand_assignment_value("x", "`echo -n \" ab \"`"),
             " ab "
         );
     }

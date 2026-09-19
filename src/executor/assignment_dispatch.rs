@@ -65,7 +65,7 @@ impl Executor {
             let Some((name, value)) = split_assignment_word(word) else {
                 return false;
             };
-            let (expanded_value, status) = self.expand_assignment_value_with_status(value);
+            let (expanded_value, status) = self.expand_assignment_value_with_status(&name, value);
             if status.is_some() {
                 command_substitution_status = status;
             }
@@ -108,7 +108,7 @@ impl Executor {
 
         let mut value = value.clone();
         value.push_str(suffix);
-        let expanded_value = self.expand_assignment_value(&value);
+        let expanded_value = self.expand_assignment_value(name, &value);
         self.exit_code = if self.apply_shell_assignment(name, expanded_value) {
             0
         } else {

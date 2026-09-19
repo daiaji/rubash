@@ -1041,6 +1041,11 @@ fn collect_process_substitution_suffix(
 /// Name-side validator for atomic compound assignments: optional
 /// `name[subscript]` head, then identifier rules (GNU arrayfunc.c).
 fn valid_compound_assignment_lhs(lhs: &str) -> bool {
+    // GNU general.c:519 assignment(): `name+=` is an assignment word (`+` is
+    // valid only immediately before `=`), so `name+=(list)` opens a compound
+    // assignment exactly like `name=(list)` — compound_assignment_start
+    // (lexer/word.rs) applies the same single-trailing-`+` strip.
+    let lhs = lhs.strip_suffix('+').unwrap_or(lhs);
     let head = if lhs.ends_with(']') {
         let Some(open) = lhs.rfind('[') else {
             return false;

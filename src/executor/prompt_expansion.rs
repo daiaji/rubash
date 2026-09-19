@@ -418,7 +418,7 @@ impl Executor {
         for (name, value) in &cmd.assignments {
             // `COMPOUND_ASSIGNMENT_MARKER` is an internal carrier for compound
             // array assignments and must never leak into user-visible xtrace.
-            let expanded = self.expand_assignment_value(value);
+            let expanded = self.expand_assignment_value(name, value);
             let expanded = expanded
                 .strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
                 .unwrap_or(&expanded);

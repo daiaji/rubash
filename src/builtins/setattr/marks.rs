@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::value::valid_identifier;
-use super::{ARRAY_VARS, EXPORTED_VARS, NAMEREF_VARS, READONLY_VARS};
+use super::{ARRAY_VARS, ASSOC_VARS, EXPORTED_VARS, NAMEREF_VARS, READONLY_VARS};
 
 pub(super) fn mark_exported(env_vars: &mut HashMap<String, String>, name: &str) {
     let mut exported = marked_vars(env_vars, EXPORTED_VARS);
@@ -34,6 +34,37 @@ pub(super) fn mark_array(env_vars: &mut HashMap<String, String>, name: &str) {
     env_vars.insert(
         ARRAY_VARS.to_string(),
         arrays.into_iter().collect::<Vec<_>>().join("\x1f"),
+    );
+}
+
+/// GNU setattr.def:240-258 rewrites `readonly -A name=value` /
+/// `export -A name=value` into `declare -g{r,x}A name=value`, so the
+/// assoc attribute follows declare.def's table creation: an existing
+/// variable converts through convert_var_to_assoc (assoc_create(0),
+/// DEFAULT_HASH_BUCKETS=128, arrayfunc.c:114-117/hashlib.h:72), while a
+/// fresh name gets ASSOC_HASH_BUCKETS=1024 (variables.c:2857, assoc.h:28).
+pub(super) fn mark_assoc(env_vars: &mut HashMap<String, String>, name: &str, converted: bool) {
+    let mut assoc = marked_vars(env_vars, ASSOC_VARS);
+    assoc.insert(name.to_string());
+    env_vars.insert(
+        ASSOC_VARS.to_string(),
+        assoc.into_iter().collect::<Vec<_>>().join("\x1f"),
+    );
+    let mut arrays = marked_vars(env_vars, ARRAY_VARS);
+    arrays.remove(name);
+    env_vars.insert(
+        ARRAY_VARS.to_string(),
+        arrays.into_iter().collect::<Vec<_>>().join("\x1f"),
+    );
+    let mut assoc128 = marked_vars(env_vars, crate::executor::types::ASSOC_128_VARS);
+    if converted {
+        assoc128.insert(name.to_string());
+    } else {
+        assoc128.remove(name);
+    }
+    env_vars.insert(
+        crate::executor::types::ASSOC_128_VARS.to_string(),
+        assoc128.into_iter().collect::<Vec<_>>().join("\x1f"),
     );
 }
 

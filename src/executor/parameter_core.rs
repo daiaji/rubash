@@ -101,7 +101,7 @@ impl Executor {
             // elements stay literal.
             let tilde_raw_owned;
             let raw_value = if raw_value.starts_with('(') && raw_value.ends_with(')') {
-                tilde_raw_owned = self.expand_tilde_in_compound_assignment(raw_value);
+                tilde_raw_owned = self.expand_tilde_in_compound_assignment(name, raw_value);
                 &tilde_raw_owned
             } else {
                 raw_value
@@ -183,7 +183,13 @@ impl Executor {
                     .replace(DQ_DATA, "\"")
                     .replace(SQ_DATA, "'")
             };
-            if !expanded.contains('=')
+            // A compound `( ... )` RHS already took its per-element tilde
+            // pass (assign_assoc_from_kvlist key/value split,
+            // arrayfunc.c:630) — a whole-text `:`-tilde would wrongly
+            // expand `~` inside key-position elements like `p:~/r` that
+            // GNU leaves literal.
+            if !compound_assignment
+                && !expanded.contains('=')
                 && tilde_expand::assignment_value_needs_tilde_expansion(raw_value, true)
                 && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
                     || expanded.starts_with("~/"))

@@ -30,7 +30,13 @@ impl Executor {
         // single expansion inside eval_indexed_subscript below — expanding
         // here too would execute `a[$(echo INJ)]=v` twice.
         let key = self.expand_subscript_string(raw_subscript);
-        if !key.contains(['[', ']', '=']) {
+        // expand_subscript_string is the subscript's ONE expansion pass
+        // (GNU subst.c:11063 — W_NOTILDE is deliberately absent, so a leading
+        // unquoted `~` inside the subscript tilde-expands). When its result
+        // differs from the raw text — expanded `~`, quotes, `$x` — the whole
+        // word expansion will NOT reproduce it (mid-word `~` never tilde-
+        // expands), so the resolved key must ride the synthetic word.
+        if key == raw_subscript && !key.contains(['[', ']', '=']) {
             return None;
         }
         // Dynamic arrays are consumed by name before the associative branch,
