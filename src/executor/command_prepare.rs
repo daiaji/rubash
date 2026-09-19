@@ -460,7 +460,8 @@ impl Executor {
             let mut words = Vec::new();
             for (word, suppress_glob) in expanded_words {
                 if suppress_glob {
-                    let materialized = materialize_expanded_command_word(&word).replace('\x17', "'");
+                    let materialized =
+                        materialize_expanded_command_word(&word).replace('\x17', "'");
                     words.push(materialized);
                 } else {
                     match pathname_expand_word(&word, &self.env_vars) {
@@ -805,9 +806,7 @@ impl Executor {
         // that are unquoted in the raw text, so GNU brace-expands it to
         // `"${letters["2"]}" … "${letters["6"]}"`. Check the raw form for
         // unquoted brace expansion even when the word is quote-marked.
-        let raw_has_braces = raw.is_some_and(|r| {
-            crate::expand::braces::expand_braces(r).len() > 1
-        });
+        let raw_has_braces = raw.is_some_and(|r| crate::expand::braces::expand_braces(r).len() > 1);
         if (!quoted_whole_word || raw_has_braces) && raw.is_some() && self.is_brace_expand_enabled()
         // GNU runs brace expansion before parameter expansion, so a
         // dollar-brace in the word does not suppress it: the dollar-brace
@@ -1458,7 +1457,7 @@ impl Executor {
         // tempenv is a plain caller-context binding now — restore normally.
         let frames = &self.function_tempenv_names;
         self.tempenv_propagated_names
-            .retain(|name| frames.iter().any(|frame| frame.iter().any(|n| n == name)));
+            .retain(|(name, _)| frames.iter().any(|frame| frame.iter().any(|n| n == name)));
         Some(result.and(finish_result).and(assignment_finish_result))
     }
 

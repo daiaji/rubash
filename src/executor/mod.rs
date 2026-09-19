@@ -592,7 +592,7 @@ pub struct Executor {
     /// caller's context when the frame pops instead of dying with it. Names
     /// listed here skip function-call tempenv restores (like promoted
     /// names) until no live function tempenv covers them any more.
-    tempenv_propagated_names: Vec<String>,
+    tempenv_propagated_names: Vec<(String, VarAttrs)>,
     /// Base names bound by each active function call's own tempenv prefix —
     /// the function's variable context in GNU terms (variables.c
     /// push_context). Lets the posix merge path distinguish a function

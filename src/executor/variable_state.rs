@@ -49,9 +49,7 @@ impl Executor {
             // variable itself: find_variable_nameref_for_assignment
             // (variables.c:2210-2237) returns the nameref so `ref=x` binds
             // the cell and `unset ref` unbinds the nameref.
-            NamerefResolution::Unresolved | NamerefResolution::NotNameref => {
-                Some(name.to_string())
-            }
+            NamerefResolution::Unresolved | NamerefResolution::NotNameref => Some(name.to_string()),
         }
     }
 
@@ -107,8 +105,7 @@ impl Executor {
                 return None;
             }
             let cell = self.env_vars.get(&current).cloned().unwrap_or_default();
-            if cell.is_empty()
-                || (!is_shell_name(&cell) && parse_array_subscript(&cell).is_none())
+            if cell.is_empty() || (!is_shell_name(&cell) && parse_array_subscript(&cell).is_none())
             {
                 return Some(cell);
             }
@@ -190,7 +187,12 @@ impl Executor {
     /// models the global binding as the OUTERMOST local-scope snapshot that
     /// captured the name (see circular_fallback_value); when no scope
     /// shadowed it the live store entry is the global one.
-    pub(in crate::executor) fn assign_circular_fallback(&mut self, name: &str, value: String, append: bool) {
+    pub(in crate::executor) fn assign_circular_fallback(
+        &mut self,
+        name: &str,
+        value: String,
+        append: bool,
+    ) {
         let Some(fallback) = self.nameref_circular_fallback_name(name) else {
             return;
         };
@@ -214,7 +216,8 @@ impl Executor {
                     .copied()
                     .map(|attrs| (index, attrs))
             });
-        if let Some((scope_index, attrs)) = saved_attrs.filter(|(_, attrs)| attrs.array || attrs.assoc)
+        if let Some((scope_index, attrs)) =
+            saved_attrs.filter(|(_, attrs)| attrs.array || attrs.assoc)
         {
             let saved = self.local_var_scopes[scope_index]
                 .get(&fallback)
@@ -223,8 +226,7 @@ impl Executor {
                 .unwrap_or_default();
             let integer = attrs.integer;
             let updated = if attrs.assoc {
-                let mut entries =
-                    crate::executor::assignment_helpers::assoc_entries(&saved);
+                let mut entries = crate::executor::assignment_helpers::assoc_entries(&saved);
                 let existing = entries
                     .iter()
                     .rev()
@@ -258,8 +260,7 @@ impl Executor {
                         .join(" ")
                 )
             } else {
-                let mut entries =
-                    super::arrays::indexed_array_entries(&saved);
+                let mut entries = super::arrays::indexed_array_entries(&saved);
                 let existing = entries.get(&0).cloned().unwrap_or_default();
                 let element = if append && integer {
                     (self.eval_integer_assignment_value(&existing)
@@ -458,7 +459,12 @@ impl Executor {
 
     pub(in crate::executor) fn restore_temporary_assignments(
         &mut self,
-        previous: Vec<(String, Option<String>, Option<crate::shell::Variable>)>,
+        previous: Vec<(
+            String,
+            Option<String>,
+            Option<crate::shell::Variable>,
+            Option<VarAttrs>,
+        )>,
     ) {
         if let Some(mark) = self.tempenv_marks.pop() {
             self.tempenv_names.truncate(mark);
@@ -468,18 +474,20 @@ impl Executor {
         // promoted to a frame local — its env binding must survive this
         // restore, and it keeps the tempvar's exported attribute.
         let promoted = std::mem::take(&mut self.tempenv_promoted_names);
-        for (name, value, typed_value) in previous.into_iter().rev() {
+        let mut deferred_attrs = Vec::new();
+        for (name, value, typed_value, saved_attrs) in previous.into_iter().rev() {
             self.tempenv_previous.remove(&name);
             // GNU variables.c:4485-4525 push_posix_temp_var: a propagated
             // binding descended into the caller's context — the caller's
             // tempenv restore must not touch it, and it keeps the tempvar's
-            // exported attribute (v->attributes |= var->attributes).
-            if self
+            // own attributes (v->attributes |= var->attributes).
+            if let Some(attrs) = self
                 .tempenv_propagated_names
                 .iter()
-                .any(|propagated| propagated == &name)
+                .find(|(propagated, _)| propagated == &name)
+                .map(|(_, attrs)| attrs.clone())
             {
-                self.mark_exported(&name);
+                deferred_attrs.push((name, attrs));
                 continue;
             }
             if promoted.iter().any(|promoted_name| promoted_name == &name) {
@@ -493,6 +501,28 @@ impl Executor {
                 env::remove_var(&name);
             }
             self.restore_typed_temporary_value(&name, typed_value);
+            // GNU variables.c pop_scope: the saved variable object — value
+            // AND attributes — is reinstalled when the tempenv pops, so an
+            // attribute gained mid-command (`a=7 f` where f runs
+            // `readonly a`) does not leak onto the restored binding.
+            if let Some(attrs) = saved_attrs {
+                deferred_attrs.push((name, attrs));
+            }
+        }
+        // The attribute-list env keys (__RUBASH_*_VARS) are tempenv entries
+        // themselves whose whole-list restore ran above, so the per-name
+        // attribute writes must go last or the list restore clobbers them.
+        for (name, attrs) in deferred_attrs {
+            set_var_attrs(&mut self.env_vars, &name, attrs);
+            // Only resync an existing typed cell — creating one for an unset
+            // name would materialize `var=<unset>` bindings as `var=`.
+            if self.shell_state.variables.get(&name).is_some() {
+                crate::builtins::declare::sync_typed_attributes(
+                    &[name],
+                    &self.env_vars,
+                    &mut self.shell_state.variables,
+                );
+            }
         }
         for name in promoted {
             self.mark_exported(&name);

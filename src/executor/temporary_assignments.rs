@@ -65,7 +65,12 @@ impl Executor {
     pub(in crate::executor) fn apply_temporary_assignments(
         &mut self,
         assignments: &[(String, String)],
-    ) -> Vec<(String, Option<String>, Option<crate::shell::Variable>)> {
+    ) -> Vec<(
+        String,
+        Option<String>,
+        Option<crate::shell::Variable>,
+        Option<VarAttrs>,
+    )> {
         // TODO(execute_cmd.c/variables.c): Bash applies assignment words with
         // different persistence rules for special builtins, functions, POSIX
         // mode, and external command environments. For upstream builtins tests,
@@ -84,11 +89,13 @@ impl Executor {
                 EXPORTED_VARS.to_string(),
                 self.env_vars.get(EXPORTED_VARS).cloned(),
                 self.shell_state.variables.get(EXPORTED_VARS).cloned(),
+                None,
             ));
             previous.push((
                 NAMEREF_VARS.to_string(),
                 self.env_vars.get(NAMEREF_VARS).cloned(),
                 self.shell_state.variables.get(NAMEREF_VARS).cloned(),
+                None,
             ));
         }
         // GNU findcmd.c:356-365: a PATH in the temporary command environment
@@ -110,6 +117,7 @@ impl Executor {
                     .variables
                     .get("__RUBASH_TEMP_PATH")
                     .cloned(),
+                None,
             ));
             self.env_vars
                 .insert("__RUBASH_TEMP_PATH".to_string(), "1".to_string());
@@ -119,15 +127,17 @@ impl Executor {
             let (base_name, _) = assignment_name_and_append(name);
             let saved_env = self.env_vars.get(base_name).cloned();
             let saved_typed = self.shell_state.variables.get(base_name).cloned();
+            let saved_attrs = capture_var_attrs(&self.env_vars, base_name);
             self.tempenv_previous.insert(
                 base_name.to_string(),
-                (
-                    saved_env.clone(),
-                    saved_typed.clone(),
-                    capture_var_attrs(&self.env_vars, base_name),
-                ),
+                (saved_env.clone(), saved_typed.clone(), saved_attrs.clone()),
             );
-            previous.push((base_name.to_string(), saved_env, saved_typed));
+            previous.push((
+                base_name.to_string(),
+                saved_env,
+                saved_typed,
+                Some(saved_attrs),
+            ));
             // GNU variables.c bind_variable (ASS_NAMEREF path): a temporary
             // assignment to a nameref writes the referenced variable, so the
             // restore must also capture the target's previous value or the
@@ -143,6 +153,7 @@ impl Executor {
                     target.clone(),
                     self.env_vars.get(target).cloned(),
                     self.shell_state.variables.get(target).cloned(),
+                    Some(capture_var_attrs(&self.env_vars, target)),
                 ));
             }
             // GNU variables.c:3564-3578 assign_in_env: when the name does not

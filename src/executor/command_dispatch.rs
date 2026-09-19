@@ -105,9 +105,10 @@ impl Executor {
                     && !self
                         .tempenv_propagated_names
                         .iter()
-                        .any(|propagated| propagated == base)
+                        .any(|(propagated, _)| propagated == base)
                 {
-                    self.tempenv_propagated_names.push(base.to_string());
+                    self.tempenv_propagated_names
+                        .push((base.to_string(), capture_var_attrs(&self.env_vars, base)));
                 }
             }
         }
