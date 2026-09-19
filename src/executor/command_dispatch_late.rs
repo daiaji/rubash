@@ -27,7 +27,11 @@ impl Executor {
             }
             index += 1;
         }
-        Ok(crate::builtins::test::execute(&args, bracket, &self.env_vars)?)
+        Ok(crate::builtins::test::execute(
+            &args,
+            bracket,
+            &self.env_vars,
+        )?)
     }
 
     pub(in crate::executor) fn execute_late_builtin_command(

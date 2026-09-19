@@ -211,10 +211,7 @@ impl ConditionalArithParser<'_> {
         let rest = &self.input[self.pos..];
         let msg = if super::assignment_operator_at(rest, 0).is_some() {
             "attempted assignment to non-variable"
-        } else if rest
-            .first()
-            .is_some_and(|ch| !super::token_can_start(ch))
-        {
+        } else if rest.first().is_some_and(|ch| !super::token_can_start(ch)) {
             "arithmetic syntax error: invalid arithmetic operator"
         } else {
             "arithmetic syntax error in expression"
@@ -248,5 +245,7 @@ pub(super) enum ArithLValue {
     /// and binds report `` `name[]': not a valid identifier `` while the
     /// expression keeps evaluating (verified GNU 5.3: `(( a[]=24 ))`
     /// reports the diagnostic, assigns nothing, and yields status 0).
-    InvalidElement { display: String },
+    InvalidElement {
+        display: String,
+    },
 }

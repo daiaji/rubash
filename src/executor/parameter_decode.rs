@@ -164,7 +164,9 @@ fn remove_matching_prefix_bytes(
         let prefix =
             crate::executor::substitution_metadata::bytes_to_shell_text(&value_bytes[..end]);
         if removal_pattern_matches(pattern, &prefix, extglob) {
-            return crate::executor::substitution_metadata::bytes_to_shell_text(&value_bytes[end..]);
+            return crate::executor::substitution_metadata::bytes_to_shell_text(
+                &value_bytes[end..],
+            );
         }
     }
     value.to_string()
@@ -186,7 +188,9 @@ fn remove_matching_suffix_bytes(
         let suffix =
             crate::executor::substitution_metadata::bytes_to_shell_text(&value_bytes[start..]);
         if removal_pattern_matches(pattern, &suffix, extglob) {
-            return crate::executor::substitution_metadata::bytes_to_shell_text(&value_bytes[..start]);
+            return crate::executor::substitution_metadata::bytes_to_shell_text(
+                &value_bytes[..start],
+            );
         }
     }
     value.to_string()

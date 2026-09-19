@@ -60,7 +60,9 @@ fn flatten_pattern_to_byte_chars(pattern: &str) -> Vec<char> {
                 _ => {
                     let mut encoded = [0; 4];
                     for byte in ch.encode_utf8(&mut encoded).as_bytes() {
-                        output.push(char::from_u32(BYTE_CHAR_BASE + *byte as u32).expect("byte-char"));
+                        output.push(
+                            char::from_u32(BYTE_CHAR_BASE + *byte as u32).expect("byte-char"),
+                        );
                     }
                 }
             }
@@ -102,7 +104,9 @@ fn flatten_word_to_byte_chars(word: &str) -> Vec<char> {
                 _ => {
                     let mut encoded = [0; 4];
                     for byte in ch.encode_utf8(&mut encoded).as_bytes() {
-                        output.push(char::from_u32(BYTE_CHAR_BASE + *byte as u32).expect("byte-char"));
+                        output.push(
+                            char::from_u32(BYTE_CHAR_BASE + *byte as u32).expect("byte-char"),
+                        );
                     }
                 }
             }

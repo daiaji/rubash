@@ -256,5 +256,4 @@ impl Executor {
         self.exit_code = 0;
         true
     }
-
 }

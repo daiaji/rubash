@@ -647,8 +647,11 @@ impl Executor {
         // `x=$(set -e; false; echo bad)` prints nothing). A suppression
         // counter would keep -e dead even after `set -e`. POSIX mode
         // enables inherit_errexit (set-e1.sub).
-        let posix_mode =
-            subshell.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
+        let posix_mode = subshell
+            .env_vars
+            .get("__RUBASH_POSIX_MODE")
+            .map(String::as_str)
+            == Some("1");
         let inherit_errexit =
             crate::builtins::shopt::option_enabled(&subshell.env_vars, "inherit_errexit");
         // Builtins inside the body that write the process stdout directly

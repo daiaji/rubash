@@ -107,10 +107,8 @@ impl Executor {
             // (nameref5.sub: `typeset -n v=v1; for v in v1 v2` prints
             // "v1: 1" "v2: 2"). A non-nameref loop variable uses plain
             // bind_variable semantics.
-            let bound_name = if is_marked_var(&self.env_vars, NAMEREF_VARS, &for_command.variable)
-            {
-                let value_valid = is_shell_name(&value)
-                    || parse_array_subscript(&value).is_some();
+            let bound_name = if is_marked_var(&self.env_vars, NAMEREF_VARS, &for_command.variable) {
+                let value_valid = is_shell_name(&value) || parse_array_subscript(&value).is_some();
                 if !value_valid {
                     eprintln!(
                         "{}`{}': not a valid identifier",
@@ -240,8 +238,7 @@ impl Executor {
         if let Some(fd) = dev_stdio_redirect_fd(&target) {
             return match self.fd_table.read_endpoint(fd) {
                 Some(FdReadEndpoint::File(path)) => fs::read_to_string(&path).ok(),
-                Some(FdReadEndpoint::Text(_))
-                | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
+                Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
                     self.virtual_fd_stdin_remaining(fd)
                 }
                 _ => None,

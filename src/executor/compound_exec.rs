@@ -1391,87 +1391,87 @@ impl Executor {
                         can_bind = false;
                     }
                     if can_bind {
-                    match self.nameref_resolution(&array_name) {
-                        NamerefResolution::Target(target) => {
-                            // GNU execute_cmd.c coproc_bind ->
-                            // find_variable_nameref_for_create: the cell must
-                            // be a bare identifier — `coproc ref` with ref ->
-                            // `XXX[0]` fails sh_invalidid and binds nothing
-                            // (nameref18.sub line 51).
-                            if parse_array_subscript(&target).is_some() {
+                        match self.nameref_resolution(&array_name) {
+                            NamerefResolution::Target(target) => {
+                                // GNU execute_cmd.c coproc_bind ->
+                                // find_variable_nameref_for_create: the cell must
+                                // be a bare identifier — `coproc ref` with ref ->
+                                // `XXX[0]` fails sh_invalidid and binds nothing
+                                // (nameref18.sub line 51).
+                                if parse_array_subscript(&target).is_some() {
+                                    eprintln!(
+                                        "{}`{target}': not a valid identifier",
+                                        self.diagnostic_prefix()
+                                    );
+                                    can_bind = false;
+                                } else {
+                                    let target_base =
+                                        target.split('[').next().unwrap_or(target.as_str());
+                                    let target_exists = self.env_vars.contains_key(target_base)
+                                        || self.shell_state.variables.get(target_base).is_some();
+                                    if target_exists {
+                                        // v != 0: ASSIGN_DISALLOWED on the resolved
+                                        // var; elements bind to the target but
+                                        // <name>_PID still uses the original name.
+                                        if is_marked_var(&self.env_vars, READONLY_VARS, target_base)
+                                        {
+                                            eprintln!(
+                                                "{}{}: readonly variable",
+                                                self.diagnostic_prefix(),
+                                                array_name
+                                            );
+                                            can_bind = false;
+                                        } else {
+                                            bind_name = target_base.to_string();
+                                        }
+                                    } else {
+                                        // v == 0: c_name rewritten to the cell, so
+                                        // both the array and <target>_PID bind on
+                                        // the target name; the nameref keeps its
+                                        // cell untouched.
+                                        bind_name = target_base.to_string();
+                                        pid_name = format!("{target_base}_PID");
+                                        // c_name rewritten to the nameref cell
+                                        // (execute_cmd.c:2401-2404).
+                                        c_name = target_base.to_string();
+                                    }
+                                }
+                            }
+                            NamerefResolution::Unresolved => {
+                                // Invisible/empty-cell nameref: GNU drops the
+                                // attribute with a warning, then treats it as a
+                                // plain variable (readonly check still applies).
                                 eprintln!(
-                                    "{}`{target}': not a valid identifier",
-                                    self.diagnostic_prefix()
+                                    "{}warning: {}: removing nameref attribute",
+                                    self.diagnostic_prefix(),
+                                    array_name
                                 );
-                                can_bind = false;
-                            } else {
-                            let target_base =
-                                target.split('[').next().unwrap_or(target.as_str());
-                            let target_exists = self.env_vars.contains_key(target_base)
-                                || self.shell_state.variables.get(target_base).is_some();
-                            if target_exists {
-                                // v != 0: ASSIGN_DISALLOWED on the resolved
-                                // var; elements bind to the target but
-                                // <name>_PID still uses the original name.
-                                if is_marked_var(&self.env_vars, READONLY_VARS, target_base)
-                                {
+                                unmark_env_name(&mut self.env_vars, NAMEREF_VARS, &array_name);
+                                if is_marked_var(&self.env_vars, READONLY_VARS, &array_name) {
                                     eprintln!(
                                         "{}{}: readonly variable",
                                         self.diagnostic_prefix(),
                                         array_name
                                     );
                                     can_bind = false;
-                                } else {
-                                    bind_name = target_base.to_string();
                                 }
-                            } else {
-                                // v == 0: c_name rewritten to the cell, so
-                                // both the array and <target>_PID bind on
-                                // the target name; the nameref keeps its
-                                // cell untouched.
-                                bind_name = target_base.to_string();
-                                pid_name = format!("{target_base}_PID");
-                                // c_name rewritten to the nameref cell
-                                // (execute_cmd.c:2401-2404).
-                                c_name = target_base.to_string();
                             }
+                            NamerefResolution::NotNameref => {
+                                if is_marked_var(&self.env_vars, READONLY_VARS, &array_name) {
+                                    eprintln!(
+                                        "{}{}: readonly variable",
+                                        self.diagnostic_prefix(),
+                                        array_name
+                                    );
+                                    can_bind = false;
+                                }
                             }
-                        }
-                        NamerefResolution::Unresolved => {
-                            // Invisible/empty-cell nameref: GNU drops the
-                            // attribute with a warning, then treats it as a
-                            // plain variable (readonly check still applies).
-                            eprintln!(
-                                "{}warning: {}: removing nameref attribute",
-                                self.diagnostic_prefix(),
-                                array_name
-                            );
-                            unmark_env_name(&mut self.env_vars, NAMEREF_VARS, &array_name);
-                            if is_marked_var(&self.env_vars, READONLY_VARS, &array_name) {
-                                eprintln!(
-                                    "{}{}: readonly variable",
-                                    self.diagnostic_prefix(),
-                                    array_name
-                                );
+                            // Circular/depth-overflow chains resolve to nothing
+                            // (INVALID_NAMEREF_VALUE) — GNU binds nothing.
+                            NamerefResolution::Circular | NamerefResolution::MaxDepth => {
                                 can_bind = false;
                             }
                         }
-                        NamerefResolution::NotNameref => {
-                            if is_marked_var(&self.env_vars, READONLY_VARS, &array_name) {
-                                eprintln!(
-                                    "{}{}: readonly variable",
-                                    self.diagnostic_prefix(),
-                                    array_name
-                                );
-                                can_bind = false;
-                            }
-                        }
-                        // Circular/depth-overflow chains resolve to nothing
-                        // (INVALID_NAMEREF_VALUE) — GNU binds nothing.
-                        NamerefResolution::Circular | NamerefResolution::MaxDepth => {
-                            can_bind = false;
-                        }
-                    }
                     }
                     // GNU stores c_name regardless of bind success so
                     // coproc_unsetvars can still attempt the unbinds.

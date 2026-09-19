@@ -1,11 +1,11 @@
 use super::storage::quote_assoc_display_key;
 use super::*;
+use crate::executor::NamerefResolution;
 use crate::executor::{
     assoc_hash_ordered_entries, assoc_hash_ordered_values, assoc_keys,
     eval_conditional_arith_value_with_writes, IndexedSubscript, SubscriptSource,
     DECLARED_UNSET_VARS, NAMEREF_VARS,
 };
-use crate::executor::NamerefResolution;
 
 impl Executor {
     pub(in crate::executor) fn indexed_array_stack(&self, name: &str) -> Vec<String> {
@@ -162,8 +162,7 @@ impl Executor {
         // evalerror aborts the command list) rather than being stored or
         // silently treated as index 0. The `key` above already received the
         // single expand_subscript_string pass, so it is Protected data here.
-        let index = match self.eval_indexed_subscript_deferred(SubscriptSource::Protected(&key))
-        {
+        let index = match self.eval_indexed_subscript_deferred(SubscriptSource::Protected(&key)) {
             IndexedSubscript::Index(index) => index,
             // `${a[]}`: GNU subst.c reports "bad substitution" for the
             // expansion, which parameter_errors turns into the dropped word;

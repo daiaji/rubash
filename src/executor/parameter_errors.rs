@@ -726,10 +726,7 @@ impl Executor {
                     {
                         let base_exists = match self.nameref_resolution(head) {
                             NamerefResolution::Target(target) => {
-                                let base = target
-                                    .split('[')
-                                    .next()
-                                    .unwrap_or(target.as_str());
+                                let base = target.split('[').next().unwrap_or(target.as_str());
                                 self.env_vars.contains_key(base)
                                     || self.shell_state.variables.get(base).is_some()
                             }
@@ -1103,10 +1100,8 @@ impl Executor {
             Some(storage) if storage.starts_with('\x1d') || storage.starts_with('(') => self
                 .nounset_indexed_element_absent(base, sub)
                 .then(|| reported.to_string()),
-            Some(_) => (self.eval_integer_assignment_value(sub) != 0)
-                .then(|| reported.to_string()),
-            None => (!self.dynamic_parameter_is_set(base)
-                && std::env::var(base).is_err()
+            Some(_) => (self.eval_integer_assignment_value(sub) != 0).then(|| reported.to_string()),
+            None => (!self.dynamic_parameter_is_set(base) && std::env::var(base).is_err()
                 || self.eval_integer_assignment_value(sub) != 0)
                 .then(|| reported.to_string()),
         }

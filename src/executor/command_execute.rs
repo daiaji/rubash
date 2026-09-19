@@ -66,7 +66,10 @@ impl Executor {
         if let Some(spec) = cmd
             .get_assignment("__RUBASH_PARSE_ERROR_EOF_SUBSHELL__")
             .map(|value| format!("(\x1e{value}"))
-            .or_else(|| cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__").cloned())
+            .or_else(|| {
+                cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__")
+                    .cloned()
+            })
         {
             // GNU parse.y:6890-6901 (yyerror EOF path): an unclosed compound
             // reports "unexpected end of file from `X' command on line N"

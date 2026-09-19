@@ -238,11 +238,19 @@ impl Executor {
     /// text is data for readtok's junk branch — never re-expanded. Indexed
     /// array subscripts still expand inside array_expand_index unless
     /// `shopt -s array_expand_once` (expr.c:1171, arrayfunc.c:1368-1378).
-    pub(crate) fn eval_arithmetic_command_value_no_expand(&mut self, expression: &str) -> Option<i128> {
+    pub(crate) fn eval_arithmetic_command_value_no_expand(
+        &mut self,
+        expression: &str,
+    ) -> Option<i128> {
         self.eval_arithmetic_command_value_with_flags(expression, false, "let")
     }
 
-    fn eval_arithmetic_command_value_with_flags(&mut self, expression: &str, expand: bool, label: &'static str) -> Option<i128> {
+    fn eval_arithmetic_command_value_with_flags(
+        &mut self,
+        expression: &str,
+        expand: bool,
+        label: &'static str,
+    ) -> Option<i128> {
         self.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
@@ -297,8 +305,8 @@ impl Executor {
         // under the option, so `let 'a[""]=26'` feeds `""` to evalexp
         // verbatim -> "operand expected" (verified GNU 5.3). The marker
         // mirrors EXP_EXPANDED for the parser's subscript evaluation.
-        let exp_expanded = !expand
-            && crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once");
+        let exp_expanded =
+            !expand && crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once");
         if exp_expanded {
             self.env_vars
                 .insert("__RUBASH_ARITH_EXP_EXPANDED".to_string(), "1".to_string());
@@ -389,19 +397,17 @@ impl Executor {
         // still expands `$x` under the default. The Q_DOUBLE_QUOTES variant
         // keeps quote characters as data (`a[\" \"]=v` -> evalexp(`" "`)
         // fails "operand expected", verified GNU 5.3).
-        let reexpanded = if crate::builtins::shopt::option_enabled(
-            &self.env_vars,
-            "array_expand_once",
-        ) {
-            resolved
-                .replace('\x1f', "$")
-                .replace('\x1a', "`")
-                .replace('\x14', "\\")
-                .replace('\x17', "'")
-                .replace('\x18', "\"")
-        } else {
-            self.expand_arithmetic_subscript_mut(resolved)
-        };
+        let reexpanded =
+            if crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once") {
+                resolved
+                    .replace('\x1f', "$")
+                    .replace('\x1a', "`")
+                    .replace('\x14', "\\")
+                    .replace('\x17', "'")
+                    .replace('\x18', "\"")
+            } else {
+                self.expand_arithmetic_subscript_mut(resolved)
+            };
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(&reexpanded);
         let expression = normalize_arithmetic_quotes(&with_assoc_keys);
         *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
@@ -640,7 +646,10 @@ impl Executor {
     /// expanded text is marker-encoded like associative keys so an empty
     /// result (`a[$i]` with i unset -> index 0) stays distinguishable from
     /// a literal `a[]` bad subscript.
-    pub(in crate::executor) fn expand_arith_indexed_subscripts(&mut self, expression: &str) -> String {
+    pub(in crate::executor) fn expand_arith_indexed_subscripts(
+        &mut self,
+        expression: &str,
+    ) -> String {
         let bytes = expression.as_bytes();
         let mut output = String::with_capacity(expression.len());
         let mut index = 0usize;
@@ -648,8 +657,7 @@ impl Executor {
             let ch = bytes[index];
             if !(ch.is_ascii_alphabetic() || ch == b'_') {
                 let is_substitution = ch == b'`'
-                    || (ch == b'$'
-                        && matches!(bytes.get(index + 1), Some(&b'(') | Some(&b'{')));
+                    || (ch == b'$' && matches!(bytes.get(index + 1), Some(&b'(') | Some(&b'{')));
                 if is_substitution {
                     let end = assoc_skip_substitution(bytes, index);
                     output.push_str(&expression[index..end]);
@@ -698,10 +706,7 @@ impl Executor {
     /// array_expand_index expand (`let`'s EXP_EXPANDED operands, `[[`
     /// arithcomp operands) — a no-op under `shopt -s array_expand_once`
     /// (expr.c:1171, test.c:652).
-    pub(in crate::executor) fn expand_arith_eval_subscripts(
-        &mut self,
-        expression: &str,
-    ) -> String {
+    pub(in crate::executor) fn expand_arith_eval_subscripts(&mut self, expression: &str) -> String {
         if crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once") {
             return expression.to_string();
         }
@@ -1452,9 +1457,7 @@ fn arithmetic_error_message_ctx(
     // value, not an lvalue, so the post-increment fails with
     // "++: assignment requires lvalue" / "--: assignment requires lvalue".
     if let Some((token, msg)) = pre_post_increment_lvalue_token(expression) {
-        return Some(format!(
-            "{expression}: {msg} (error token is \"{token}\")"
-        ));
+        return Some(format!("{expression}: {msg} (error token is \"{token}\")"));
     }
 
     // An empty ternary branch is a parse failure in Bash:
@@ -1667,7 +1670,6 @@ fn arithmetic_error_message_ctx(
 
     None
 }
-
 
 /// GNU expr.c: a sub-expression with an unbalanced `(` reports "missing `)'"
 /// with the last token as the error token (e.g. `7 + (43 * 6` -> token "6").

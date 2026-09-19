@@ -7,10 +7,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use super::support_names::split_shell_path;

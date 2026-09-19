@@ -246,8 +246,12 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or(1)
             + self.comsub_leading_newlines.get();
-        let tokens =
-            crate::lexer::tokenize_comsub_body(&source, self.posix_mode_enabled(), comsub_start_line, true);
+        let tokens = crate::lexer::tokenize_comsub_body(
+            &source,
+            self.posix_mode_enabled(),
+            comsub_start_line,
+            true,
+        );
         let ast = crate::parser::parse(&tokens);
         let first = ast.commands.first()?;
         let (first, piped_next) = if let Some(pipeline_command) = &first.pipeline_command {
@@ -330,8 +334,12 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or(1)
             + self.comsub_leading_newlines.get();
-        let tokens =
-            crate::lexer::tokenize_comsub_body(&source, self.posix_mode_enabled(), comsub_start_line, true);
+        let tokens = crate::lexer::tokenize_comsub_body(
+            &source,
+            self.posix_mode_enabled(),
+            comsub_start_line,
+            true,
+        );
         let ast = crate::parser::parse(&tokens);
         let first = ast.commands.first()?;
         let (first, piped_next) = if let Some(pipeline_command) = &first.pipeline_command {

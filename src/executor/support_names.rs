@@ -367,7 +367,9 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
                 ) && existing.fd.unwrap_or(1) == 1
             });
         if own_output_is_fd_alias {
-            command.redirects.insert(0, injected_group_redirect(&redirect));
+            command
+                .redirects
+                .insert(0, injected_group_redirect(&redirect));
         } else if command.redirect_out.is_none() && command.append.is_none() {
             command.append = Some(injected_group_redirect(redirect));
             if command.redirects.iter().any(|existing| {
@@ -380,7 +382,9 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
             }) {
                 command.redirects.push(injected_group_redirect(&redirect));
             } else {
-                command.redirects.insert(0, injected_group_redirect(&redirect));
+                command
+                    .redirects
+                    .insert(0, injected_group_redirect(&redirect));
             }
         }
         if has_own_output_redirect {
@@ -472,7 +476,9 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
             if has_stdout_redirect {
                 command.redirects.push(injected_group_redirect(&redirect));
             } else {
-                command.redirects.insert(0, injected_group_redirect(&redirect));
+                command
+                    .redirects
+                    .insert(0, injected_group_redirect(&redirect));
             }
             apply_inherited_stderr_to_stdout_fd_copy(command, &redirect);
         }

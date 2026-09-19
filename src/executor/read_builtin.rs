@@ -1893,7 +1893,8 @@ impl Executor {
                     }
                     // Circular/over-depth chains: find_variable_last_nameref
                     // returns NULL and the array binds to the name itself.
-                    NamerefResolution::Circular | NamerefResolution::MaxDepth
+                    NamerefResolution::Circular
+                    | NamerefResolution::MaxDepth
                     | NamerefResolution::NotNameref => {}
                 }
             }

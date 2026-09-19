@@ -19,12 +19,11 @@ impl Executor {
         // GNU readonly.def shares declare.def's operand handling: a
         // `readonly name[sub]=value` subscript resolves under the same
         // ExpandedOnce (W_ASSIGNMENT -> ASS_NOEXPAND) rules.
-        let args = match self
-            .rewrite_declare_operand_subscripts(&cmd.words[1..], &cmd.word_metadata)
-        {
-            Ok(args) => args,
-            Err(()) => return Ok(1),
-        };
+        let args =
+            match self.rewrite_declare_operand_subscripts(&cmd.words[1..], &cmd.word_metadata) {
+                Ok(args) => args,
+                Err(()) => return Ok(1),
+            };
         // GNU variables.c:3320 bind_variable_value → 2920-2937
         // make_variable_value: a `name=value` operand whose target carries
         // the integer attribute evaluates the RHS with evalexp (setattr.def

@@ -433,11 +433,7 @@ impl Executor {
                         // GNU builtins/mapfile.def:330: empty array name
                         // reports "empty array variable name" (EX_USAGE),
                         // distinct from sh_invalidid for non-identifier names.
-                        return self.mapfile_empty_array_name(
-                            cmd,
-                            command_name,
-                            &mut stderr,
-                        );
+                        return self.mapfile_empty_array_name(cmd, command_name, &mut stderr);
                     }
                     index += 1;
                 }

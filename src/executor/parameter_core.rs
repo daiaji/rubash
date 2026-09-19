@@ -114,8 +114,7 @@ impl Executor {
                 };
                 return format!("{name}={marker}{expanded}");
             }
-            if let Some(expanded) =
-                self.expand_compound_positional_at_assignment(raw_value, false)
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, false)
             {
                 let marker = if compound_assignment {
                     COMPOUND_ASSIGNMENT_MARKER.to_string()
@@ -162,10 +161,7 @@ impl Executor {
             // expand_assignment_value_hoisting's `$(`-guard.
             let needs_hoist = !raw_value.contains("$(") && !raw_value.contains('`');
             let hoisted = if needs_hoist {
-                hoist_data_single_quotes(
-                    &hoist_data_double_quotes(raw_value, DQ_DATA),
-                    SQ_DATA,
-                )
+                hoist_data_single_quotes(&hoist_data_double_quotes(raw_value, DQ_DATA), SQ_DATA)
             } else {
                 raw_value.to_string()
             };
@@ -220,8 +216,16 @@ impl Executor {
                     } else {
                         eval_input.as_str()
                     };
-                    let message = crate::executor::arithmetic::arithmetic_error_message(display, true, &self.env_vars)
-                        .unwrap_or_else(|| format!("{display}: syntax error in expression (error token is \"{display}\")"));
+                    let message = crate::executor::arithmetic::arithmetic_error_message(
+                        display,
+                        true,
+                        &self.env_vars,
+                    )
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{display}: syntax error in expression (error token is \"{display}\")"
+                        )
+                    });
                     eprintln!("{}{}", self.diagnostic_prefix(), message);
                 }
                 return String::new();

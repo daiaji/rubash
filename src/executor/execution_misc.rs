@@ -18,7 +18,8 @@ pub(crate) fn printable_filename(name: &str) -> String {
 /// in the active locale; Rubash additionally must quote when internal
 /// raw-byte markers are present so they don't leak as PUA chars.
 pub(crate) fn word_needs_ansic_quote(word: &str) -> bool {
-    if word.contains(char::from_u32(super::substitution_metadata::RAW_BYTE_MARKER_ESCAPE).unwrap()) {
+    if word.contains(char::from_u32(super::substitution_metadata::RAW_BYTE_MARKER_ESCAPE).unwrap())
+    {
         return true;
     }
     word.chars().any(|ch| {

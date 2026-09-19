@@ -697,105 +697,105 @@ impl Executor {
                         output.push_str("\\$");
                         output.push(crate::lexer::ANSI_C_QUOTE_MARKER);
                     } else {
-                    let mut quoted = String::new();
-                    let mut escaped = false;
-                    let mut closed = false;
-                    for quoted_ch in chars.by_ref() {
+                        let mut quoted = String::new();
+                        let mut escaped = false;
+                        let mut closed = false;
+                        for quoted_ch in chars.by_ref() {
+                            if escaped {
+                                quoted.push('\\');
+                                quoted.push(quoted_ch);
+                                escaped = false;
+                                continue;
+                            }
+                            if quoted_ch == '\\' {
+                                escaped = true;
+                                continue;
+                            }
+                            if quoted_ch == '\'' {
+                                closed = true;
+                                break;
+                            }
+                            quoted.push(quoted_ch);
+                        }
                         if escaped {
                             quoted.push('\\');
-                            quoted.push(quoted_ch);
-                            escaped = false;
-                            continue;
                         }
-                        if quoted_ch == '\\' {
-                            escaped = true;
-                            continue;
-                        }
-                        if quoted_ch == '\'' {
-                            closed = true;
-                            break;
-                        }
-                        quoted.push(quoted_ch);
-                    }
-                    if escaped {
-                        quoted.push('\\');
-                    }
-                    if closed {
-                        let decoded = crate::lexer::decode_ansi_c_quoted(&quoted);
-                        if decoded.is_empty() {
-                            // GNU parse.y:5566 wraps the ansiexpand result in
-                            // sh_single_quote, so $'' stays a QUOTED empty
-                            // word: `x=($'')` stores an empty element and
-                            // `echo a$''b` still yields `ab` after quote
-                            // removal. Emit a quoted-empty token so the word
-                            // is not dropped from the word list (issue #109
-                            // class: decoded $'...' array elements).
-                            output.push_str("\"\"");
-                        } else if alternate {
-                            for ch in decoded.chars() {
-                                if matches!(ch, ' ' | '\t' | '\n') {
-                                    output.push('\x1c');
-                                }
-                                output.push(ch);
-                            }
-                        } else if decoded
-                            .chars()
-                            // GNU subst.c keeps a quoted span one word even when
-                            // it decodes to whitespace, so re-quote the decoded
-                            // value when it would otherwise be field-split
-                            // (A=( $'n\nl' ) is one element, not `n` and `l`).
-                            // ASCII whitespace here, not char::is_whitespace:
-                            // StorageWordIter splits on is_ascii_whitespace,
-                            // which includes form feed (unicode1.sub
-                            // [0x000c]=$'\f' stored an empty element), while
-                            // char::is_whitespace would additionally hide
-                            // non-ASCII space separators we must not quote.
-                            .any(|ch| ch.is_ascii_whitespace() || ch == '\x0b')
-                        {
-                            // When the expansion context is already
-                            // double-quoted (e.g. `"${var:-$'\t'}"`), the
-                            // outer quotes already protect the decoded value
-                            // from field splitting. Use the \x1c whitespace
-                            // sentinel instead of wrapping in synthetic
-                            // double quotes, which would leak literal `"`
-                            // into the output (nquote.tests: `"${mytab:-$'\t'}"`
-                            // must yield a bare tab, not `"^I"`).
-                            if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
+                        if closed {
+                            let decoded = crate::lexer::decode_ansi_c_quoted(&quoted);
+                            if decoded.is_empty() {
+                                // GNU parse.y:5566 wraps the ansiexpand result in
+                                // sh_single_quote, so $'' stays a QUOTED empty
+                                // word: `x=($'')` stores an empty element and
+                                // `echo a$''b` still yields `ab` after quote
+                                // removal. Emit a quoted-empty token so the word
+                                // is not dropped from the word list (issue #109
+                                // class: decoded $'...' array elements).
+                                output.push_str("\"\"");
+                            } else if alternate {
                                 for ch in decoded.chars() {
                                     if matches!(ch, ' ' | '\t' | '\n') {
                                         output.push('\x1c');
                                     }
                                     output.push(ch);
                                 }
-                            } else {
-                                output.push('"');
-                                for ch in decoded.chars() {
-                                    match ch {
-                                        '\\' => output.push_str("\\\\"),
-                                        '"' => output.push_str("\\\""),
-                                        '$' => output.push_str("\\$"),
-                                        '`' => output.push_str("\\`"),
-                                        _ => output.push(ch),
+                            } else if decoded
+                                .chars()
+                                // GNU subst.c keeps a quoted span one word even when
+                                // it decodes to whitespace, so re-quote the decoded
+                                // value when it would otherwise be field-split
+                                // (A=( $'n\nl' ) is one element, not `n` and `l`).
+                                // ASCII whitespace here, not char::is_whitespace:
+                                // StorageWordIter splits on is_ascii_whitespace,
+                                // which includes form feed (unicode1.sub
+                                // [0x000c]=$'\f' stored an empty element), while
+                                // char::is_whitespace would additionally hide
+                                // non-ASCII space separators we must not quote.
+                                .any(|ch| ch.is_ascii_whitespace() || ch == '\x0b')
+                            {
+                                // When the expansion context is already
+                                // double-quoted (e.g. `"${var:-$'\t'}"`), the
+                                // outer quotes already protect the decoded value
+                                // from field splitting. Use the \x1c whitespace
+                                // sentinel instead of wrapping in synthetic
+                                // double quotes, which would leak literal `"`
+                                // into the output (nquote.tests: `"${mytab:-$'\t'}"`
+                                // must yield a bare tab, not `"^I"`).
+                                if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
+                                    for ch in decoded.chars() {
+                                        if matches!(ch, ' ' | '\t' | '\n') {
+                                            output.push('\x1c');
+                                        }
+                                        output.push(ch);
                                     }
+                                } else {
+                                    output.push('"');
+                                    for ch in decoded.chars() {
+                                        match ch {
+                                            '\\' => output.push_str("\\\\"),
+                                            '"' => output.push_str("\\\""),
+                                            '$' => output.push_str("\\$"),
+                                            '`' => output.push_str("\\`"),
+                                            _ => output.push(ch),
+                                        }
+                                    }
+                                    output.push('"');
                                 }
-                                output.push('"');
+                            } else {
+                                // Tag decoded quotes with E010/E011 markers so
+                                // downstream quote removal (remove_shell_quotes in
+                                // append_array_value) treats them as data, not
+                                // syntax operators. Without this, `$'a"b'` decodes
+                                // to `a"b` and the bare `"` is stripped when stored
+                                // in an array (issue #109).
+                                output.push_str(&crate::lexer::escape_decoded_ansi_c_quotes(
+                                    &decoded,
+                                ));
                             }
                         } else {
-                            // Tag decoded quotes with E010/E011 markers so
-                            // downstream quote removal (remove_shell_quotes in
-                            // append_array_value) treats them as data, not
-                            // syntax operators. Without this, `$'a"b'` decodes
-                            // to `a"b` and the bare `"` is stripped when stored
-                            // in an array (issue #109).
-                            output.push_str(
-                                &crate::lexer::escape_decoded_ansi_c_quotes(&decoded),
-                            );
+                            output.push('$');
+                            output.push('\'');
+                            output.push_str(&quoted);
                         }
-                    } else {
-                        output.push('$');
-                        output.push('\'');
-                        output.push_str(&quoted);
-                    }
                     }
                 }
                 Some(other) => {
@@ -1029,7 +1029,11 @@ impl Executor {
         // `cat` command, not the line of the outer `$(`).
         let has_heredoc = source.contains("<<");
         let leading_newlines = source.chars().take_while(|ch| *ch == '\n').count();
-        let source = if has_heredoc { source.trim() } else { source.trim() };
+        let source = if has_heredoc {
+            source.trim()
+        } else {
+            source.trim()
+        };
         let words = self.expand_aliases(&split_shell_words(source));
         // Store leading newlines for the heredoc path to adjust warning
         // line numbers: when `$(` is at end of line, the comsub body starts

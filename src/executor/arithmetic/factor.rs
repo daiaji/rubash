@@ -87,9 +87,7 @@ impl ConditionalArithParser<'_> {
             // (`+=2` reports `+=2`, `++=2` reports `+=2` after the first
             // unary `+`). The unary `+`/`-`/`!` below must not consume the
             // first byte of a compound token.
-            Some(b'+') | Some(b'-') | Some(b'!')
-                if self.input.get(self.pos + 1) == Some(&b'=') =>
-            {
+            Some(b'+') | Some(b'-') | Some(b'!') if self.input.get(self.pos + 1) == Some(&b'=') => {
                 self.fail_operand_expected()
             }
             Some(b'+') => {
@@ -158,9 +156,10 @@ impl ConditionalArithParser<'_> {
     /// token's end (`123abc + 1` displays as `123abc`, token `123abc`).
     pub(super) fn parse_number(&mut self) -> Option<i128> {
         let start = self.pos;
-        while self.peek().is_some_and(|ch| {
-            ch.is_ascii_alphanumeric() || matches!(ch, b'#' | b'@' | b'_')
-        }) {
+        while self
+            .peek()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'#' | b'@' | b'_'))
+        {
             self.pos += 1;
         }
         let end = self.pos;

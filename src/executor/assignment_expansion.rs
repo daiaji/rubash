@@ -66,7 +66,9 @@ pub(in crate::executor) fn hoist_data_double_quotes(value: &str, marker: &str) -
     // hoisting it corrupts compound array elements like `[0x0022]=\"`
     // (unicode1.sub) by turning `\"` into `\<marker>`, which the storage
     // tokenizer mis-parses. Skip a `"` preceded by a backslash.
-    if !value.contains("${") && !value.contains("$'") && !value.contains("$(")
+    if !value.contains("${")
+        && !value.contains("$'")
+        && !value.contains("$(")
         && !value.contains('`')
     {
         return replace_unescaped_double_quotes(value, marker);
@@ -106,10 +108,8 @@ pub(in crate::executor) fn hoist_data_double_quotes(value: &str, marker: &str) -
             // unterminated input the whole rest is consumed.
             let body = &rest[pos + 2..];
             let mut chars = body.chars().peekable();
-            let _ = collect_command_substitution_source(
-                &mut chars,
-                &std::collections::HashMap::new(),
-            );
+            let _ =
+                collect_command_substitution_source(&mut chars, &std::collections::HashMap::new());
             let remaining: usize = chars.map(|ch| ch.len_utf8()).sum();
             let consumed = body.len() - remaining;
             let end = pos + 2 + consumed;
@@ -558,7 +558,7 @@ impl Executor {
             }
             return expanded;
         }
-                if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(value) {
+        if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(value) {
             if compound_assignment {
                 return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
             }

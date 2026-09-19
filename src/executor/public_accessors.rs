@@ -762,11 +762,7 @@ impl Executor {
             .as_deref()
             .map(unterminated_heredoc_body_line_count)
             .unwrap_or(0);
-        let warning_line = cmd
-            .heredoc_gather_line
-            .or(cmd.line)
-            .unwrap_or(1)
-            + body_lines;
+        let warning_line = cmd.heredoc_gather_line.or(cmd.line).unwrap_or(1) + body_lines;
         let syntax_line = warning_line + 1;
         eprintln!(
             "{}syntax error: unexpected end of file from `(' command on line {start_line}",

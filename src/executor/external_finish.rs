@@ -185,7 +185,8 @@ impl Executor {
             // getppid() == the parent shell's getpid()).
             child_env.insert("PPID".to_string(), self.shell_pid.to_string());
             self.env_vars = child_env;
-            self.shell_state.variables = crate::shell::VariableStore::from_environment(&self.env_vars);
+            self.shell_state.variables =
+                crate::shell::VariableStore::from_environment(&self.env_vars);
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh
             // shell invocation inherits only exported variables and exported
             // functions (via BASH_FUNC_<name>%% env vars). Non-exported
@@ -237,8 +238,7 @@ impl Executor {
         let saved_evalerror_pending = self.evalerror_pending.get();
         let saved_evalerror_line = self.evalerror_line.get();
         let saved_reader_command_line = self.reader_command_line.get();
-        let saved_parameter_assignment_failure =
-            self.parameter_assignment_failure.get();
+        let saved_parameter_assignment_failure = self.parameter_assignment_failure.get();
         // evalerror_exec_depth counts execute_ast_inner nesting: the child
         // is a fresh reader (its own process in GNU), so a pending abort
         // inside it discards only same-line commands rather than unwinding
@@ -349,11 +349,13 @@ impl Executor {
         self.subshell_depth.set(saved_depth);
         self.loop_depth = saved_loop_depth;
         self.function_depth = saved_function_depth;
-        self.inside_compound_condition.set(saved_inside_compound_condition);
+        self.inside_compound_condition
+            .set(saved_inside_compound_condition);
         self.evalerror_pending.set(saved_evalerror_pending);
         self.evalerror_line.set(saved_evalerror_line);
         self.reader_command_line.set(saved_reader_command_line);
-        self.parameter_assignment_failure.set(saved_parameter_assignment_failure);
+        self.parameter_assignment_failure
+            .set(saved_parameter_assignment_failure);
         self.evalerror_exec_depth.set(saved_evalerror_exec_depth);
         self.assignment_command_name = saved_assignment_command_name;
         if let Some(cwd) = saved_cwd {

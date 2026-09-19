@@ -385,11 +385,9 @@ impl Executor {
             let in_shell_stage = last_stage && self.lastpipe_enabled();
             let stage_defers_debug = command_is_compound_pipeline_stage(stage)
                 && !(in_shell_stage
-                    && (stage.arithmetic_command.is_some()
-                        || stage.conditional_command.is_some()));
+                    && (stage.arithmetic_command.is_some() || stage.conditional_command.is_some()));
             if !stage_defers_debug && self.debug_trap_in_scope() {
-                let stage_text =
-                    crate::executor::command_text::bash_command_source_text(stage);
+                let stage_text = crate::executor::command_text::bash_command_source_text(stage);
                 let _ = self.run_debug_trap(&stage_text)?;
             }
             let preserve_compound_errexit = command_is_compound_pipeline_stage(stage)
@@ -407,37 +405,35 @@ impl Executor {
             // (execute_cmd.c:1104-1108). So `!` must suppress errexit inside
             // every stage, not only invert the pipeline's final status
             // (set-e1.sub:40 `! { false; echo A $?; } | cat` prints `A 1`).
-            let pipeline_inverted = first.inverted
-                || time_prefix.as_ref().is_some_and(|prefix| prefix.inverted);
-            let Some((mut next_input, next_stderr, next_status)) =
-                (if pipeline_inverted {
-                    self.with_errexit_suppressed(|executor| {
-                        if last_stage && executor.lastpipe_enabled() {
-                            executor.execute_lastpipe_stage(stage, &input).map(Some)
-                        } else {
-                            executor.execute_pipeline_stage(stage, &input)
-                        }
-                    })?
-                } else if last_stage && self.lastpipe_enabled() {
-                    Some(self.execute_lastpipe_stage(stage, &input)?)
-                } else if last_stage || preserve_compound_errexit {
-                    // Compound and function stages inherit the pipeline
-                    // command's ignore_return (the current suppress_errexit
-                    // depth) instead of being wrapped in extra suppression:
-                    // execute_cmd.c:2702-2708 propagates the flag into every
-                    // element, so `! { false; echo A $?; } | cat` reaches the
-                    // echo while top-level `{ false; echo x; } | cat` still
-                    // dies on `false` under -e.
-                    self.execute_pipeline_stage(stage, &input)?
-                } else {
-                    // Non-final simple pipeline stages never trigger errexit
-                    // (bash manual: "any command in a pipeline but the
-                    // last").
-                    self.with_errexit_suppressed(|executor| {
+            let pipeline_inverted =
+                first.inverted || time_prefix.as_ref().is_some_and(|prefix| prefix.inverted);
+            let Some((mut next_input, next_stderr, next_status)) = (if pipeline_inverted {
+                self.with_errexit_suppressed(|executor| {
+                    if last_stage && executor.lastpipe_enabled() {
+                        executor.execute_lastpipe_stage(stage, &input).map(Some)
+                    } else {
                         executor.execute_pipeline_stage(stage, &input)
-                    })?
-                })
-            else {
+                    }
+                })?
+            } else if last_stage && self.lastpipe_enabled() {
+                Some(self.execute_lastpipe_stage(stage, &input)?)
+            } else if last_stage || preserve_compound_errexit {
+                // Compound and function stages inherit the pipeline
+                // command's ignore_return (the current suppress_errexit
+                // depth) instead of being wrapped in extra suppression:
+                // execute_cmd.c:2702-2708 propagates the flag into every
+                // element, so `! { false; echo A $?; } | cat` reaches the
+                // echo while top-level `{ false; echo x; } | cat` still
+                // dies on `false` under -e.
+                self.execute_pipeline_stage(stage, &input)?
+            } else {
+                // Non-final simple pipeline stages never trigger errexit
+                // (bash manual: "any command in a pipeline but the
+                // last").
+                self.with_errexit_suppressed(|executor| {
+                    executor.execute_pipeline_stage(stage, &input)
+                })?
+            }) else {
                 return Ok(None);
             };
             if command.pipe == Some(2)
@@ -722,10 +718,7 @@ impl Executor {
         let saved_status = self.exit_code;
         let saved_value = self.env_vars.insert(name.to_string(), value.to_string());
         self.exit_code = status;
-        let result = self
-            .execute_pipeline_stage(command, "")
-            .ok()
-            .flatten();
+        let result = self.execute_pipeline_stage(command, "").ok().flatten();
         self.exit_code = saved_status;
         if let Some(saved_value) = saved_value {
             self.env_vars.insert(name.to_string(), saved_value);
@@ -1332,11 +1325,7 @@ impl Executor {
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
             let materialized = self.command_with_process_substitution_files(command);
             restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
-            restore_optional_env_var(
-                &mut self.env_vars,
-                FUNCTION_STDIN_OFFSET,
-                old_stdin_offset,
-            );
+            restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
             match materialized {
                 Ok((materialized, process_substitutions)) => {
                     let inner = self.execute_pipeline_stage_inner(&materialized, input);
@@ -1770,8 +1759,7 @@ impl Executor {
                 }
             }
             _ => {
-                if let Some(output) = self.execute_function_pipeline_stage(command, input)?
-                {
+                if let Some(output) = self.execute_function_pipeline_stage(command, input)? {
                     Ok(Some(output))
                 } else {
                     if let Some(output) = self.execute_builtin_pipeline_stage(command, input)? {
@@ -2106,12 +2094,14 @@ fn command_has_pipeline_process_substitution(command: &CommandNode) -> bool {
                 || metadata.raw.contains("<(")
                 || metadata.raw.contains(">(")
         })
-        || command.words.iter().any(|word| {
-            (word.starts_with("<(") || word.starts_with(">(")) && word.ends_with(')')
-        })
-        || command.redirects.iter().any(|redirect| {
-            redirect.target.starts_with("<(") || redirect.target.starts_with(">(")
-        })
+        || command
+            .words
+            .iter()
+            .any(|word| (word.starts_with("<(") || word.starts_with(">(")) && word.ends_with(')'))
+        || command
+            .redirects
+            .iter()
+            .any(|redirect| redirect.target.starts_with("<(") || redirect.target.starts_with(">("))
         || [
             command.redirect_in.as_ref(),
             command.redirect_out.as_ref(),
@@ -2121,9 +2111,7 @@ fn command_has_pipeline_process_substitution(command: &CommandNode) -> bool {
         ]
         .into_iter()
         .flatten()
-        .any(|redirect| {
-            redirect.target.starts_with("<(") || redirect.target.starts_with(">(")
-        })
+        .any(|redirect| redirect.target.starts_with("<(") || redirect.target.starts_with(">("))
 }
 
 struct TimePipelinePrefix {

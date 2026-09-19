@@ -177,8 +177,7 @@ impl Executor {
         if resolved.is_empty() {
             return IndexedSubscript::Empty;
         }
-        let (result, writes) =
-            eval_conditional_arith_value_with_writes(&resolved, &self.env_vars);
+        let (result, writes) = eval_conditional_arith_value_with_writes(&resolved, &self.env_vars);
         if !writes.is_empty() {
             crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
                 .with(|pending| pending.borrow_mut().extend(writes));
@@ -400,9 +399,9 @@ impl Executor {
                             };
                             if key.is_empty() {
                                 // GNU err_badarraysub prints the element word.
-                                self.report_bad_array_subscript(
-                                    compound_element_word(inner, index),
-                                );
+                                self.report_bad_array_subscript(compound_element_word(
+                                    inner, index,
+                                ));
                                 return None;
                             }
                             out.push('[');
@@ -427,13 +426,10 @@ impl Executor {
                             self.expand_subscript_string(&once)
                         };
                         if resolved.is_empty() {
-                            self.report_bad_array_subscript(
-                                compound_element_word(inner, index),
-                            );
+                            self.report_bad_array_subscript(compound_element_word(inner, index));
                             return None;
                         }
-                        let Some(index_value) =
-                            self.eval_indexed_subscript_expression(&resolved)
+                        let Some(index_value) = self.eval_indexed_subscript_expression(&resolved)
                         else {
                             self.report_indexed_subscript_error(&resolved);
                             return None;
@@ -484,19 +480,17 @@ pub(super) fn scan_compound_subscript(
             b'\\' if !in_single => pos += 1,
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
-            b'$' if !in_single && !in_double => {
-                match bytes.get(pos + 1) {
-                    Some(b'(') => {
-                        paren_depth += 1;
-                        pos += 1;
-                    }
-                    Some(b'{') => {
-                        brace_depth += 1;
-                        pos += 1;
-                    }
-                    _ => {}
+            b'$' if !in_single && !in_double => match bytes.get(pos + 1) {
+                Some(b'(') => {
+                    paren_depth += 1;
+                    pos += 1;
                 }
-            }
+                Some(b'{') => {
+                    brace_depth += 1;
+                    pos += 1;
+                }
+                _ => {}
+            },
             b'(' if !in_single && !in_double && paren_depth > 0 => paren_depth += 1,
             b')' if !in_single && !in_double && paren_depth > 0 => paren_depth -= 1,
             b'{' if !in_single && !in_double && brace_depth > 0 => brace_depth += 1,
@@ -561,9 +555,7 @@ fn dequote_compound_subscript(sub: &str) -> String {
     while let Some(ch) = chars.next() {
         match ch {
             '\\' if !in_single => match chars.next() {
-                Some(next) if !in_double
-                    || matches!(next, '$' | '`' | '"' | '\\' | '\n') =>
-                {
+                Some(next) if !in_double || matches!(next, '$' | '`' | '"' | '\\' | '\n') => {
                     if next != '\n' {
                         out.push(next);
                     }
@@ -589,10 +581,12 @@ fn dequote_compound_subscript(sub: &str) -> String {
 /// (ARITH_ASSOC_KEY_MARKER), which `assoc_assignment_token` decodes.
 fn encode_compound_assoc_key(key: &str) -> String {
     let safe = !key.is_empty()
-        && !key
-            .chars()
-            .any(|ch| matches!(ch, '[' | ']' | '=' | '+' | '\'' | '"' | '\\' | '\x1e' | '\x1f')
-                || ch.is_ascii_whitespace());
+        && !key.chars().any(|ch| {
+            matches!(
+                ch,
+                '[' | ']' | '=' | '+' | '\'' | '"' | '\\' | '\x1e' | '\x1f'
+            ) || ch.is_ascii_whitespace()
+        });
     if safe {
         key.to_string()
     } else {

@@ -9,22 +9,20 @@ mod storage;
 
 pub(super) use mapfile::split_mapfile_input;
 pub(super) use storage::{
-    array_indices, array_value_at, array_values,
-    format_indexed_array_storage, format_indexed_array_values, indexed_array_entries,
-    is_array_storage, is_marked_array_var, normalize_array_expanded_value,
-    parse_array_integer_subscript, parse_array_numeric_subscript, parse_array_subscript,
-    quote_array_value, resolve_indexed_array_subscript, store_indexed_array,
+    array_indices, array_value_at, array_values, format_indexed_array_storage,
+    format_indexed_array_values, indexed_array_entries, is_array_storage, is_marked_array_var,
+    normalize_array_expanded_value, parse_array_integer_subscript, parse_array_numeric_subscript,
+    parse_array_subscript, quote_array_value, resolve_indexed_array_subscript, store_indexed_array,
 };
 
 use std::collections::{BTreeMap, HashMap};
 
 use super::{
-    apply_parameter_case_mod, assoc_value_at, eval_arith_value,
-    eval_conditional_arith_value, is_marked_var, is_shell_name, parse_indirect_pattern_removal,
-    parse_parameter_case_mod, parse_parameter_replacement, parse_parameter_transform,
-    remove_parameter_pattern, split_storage_words,
-    strip_matching_quotes, unquote_storage_value, Executor, ParameterTransform,
-    ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
+    apply_parameter_case_mod, assoc_value_at, eval_arith_value, eval_conditional_arith_value,
+    is_marked_var, is_shell_name, parse_indirect_pattern_removal, parse_parameter_case_mod,
+    parse_parameter_replacement, parse_parameter_transform, remove_parameter_pattern,
+    split_storage_words, strip_matching_quotes, unquote_storage_value, Executor,
+    ParameterTransform, ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
 use crate::lexer::remove_shell_quotes;
 
@@ -163,9 +161,8 @@ fn field_split_with_raw_byte_markers(value: &str, ifs: &str) -> Vec<String> {
     // Build the IFS character list: each entry is a byte sequence for one
     // IFS character (1 byte for ASCII, 1-4 bytes for UTF-8 multibyte).
     let ifs_chars = split_into_chars(&ifs_bytes);
-    let ifs_is_whitespace = |bytes: &[u8]| {
-        bytes.len() == 1 && matches!(bytes[0], b' ' | b'\t' | b'\n')
-    };
+    let ifs_is_whitespace =
+        |bytes: &[u8]| bytes.len() == 1 && matches!(bytes[0], b' ' | b'\t' | b'\n');
 
     let mut fields: Vec<Vec<u8>> = Vec::new();
     let mut current_bytes: Vec<u8> = Vec::new();

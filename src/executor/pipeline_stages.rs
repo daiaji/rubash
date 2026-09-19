@@ -25,9 +25,8 @@ impl Executor {
         // Direct-stdout builtins in the stage consult the thread-local
         // capture, which belongs to an enclosing capture when this pipeline
         // runs inside one; give the stage its own capture.
-        let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
-            self.execute_command(&stage_command)
-        });
+        let (thread_captured, result) =
+            crate::executor::shell_options::capture_stdout(|| self.execute_command(&stage_command));
         let mut output = self.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&thread_captured);
         let stderr = self.stderr_capture.take().unwrap_or_default();
@@ -402,9 +401,10 @@ impl Executor {
                 }
                 // Quoted words (e.g. "*.txt") must not be glob-expanded.
                 let metadata = command.word_metadata.get(index);
-                let suppress = crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
-                    raw, metadata,
-                );
+                let suppress =
+                    crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
+                        raw, metadata,
+                    );
                 if suppress {
                     args.push(value);
                     continue;

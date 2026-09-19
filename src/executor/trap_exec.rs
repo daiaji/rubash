@@ -101,7 +101,11 @@ impl Executor {
                         "{}eval: line {caller_line}: syntax error near unexpected token `{{'",
                         self.diagnostic_prefix()
                     );
-                    let _ = writeln!(err, "{}eval: line {caller_line}: `{source}'", self.diagnostic_prefix());
+                    let _ = writeln!(
+                        err,
+                        "{}eval: line {caller_line}: `{source}'",
+                        self.diagnostic_prefix()
+                    );
                     self.write_buffered_builtin_output(cmd, &[], &err)?;
                     self.exit_code = 2;
                     return Ok(());
@@ -675,8 +679,7 @@ impl Executor {
         prepare_targets: bool,
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
-            let target =
-                self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
+            let target = self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
             if prepare_targets
                 && !is_closed_redirect_target(&target)
                 && redirect_target_fd(&target).is_none()
@@ -704,8 +707,7 @@ impl Executor {
             };
             apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
         } else if let Some(redirect) = &cmd.append {
-            let target =
-                self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
+            let target = self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
@@ -725,8 +727,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err {
-            let target =
-                self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
+            let target = self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
             if prepare_targets
                 && !is_closed_redirect_target(&target)
                 && redirect_target_fd(&target).is_none()
@@ -755,8 +756,7 @@ impl Executor {
             };
             apply_stderr_append_redirect(&mut ast.commands, &append_redirect);
         } else if let Some(redirect) = &cmd.redirect_err_append {
-            let target =
-                self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
+            let target = self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),

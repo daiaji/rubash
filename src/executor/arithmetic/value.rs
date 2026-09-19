@@ -6,9 +6,9 @@ use crate::executor::arithmetic::{
 use crate::executor::{
     array_value_at, assoc_entries, assoc_value_at, current_epoch_seconds,
     env_derived_dynamic_parameter_value, format_assoc_storage, format_indexed_array_storage,
-    indexed_array_entries, is_marked_var, is_noassign_bash_array, is_shell_name,
-    mark_env_name, next_random_from_state, next_srandom_from_state, resolve_indexed_array_subscript,
-    parse_array_subscript, set_process_env, ARRAY_VARS, ASSOC_VARS, NAMEREF_VARS,
+    indexed_array_entries, is_marked_var, is_noassign_bash_array, is_shell_name, mark_env_name,
+    next_random_from_state, next_srandom_from_state, parse_array_subscript,
+    resolve_indexed_array_subscript, set_process_env, ARRAY_VARS, ASSOC_VARS, NAMEREF_VARS,
     READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH,
 };
 
@@ -95,11 +95,8 @@ impl ConditionalArithParser<'_> {
         if stripped.trim().is_empty() {
             return Some(0);
         }
-        let (value, _cat) = eval_mutable_arith_value_with_random(
-            &stripped,
-            self.env_vars,
-            self.random_state,
-        );
+        let (value, _cat) =
+            eval_mutable_arith_value_with_random(&stripped, self.env_vars, self.random_state);
         self.adopt_error(super::super::take_arith_eval_error());
         self.adopt_diags(super::super::take_arith_eval_diags());
         if value.is_none() {
@@ -140,10 +137,7 @@ impl ConditionalArithParser<'_> {
                 let expr_name = self.resolving[j + (1022usize - j) % l].clone();
                 let tok_name = self.resolving[j + (1023usize - j) % l].clone();
                 (
-                    self.env_vars
-                        .get(&expr_name)
-                        .cloned()
-                        .unwrap_or(expr_name),
+                    self.env_vars.get(&expr_name).cloned().unwrap_or(expr_name),
                     tok_name,
                 )
             }
@@ -439,22 +433,17 @@ impl ConditionalArithParser<'_> {
         // the write to the referenced variable or element.
         if is_marked_var(self.env_vars, NAMEREF_VARS, name) {
             let cell = self.env_vars.get(name).cloned().unwrap_or_default();
-            let cell_valid = is_shell_name(&cell)
-                || parse_array_subscript(&cell).is_some();
+            let cell_valid = is_shell_name(&cell) || parse_array_subscript(&cell).is_some();
             if !cell_valid {
                 if cell.is_empty() {
-                    if is_shell_name(&value)
-                        || parse_array_subscript(&value).is_some()
-                    {
+                    if is_shell_name(&value) || parse_array_subscript(&value).is_some() {
                         let old_value = self.env_vars.get(name).cloned();
                         self.env_vars.insert(name.to_string(), value.clone());
                         super::super::record_arith_write(name, old_value);
                         set_process_env(name, value);
                     } else {
-                        self.env_vars.insert(
-                            "__RUBASH_ARITH_NAMEREF_ERROR".to_string(),
-                            value,
-                        );
+                        self.env_vars
+                            .insert("__RUBASH_ARITH_NAMEREF_ERROR".to_string(), value);
                     }
                 }
                 return;
@@ -481,7 +470,11 @@ impl ConditionalArithParser<'_> {
                         self.random_state,
                     );
                     if let Some(index) = index {
-                        self.set_array_element(elem_base, index, value.parse::<i128>().unwrap_or(0));
+                        self.set_array_element(
+                            elem_base,
+                            index,
+                            value.parse::<i128>().unwrap_or(0),
+                        );
                         return;
                     }
                 }
