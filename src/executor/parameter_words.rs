@@ -281,6 +281,20 @@ impl Executor {
         word: &str,
         context: SubstitutionQuoteContext,
     ) -> String {
+        // GNU param_expand resolves one `${}` expansion once: memoize
+        // array-element fetches for the duration of this word so repeated
+        // helper-layer reads (operator set-checks, error probes) do not
+        // re-run subscript side effects (AEPV_MEMO). Whole-word `\x1d`-marked
+        // `${}` forms reach here without passing a walker `${` arm, so a
+        // frame is needed at this entry — but only when the word is one
+        // `${}` span; a multi-`${}` word must keep per-`${}` scoping, which
+        // the walker's `${` arms provide (push-if-empty shares nested `${}`s
+        // with the outer scope).
+        let _memo_frame = if braced_parameter_spans_whole_word(word) {
+            Some(crate::executor::expand_braced_indices::AepvMemoFrame::new())
+        } else {
+            None
+        };
         // Bash 5.3 (parser.h FUNSUB_CHAR): a whitespace-led `${ command; }` /
         // `${|command;}` word is a nofork command substitution, not a
         // parameter form. The operator split_once parsing below would treat

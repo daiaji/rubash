@@ -589,6 +589,11 @@ impl Executor {
                 }
                 Some('{') => {
                     chars.next();
+                    // GNU param_expand resolves one `${}` expansion once:
+                    // memoize array-element fetches for this fragment so a
+                    // subscript's side effects run once (AEPV_MEMO).
+                    let _memo_frame =
+                        crate::executor::expand_braced_indices::AepvMemoFrame::new();
                     if let Some(value) = self.expand_current_shell_braced_substitution(&mut chars) {
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
@@ -968,6 +973,13 @@ impl Executor {
                 }
                 None => output.push('$'),
             }
+            // GNU arrayfunc.c:1353 array_expand_index -> evalexp evaluates
+            // subscript arithmetic against the live environment, so a write
+            // (`${a[$((i++))]}`) is visible to the very next fragment of the
+            // same word. The `&self` subscript evaluators queue theirs
+            // through PENDING_SUBSCRIPT_WRITES; flush them here so the
+            // left-to-right order holds inside this mutable walk.
+            self.apply_pending_subscript_writes();
         }
 
         output
@@ -1182,6 +1194,11 @@ impl Executor {
         source: &str,
         context: SubstitutionQuoteContext,
     ) -> SubstitutionOutput {
+        // GNU command_substitute (subst.c:7143) runs the body in a subshell:
+        // arithmetic subscript writes queued inside never reach the parent
+        // environment. Scope the deferred-write queue to this substitution.
+        let _subscript_writes_guard =
+            crate::executor::expand_braced_indices::PendingSubscriptWritesGuard::new();
         // GNU make_cmd.c:602-611: a heredoc inside a command substitution
         // where the `)` closes on the delimiter line (e.g. `EOF)`) is
         // "delimited by end-of-file" and gets a warning. The heredoc path

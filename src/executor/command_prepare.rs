@@ -1244,14 +1244,27 @@ impl Executor {
             return None;
         }
         let inner = &braced[2..braced.len() - 1];
+        // GNU param_expand reads the operator only at the top level of the
+        // `${}` body: `+`/`-`/`:` inside `[...]` belong to the array
+        // subscript (`${a[i++]:-x}` has no `-` operator). A naive split_once
+        // cuts the subscript in half (`a[$((i`) and then evaluates the
+        // malformed expression.
         let (var_name, alternate, use_when_set, require_non_empty) =
-            if let Some((var_name, alternate)) = inner.split_once(":+") {
+            if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(inner, ":+")
+            {
                 (var_name, alternate, true, true)
-            } else if let Some((var_name, alternate)) = inner.split_once('+') {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(inner, '+')
+            {
                 (var_name, alternate, true, false)
-            } else if let Some((var_name, alternate)) = inner.split_once(":-") {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(inner, ":-")
+            {
                 (var_name, alternate, false, true)
-            } else if let Some((var_name, alternate)) = inner.split_once('-') {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(inner, '-')
+            {
                 (var_name, alternate, false, false)
             } else {
                 return None;
@@ -1371,14 +1384,24 @@ impl Executor {
         {
             return None;
         }
+        // Operator characters inside `[...]` belong to the array subscript;
+        // a naive split_once would cut `${a[i++]-x}` at the subscript's `-`.
         let (var_name, alternate, use_when_set, require_non_empty) =
-            if let Some((var_name, alternate)) = inner.split_once(":+") {
+            if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(inner, ":+")
+            {
                 (var_name, alternate, true, true)
-            } else if let Some((var_name, alternate)) = inner.split_once('+') {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(inner, '+')
+            {
                 (var_name, alternate, true, false)
-            } else if let Some((var_name, alternate)) = inner.split_once(":-") {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(inner, ":-")
+            {
                 (var_name, alternate, false, true)
-            } else if let Some((var_name, alternate)) = inner.split_once('-') {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(inner, '-')
+            {
                 (var_name, alternate, false, false)
             } else {
                 return None;

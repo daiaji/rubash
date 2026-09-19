@@ -314,6 +314,11 @@ impl Executor {
                 }
                 Some('{') => {
                     chars.next();
+                    // GNU param_expand resolves one `${}` expansion once:
+                    // memoize array-element fetches for this fragment so a
+                    // subscript's side effects run once (AEPV_MEMO).
+                    let _memo_frame =
+                        crate::executor::expand_braced_indices::AepvMemoFrame::new();
                     let name = collect_braced_parameter_name(&mut chars);
                     let value = self.expand_word(&format!("${{{name}}}"));
                     if preserve_quotes && !in_double {

@@ -44,31 +44,17 @@ impl Executor {
                 .expand_quoted_parameter_word_mut(word, SubstitutionQuoteContext::DoubleQuoted);
         }
 
-        if let Some((raw_name, value)) = word.split_once('=') {
-            let name = self.expand_embedded_parameters_mut(raw_name);
-            let (base_name, _) = assignment_name_and_append(&name);
-            if raw_name.contains('$')
-                && !raw_name.contains(['{', '(', ')', '}'])
-                && is_shell_name(base_name)
-            {
-                let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
-                let value = tilde_expand::strip_assignment_quote_marker(value);
-                if let Some(prepared) = self.expand_escaped_indirect_parameter_literal(value) {
-                    return format!("{name}={}", unescape_remaining_shell_escapes(&prepared));
-                }
-                let expanded = self.expand_embedded_parameters_mut(value);
-                if !quoted
-                    && !expanded.contains('=')
-                    && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
-                    && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
-                        || expanded.starts_with("~/"))
-                {
-                    return format!("{name}={}", self.expand_assignment_tilde(&expanded));
-                }
-
-                return format!("{name}={expanded}");
-            }
-        }
+        // GNU general.c:480 assignment(): whether a word is an assignment is
+        // decided on the raw token — legal_variable_starter, then
+        // legal_variable_chars, then an optional bracketed subscript. A `$`
+        // outside a subscript bracket (`$x=v`, `a$b=v`, `A:$((i++)) i=v`) is
+        // never an assignment name, so the word expands once as an ordinary
+        // word. Expanding the name portion here to test it applied expansion
+        // side effects ($((i++)), $(...) writes) for non-assignment words and
+        // then discarded the result, so the word expanded twice below.
+        // Static assignment words still route through split_assignment_word;
+        // `name[$i]=v` reaches the same element-assignment result via the
+        // single generic expansion.
 
         if let Some((name, value)) = split_assignment_word(word) {
             // GNU general.c:480 assignment() only marks an UNQUOTED token

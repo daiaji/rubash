@@ -103,6 +103,19 @@ impl Executor {
         &self,
         expression: &str,
     ) -> Option<String> {
+        // GNU param_expand resolves the subscript once per `${}` expansion;
+        // the memo frame pushed by the embedded-parameter walkers dedups the
+        // repeated identical fetches the `&self` helper layers make, so
+        // `$((i++))` side effects run exactly once (AEPV_MEMO docs).
+        if let Some(hit) = crate::executor::expand_braced_indices::aepv_memo_lookup(expression) {
+            return hit;
+        }
+        let result = self.array_element_parameter_value_uncached(expression);
+        crate::executor::expand_braced_indices::aepv_memo_store(expression, result.clone());
+        result
+    }
+
+    fn array_element_parameter_value_uncached(&self, expression: &str) -> Option<String> {
         let (array_name, key) = parse_array_subscript(expression)?;
 
         let storage_name = self.resolved_variable_name(array_name)?;
@@ -144,7 +157,11 @@ impl Executor {
             let expr = expr
                 .replace("$#", &self.positional_params.len().to_string())
                 .replace("$-", "0");
-            let (result, writes) = eval_conditional_arith_value_with_writes(&expr, &self.env_vars);
+            let overlaid =
+                crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
+                    &self.env_vars,
+                );
+            let (result, writes) = eval_conditional_arith_value_with_writes(&expr, &overlaid);
             if !writes.is_empty() {
                 crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES.with(|w| {
                     w.borrow_mut().extend(writes);
@@ -530,7 +547,19 @@ impl Executor {
             .strip_prefix("${")
             .and_then(|word| word.strip_suffix('}'))?;
 
+        // array_modified_word_values only handles `name[@]`/`name[*]`
+        // targets; validate that before expanding the pattern/replacement
+        // text. Expanding first runs expansion side effects
+        // (`${a[$((i++))],,}` evaluated the subscript) on a probe that then
+        // returns None — GNU expands the `${}` body exactly once.
+        let array_target = |var_name: &str| {
+            var_name.ends_with("[@]") || var_name.ends_with("[*]")
+        };
+
         if let Some((var_name, pattern, operation)) = parse_indirect_pattern_removal(inner) {
+            if !array_target(var_name) {
+                return None;
+            }
             let pattern = self.expand_parameter_pattern_word(pattern);
             return self.array_modified_word_values(var_name, quoted_array_word, |value| {
                 remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
@@ -538,6 +567,9 @@ impl Executor {
         }
 
         if let Some((var_name, pattern, replacement, global)) = parse_parameter_replacement(inner) {
+            if !array_target(var_name) {
+                return None;
+            }
             let pattern = self.expand_parameter_pattern_word(pattern);
             let replacement = self.expand_patsub_replacement_text(replacement);
             return self.array_modified_word_values(var_name, quoted_array_word, |value| {
@@ -546,6 +578,9 @@ impl Executor {
         }
 
         if let Some((var_name, operation, pattern)) = parse_parameter_case_mod(inner) {
+            if !array_target(var_name) {
+                return None;
+            }
             let pattern = self.expand_embedded_parameters(pattern);
             return self.array_modified_word_values(var_name, quoted_array_word, |value| {
                 apply_parameter_case_mod(value, operation, &pattern)

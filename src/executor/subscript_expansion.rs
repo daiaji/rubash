@@ -186,7 +186,11 @@ impl Executor {
         if resolved.is_empty() {
             return IndexedSubscript::Empty;
         }
-        let (result, writes) = eval_conditional_arith_value_with_writes(&resolved, &self.env_vars);
+        let overlaid =
+            crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
+                &self.env_vars,
+            );
+        let (result, writes) = eval_conditional_arith_value_with_writes(&resolved, &overlaid);
         if !writes.is_empty() {
             crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
                 .with(|pending| pending.borrow_mut().extend(writes));

@@ -93,7 +93,6 @@ impl Executor {
         if !braced_parameter_spans_whole_word(word) {
             return self.expand_embedded_parameters(word);
         }
-
         if let Some(resolved) = resolve_dollar_quoted_parameter_name(name) {
             return self.expand_braced_parameter_word(word, &resolved);
         }
@@ -152,43 +151,12 @@ impl Executor {
     }
 
     fn expand_assignment_word(&self, word: &str) -> Option<String> {
-        if let Some((raw_name, value)) = word.split_once('=') {
-            let name = self.expand_embedded_parameters(raw_name);
-            let (base_name, _) = assignment_name_and_append(&name);
-            if raw_name.contains('$')
-                && !raw_name.contains(['{', '(', ')', '}'])
-                && is_shell_name(base_name)
-            {
-                return Some(self.expand_parameterized_assignment_word(&name, value));
-            }
-        }
-
+        // GNU general.c:480 assignment(): assignment-ness is decided on the
+        // raw token before expansion (see the matching removal in
+        // expand_word_mut_with_context); expanding the name portion here
+        // applied side effects for words that are not assignments at all.
         let (name, value) = split_assignment_word(word)?;
         Some(self.expand_plain_assignment_word(name, value))
-    }
-
-    fn expand_parameterized_assignment_word(&self, name: &str, value: &str) -> String {
-        let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
-        let value = tilde_expand::strip_assignment_quote_marker(value);
-        if let Some(prepared) = self.expand_escaped_indirect_parameter_literal(value) {
-            return format!("{name}={}", unescape_remaining_shell_escapes(&prepared));
-        }
-        let expanded = self.expand_embedded_parameters(value);
-        let expanded = if quoted {
-            expanded.replace('\x11', "")
-        } else {
-            expanded
-        };
-        if !quoted
-            && !expanded.contains('=')
-            && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
-            && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
-                || expanded.starts_with("~/"))
-        {
-            return format!("{name}={}", self.expand_assignment_tilde(&expanded));
-        }
-
-        format!("{name}={expanded}")
     }
 
     fn expand_plain_assignment_word(&self, name: &str, value: &str) -> String {

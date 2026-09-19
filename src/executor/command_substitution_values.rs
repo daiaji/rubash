@@ -522,7 +522,17 @@ impl Executor {
     }
 
     fn positional_modified_word_values(&self, name: &str, quoted: bool) -> Option<Vec<String>> {
+        // positional_modified_values only handles `@`/`*` targets; validate
+        // before expanding the pattern/replacement text — expanding first
+        // runs expansion side effects (`${a[$((i++))],,}` evaluated the
+        // subscript) on a probe that then returns None. GNU expands the
+        // `${}` body exactly once.
+        let positional_target = |var_name: &str| matches!(var_name, "@" | "*");
+
         if let Some((var_name, pattern, operation)) = parse_indirect_pattern_removal(name) {
+            if !positional_target(var_name) {
+                return None;
+            }
             let pattern = self.expand_parameter_pattern_word(pattern);
             return self.positional_modified_values(var_name, quoted, |value| {
                 remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
@@ -530,6 +540,9 @@ impl Executor {
         }
 
         if let Some((var_name, pattern, replacement, global)) = parse_parameter_replacement(name) {
+            if !positional_target(var_name) {
+                return None;
+            }
             let pattern = self.expand_parameter_pattern_word(pattern);
             let replacement = self.expand_patsub_replacement_text(replacement);
             return self.positional_modified_values(var_name, quoted, |value| {
@@ -538,6 +551,9 @@ impl Executor {
         }
 
         if let Some((var_name, operation, pattern)) = parse_parameter_case_mod(name) {
+            if !positional_target(var_name) {
+                return None;
+            }
             let pattern = self.expand_embedded_parameters(pattern);
             return self.positional_modified_values(var_name, quoted, |value| {
                 apply_parameter_case_mod(value, operation, &pattern)

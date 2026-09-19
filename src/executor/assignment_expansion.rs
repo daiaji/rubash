@@ -727,8 +727,8 @@ impl Executor {
             return expanded;
         }
 
-        let expanded_value = self.expand_embedded_parameters_mut(value);
         let expanded = if quoted {
+            let expanded_value = self.expand_embedded_parameters_mut(value);
             // Prompt transforms consume Bash's `\!` and `\#` escapes after
             // parameter expansion. Keep those two quoted backslashes until
             // `${var@P}` reaches prompt_expansion; ordinary shell escapes

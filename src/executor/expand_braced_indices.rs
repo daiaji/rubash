@@ -9,6 +9,119 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// env_vars overlaid with the queued subscript writes, so a deferred
+/// subscript evaluation sees the side effects earlier subscripts in the
+/// same word produced. GNU evaluates each subscript against the live
+/// environment, left-to-right (arrayfunc.c:1353 array_expand_index ->
+/// evalexp); the deferred evaluators clone the env for `&self` callers, so
+/// the clone must start from the accumulated writes, and the returned
+/// write list then holds only that evaluation's own deltas.
+pub(in crate::executor) fn env_vars_with_pending_subscript_writes<'a>(
+    env_vars: &'a HashMap<String, String>,
+) -> std::borrow::Cow<'a, HashMap<String, String>> {
+    PENDING_SUBSCRIPT_WRITES.with(|pending| {
+        let pending = pending.borrow();
+        if pending.is_empty() {
+            std::borrow::Cow::Borrowed(env_vars)
+        } else {
+            let mut overlaid = env_vars.clone();
+            for (name, value) in pending.iter() {
+                overlaid.insert(name.clone(), value.clone());
+            }
+            std::borrow::Cow::Owned(overlaid)
+        }
+    })
+}
+
+thread_local! {
+    /// Per-`${}` memo for array-element expansion. GNU param_expand resolves
+    /// a subscript once per parameter expansion (subst.c array_variable_part
+    /// -> array_expand_index), but the `&self` walkers re-fetch the element
+    /// through several helper layers — `${a[i],,}` reaches
+    /// `array_element_parameter_value` 3-4 times with the same `name[sub]`
+    /// text. Each frame maps the raw `name[sub]` expression to its result,
+    /// so subscript side effects (`$((i++))`) run exactly once per `${}`
+    /// expansion; distinct `name[sub]` texts never share an entry.
+    static AEPV_MEMO: std::cell::RefCell<Vec<HashMap<String, Option<String>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// RAII frame: pushes a memo scope on construction, pops on drop. The frame
+/// is only pushed when the stack is empty — one memo per top-level `${}`
+/// fragment. Nested `${}` inside the body share the outer frame (their
+/// `name[sub]` keys differ, so there are no false hits) while repeated
+/// probes of the same `${}` all dedup against it.
+pub(in crate::executor) struct AepvMemoFrame {
+    pushed: bool,
+}
+
+impl AepvMemoFrame {
+    pub(in crate::executor) fn new() -> Self {
+        let pushed = AEPV_MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            if memo.is_empty() {
+                memo.push(HashMap::new());
+                true
+            } else {
+                false
+            }
+        });
+        Self { pushed }
+    }
+}
+
+impl Drop for AepvMemoFrame {
+    fn drop(&mut self) {
+        if self.pushed {
+            AEPV_MEMO.with(|memo| {
+                memo.borrow_mut().pop();
+            });
+        }
+    }
+}
+
+/// RAII guard for command-substitution boundaries: GNU command_substitute
+/// runs the body in a subshell, so arithmetic writes made inside `$(...)`
+/// never reach the parent environment. The deferred subscript-write queue is
+/// thread-local and would otherwise carry inner writes into the parent's
+/// next flush; save+clear on entry, restore on drop.
+pub(in crate::executor) struct PendingSubscriptWritesGuard {
+    saved: Vec<(String, String)>,
+}
+
+impl PendingSubscriptWritesGuard {
+    pub(in crate::executor) fn new() -> Self {
+        let saved = PENDING_SUBSCRIPT_WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
+        Self { saved }
+    }
+}
+
+impl Drop for PendingSubscriptWritesGuard {
+    fn drop(&mut self) {
+        PENDING_SUBSCRIPT_WRITES.with(|w| {
+            *w.borrow_mut() = std::mem::take(&mut self.saved);
+        });
+    }
+}
+
+/// Look up the top memo frame only — a different `${}` expansion may share
+/// the same `name[sub]` text and must evaluate it independently.
+pub(in crate::executor) fn aepv_memo_lookup(expression: &str) -> Option<Option<String>> {
+    AEPV_MEMO.with(|memo| {
+        memo.borrow()
+            .last()
+            .and_then(|frame| frame.get(expression).cloned())
+    })
+}
+
+pub(in crate::executor) fn aepv_memo_store(expression: &str, value: Option<String>) {
+    AEPV_MEMO.with(|memo| {
+        if let Some(frame) = memo.borrow_mut().last_mut() {
+            frame.insert(expression.to_string(), value);
+        }
+    });
+}
+
 impl Executor {
     /// Apply side-effect writes from arithmetic evaluation in array
     /// subscripts (e.g. `count++` in `${arr[$((count++))]}`) to the real
@@ -175,8 +288,9 @@ impl Executor {
             {
                 // `$((...))` keeps its own writes-capturing evaluation so
                 // `count++` side effects survive the cloned env.
+                let overlaid = env_vars_with_pending_subscript_writes(&self.env_vars);
                 let (result, writes) =
-                    eval_conditional_arith_value_with_writes(expr.trim(), &self.env_vars);
+                    eval_conditional_arith_value_with_writes(expr.trim(), &overlaid);
                 if !writes.is_empty() {
                     PENDING_SUBSCRIPT_WRITES.with(|w| {
                         w.borrow_mut().extend(writes);
