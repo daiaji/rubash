@@ -757,7 +757,14 @@ impl Executor {
         {
             return literal;
         }
-        self.expand_word_mut_with_context(raw, SubstitutionQuoteContext::Unquoted)
+        // GNU expand_word_internal never re-lexes `'` — sq is lex-time only,
+        // so a `'` reaching expand_subscript_string here is always data
+        // produced by the earlier expansion (`let "++a[$b]"` with
+        // b=`80's`). Mark it with the \x17 carrier so the word expansion
+        // emits it verbatim instead of consuming it as an sq opener —
+        // without this the key stored `80s` (assoc9.sub `let "++a[$b]"`).
+        let raw = crate::executor::subscript_expansion::mark_expanded_once_data_squotes(raw);
+        self.expand_word_mut_with_context(&raw, SubstitutionQuoteContext::Unquoted)
     }
 
     pub(super) fn expand_arithmetic_special_parameters(&self, expression: &str) -> String {

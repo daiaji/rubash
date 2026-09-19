@@ -152,11 +152,23 @@ where
 
         if let Some(name) = name {
             if !valid_identifier(name) && !valid_printf_array_target(name, env_vars) {
+                // GNU prints the expanded operand text; decode the
+                // marker-encoded assoc key the executor delivered so the
+                // diagnostic names `a[80's]`, not its carrier bytes.
+                let display = parse_printf_array_target(name)
+                    .map(|(base, subscript)| {
+                        let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(
+                            subscript,
+                        )
+                        .unwrap_or_else(|| subscript.to_string());
+                        format!("{base}[{key}]")
+                    })
+                    .unwrap_or_else(|| name.to_string());
                 writeln!(
                     stderr,
                     "{}printf: `{}': not a valid identifier",
                     diagnostic_prefix(env_vars),
-                    name
+                    display
                 )?;
                 return Ok(EX_USAGE);
             }
@@ -223,8 +235,17 @@ fn valid_printf_array_target(name: &str, env_vars: &HashMap<String, String>) -> 
     let Some((base, subscript)) = parse_printf_array_target(name) else {
         return false;
     };
+    // GNU printf.def:306 -> valid_array_reference (arrayfunc.c:1288): the
+    // assoc lookup only happens under VA_NOEXPAND (array_expand_once);
+    // without it the arithmetic subscript scan rejects `a[80's]`
+    // (assoc9.sub `printf -v a[$b]` -> `not a valid identifier`). The
+    // executor delivers assoc keys marker-encoded; validity is decided on
+    // the decoded key text GNU would have scanned.
     if is_marked(env_vars, "__RUBASH_ASSOC_VARS", base) {
-        return true;
+        let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(subscript)
+            .unwrap_or_else(|| subscript.to_string());
+        let decoded = format!("{base}[{key}]");
+        return crate::builtins::arrayref::valid_array_reference_for_env(&decoded, env_vars);
     }
     resolve_printf_indexed_subscript(env_vars, base, subscript).is_some()
 }

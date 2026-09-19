@@ -97,16 +97,14 @@ impl Executor {
                 Ok(set) => i32::from(!set),
                 Err(()) => 1,
             },
-            [op, operand, end] if op == "-R" && end == "]]" => i32::from(!is_marked_var(
-                &self.env_vars,
-                NAMEREF_VARS,
-                &self.expand_word(operand),
-            )),
-            [op, operand] if op == "-R" => i32::from(!is_marked_var(
-                &self.env_vars,
-                NAMEREF_VARS,
-                &self.expand_word(operand),
-            )),
+            [op, operand, end] if op == "-R" && end == "]]" => {
+                let expanded = self.expand_word_mut(operand);
+                i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, &expanded))
+            }
+            [op, operand] if op == "-R" => {
+                let expanded = self.expand_word_mut(operand);
+                i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, &expanded))
+            }
             [op, operand, end] if op == "-o" && end == "]]" => {
                 i32::from(!self.conditional_shell_option_unary(operand))
             }
@@ -117,10 +115,10 @@ impl Executor {
             [op, operand] if matches!(op.as_str(), "-n" | "-z") => {
                 i32::from(!self.conditional_string_unary(op, operand))
             }
-            [operand, end] if end == "]]" => i32::from(self.expand_word(operand).is_empty()),
-            [operand] => i32::from(self.expand_word(operand).is_empty()),
+            [operand, end] if end == "]]" => i32::from(self.expand_word_mut(operand).is_empty()),
+            [operand] => i32::from(self.expand_word_mut(operand).is_empty()),
             [op, operand, end] if op == "-t" && end == "]]" => {
-                let w = self.expand_word(operand);
+                let w = self.expand_word_mut(operand);
                 if crate::builtins::test::valid_number(&w).is_none() {
                     self.report_conditional_error(&format!("{}: integer expected", w));
                     return 2;
@@ -128,7 +126,7 @@ impl Executor {
                 i32::from(!self.conditional_file_unary(op, operand))
             }
             [op, operand] if op == "-t" => {
-                let w = self.expand_word(operand);
+                let w = self.expand_word_mut(operand);
                 if crate::builtins::test::valid_number(&w).is_none() {
                     self.report_conditional_error(&format!("{}: integer expected", w));
                     return 2;
@@ -247,8 +245,8 @@ impl Executor {
                         .get(2)
                         .is_some_and(|m| !m.word_quotes.is_empty() || m.raw.contains('\\')) =>
             {
-                let left = self.expand_word(left);
-                let right = self.expand_word(right);
+                let left = self.expand_word_mut(left);
+                let right = self.expand_word_mut(right);
                 let right_pattern = self.quote_aware_glob_rhs(&right, &metadata[2]);
                 let matched =
                     crate::executor::conditional::case_pattern_matches(&right_pattern, &left);
@@ -263,8 +261,8 @@ impl Executor {
                         .get(2)
                         .is_some_and(|m| !m.word_quotes.is_empty() || m.raw.contains('\\')) =>
             {
-                let left = self.expand_word(left);
-                let right = self.expand_word(right);
+                let left = self.expand_word_mut(left);
+                let right = self.expand_word_mut(right);
                 let right_pattern = self.quote_aware_glob_rhs(&right, &metadata[2]);
                 let matched =
                     crate::executor::conditional::case_pattern_matches(&right_pattern, &left);
@@ -295,8 +293,8 @@ impl Executor {
     }
 
     pub(super) fn conditional_string_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
-        let left = self.expand_word(left);
-        let right = self.expand_word(right);
+        let left = self.expand_word_mut(left);
+        let right = self.expand_word_mut(right);
         let right_pattern = right.clone();
         let extglob = crate::builtins::shopt::option_enabled(&self.env_vars, "extglob")
             || contains_extglob_pattern(&right);
@@ -340,7 +338,7 @@ impl Executor {
             if chars[index] == '\\' {
                 if unquoted_start < index {
                     output.push_str(
-                        &self.expand_word(&chars[unquoted_start..index].iter().collect::<String>()),
+                        &self.expand_word_mut(&chars[unquoted_start..index].iter().collect::<String>()),
                     );
                 }
                 if let Some(next) = chars.get(index + 1) {
@@ -360,14 +358,14 @@ impl Executor {
             };
             if unquoted_start < index {
                 output.push_str(
-                    &self.expand_word(&chars[unquoted_start..index].iter().collect::<String>()),
+                    &self.expand_word_mut(&chars[unquoted_start..index].iter().collect::<String>()),
                 );
             }
             let body = chars[index + opener_len..end].iter().collect::<String>();
             let value = match kind {
                 QuoteKind::Single => body,
                 QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
-                QuoteKind::Double | QuoteKind::Locale => self.expand_word(&body),
+                QuoteKind::Double | QuoteKind::Locale => self.expand_word_mut(&body),
             };
             append_literal_glob_text(&mut output, &value);
             index = end + 1;
@@ -375,7 +373,7 @@ impl Executor {
         }
 
         if unquoted_start < chars.len() {
-            output.push_str(&self.expand_word(&chars[unquoted_start..].iter().collect::<String>()));
+            output.push_str(&self.expand_word_mut(&chars[unquoted_start..].iter().collect::<String>()));
         }
         output
     }
@@ -385,7 +383,7 @@ impl Executor {
     /// discards the rest of the command list. Err(()) means the diagnostic
     /// was already printed.
     fn conditional_dash_v(&mut self, operand: &str) -> Result<bool, ()> {
-        let operand = self.expand_word(operand);
+        let operand = self.expand_word_mut(operand);
         let rewritten = self.rewrite_conditional_v_operand(&operand)?;
         Ok(crate::builtins::test::variable_is_set(
             &rewritten,
@@ -393,8 +391,8 @@ impl Executor {
         ))
     }
 
-    pub(super) fn conditional_string_unary(&self, op: &str, operand: &str) -> bool {
-        let value = self.expand_word(operand);
+    pub(super) fn conditional_string_unary(&mut self, op: &str, operand: &str) -> bool {
+        let value = self.expand_word_mut(operand);
         match op {
             "-n" => !value.is_empty(),
             "-z" => value.is_empty(),
@@ -417,25 +415,25 @@ impl Executor {
         eprintln!("{prefix}{message}");
     }
 
-    pub(super) fn conditional_shell_option_unary(&self, operand: &str) -> bool {
-        let name = self.expand_word(operand);
+    pub(super) fn conditional_shell_option_unary(&mut self, operand: &str) -> bool {
+        let name = self.expand_word_mut(operand);
         crate::builtins::set::is_shell_option(&name)
             && crate::builtins::set::shell_option_enabled(&self.env_vars, &name)
     }
 
-    pub(super) fn conditional_file_unary(&self, op: &str, operand: &str) -> bool {
+    pub(super) fn conditional_file_unary(&mut self, op: &str, operand: &str) -> bool {
         if let Some(result) = conditional_process_substitution_unary(op, operand) {
             return result;
         }
-        let args = vec![op.to_string(), self.expand_word(operand)];
+        let args = vec![op.to_string(), self.expand_word_mut(operand)];
         crate::builtins::test::execute(&args, false, &self.env_vars).unwrap_or(1) == 0
     }
 
-    pub(super) fn conditional_file_binary(&self, left: &str, op: &str, right: &str) -> bool {
+    pub(super) fn conditional_file_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
         let args = vec![
-            self.expand_word(left),
+            self.expand_word_mut(left),
             op.to_string(),
-            self.expand_word(right),
+            self.expand_word_mut(right),
         ];
         crate::builtins::test::execute(&args, false, &self.env_vars).unwrap_or(1) == 0
     }
@@ -478,8 +476,8 @@ impl Executor {
     }
 
     pub(super) fn conditional_regex_match_status(&mut self, left: &str, right: &str) -> i32 {
-        let left_exp = self.expand_word(left);
-        let right_exp = self.expand_word(right);
+        let left_exp = self.expand_word_mut(left);
+        let right_exp = self.expand_word_mut(right);
         let right_f = restore_numeric_decimal_regex_escapes(&right_exp);
         let left = left_exp;
         let right = right_f;
@@ -501,7 +499,7 @@ impl Executor {
         right: &str,
         metadata: &crate::parser::WordMetadata,
     ) -> i32 {
-        let left = self.expand_word(left);
+        let left = self.expand_word_mut(left);
         let right = self.quote_aware_regex_rhs(right, metadata);
         let right = restore_numeric_decimal_regex_escapes(&right);
         let Ok(regex) = self.compile_conditional_regex(&right) else {
@@ -532,7 +530,7 @@ impl Executor {
         metadata: &crate::parser::WordMetadata,
     ) -> String {
         if metadata.raw.is_empty() {
-            return regex::escape(&self.expand_word(right));
+            return regex::escape(&self.expand_word_mut(right));
         }
 
         let chars = metadata.raw.chars().collect::<Vec<_>>();
@@ -548,7 +546,7 @@ impl Executor {
                     index += 1;
                 }
                 output.push_str(&unescape_remaining_shell_escapes(
-                    &self.expand_word(&segment),
+                    &self.expand_word_mut(&segment),
                 ));
                 continue;
             }
@@ -558,7 +556,7 @@ impl Executor {
                 let quoted = match kind {
                     QuoteKind::Single => body,
                     QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
-                    QuoteKind::Double | QuoteKind::Locale => self.expand_word(&body),
+                    QuoteKind::Double | QuoteKind::Locale => self.expand_word_mut(&body),
                 };
                 output.push_str(&regex::escape(&quoted));
                 index = end + 1;
@@ -574,7 +572,7 @@ impl Executor {
             }
             let segment = chars[start..index].iter().collect::<String>();
             output.push_str(&unescape_remaining_shell_escapes(
-                &self.expand_word(&segment),
+                &self.expand_word_mut(&segment),
             ));
         }
 
@@ -591,8 +589,8 @@ impl Executor {
         op: &str,
         right: &str,
     ) -> i32 {
-        let left_expanded = self.expand_word(left);
-        let right_expanded = self.expand_word(right);
+        let left_expanded = self.expand_word_mut(left);
+        let right_expanded = self.expand_word_mut(right);
         // GNU execute_cmd.c:4049-4068 -> test.c:357-372 arithcomp -> evalexp:
         // the operands were word-expanded by cond_expand_word (mode 3,
         // Q_ARITH). Under compat>51 arithcomp passes eflag=0, so

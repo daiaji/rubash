@@ -158,17 +158,27 @@ impl Executor {
                     // word expansion; the consumer uses the text verbatim.
                     text.to_string()
                 } else {
+                    // GNU expand_word_internal never re-lexes single quotes —
+                    // sq handling is lex-time only, so a `'` byte reaching the
+                    // deferred expand_subscript_string pass is always data
+                    // (subst.c:11063 -> expand_word_internal -> dequote_list,
+                    // subst.c:4807: only CTLESC pairs dequote). Mark it with
+                    // the \x17 data carrier so the walker below emits it
+                    // verbatim instead of consuming it as an sq opener —
+                    // `unset -v dict["$k"]` with k=`'` removes key `'`
+                    // (assoc9.sub del loop).
+                    let text = mark_expanded_once_data_squotes(text);
                     let Some(key) =
-                        crate::executor::expand_braced_indices::sub_site_key(text)
+                        crate::executor::expand_braced_indices::sub_site_key(&text)
                     else {
-                        return self.expand_subscript_string(text);
+                        return self.expand_subscript_string(&text);
                     };
                     if let Some(hit) =
                         crate::executor::expand_braced_indices::sub_res_lookup(&key)
                     {
                         return hit;
                     }
-                    let resolved = self.expand_subscript_string(text);
+                    let resolved = self.expand_subscript_string(&text);
                     crate::executor::expand_braced_indices::sub_res_store(
                         key,
                         resolved.clone(),
@@ -669,6 +679,28 @@ fn encode_compound_assoc_key(key: &str) -> String {
     } else {
         crate::executor::arithmetic::encode_arithmetic_assoc_key(key)
     }
+}
+
+/// Mark bare `'` bytes in already-expanded subscript text with the \x17
+/// data carrier (CTLESC port). GNU's lexer resolves single-quoted spans
+/// before expansion — expand_word_internal never treats `'` as syntax —
+/// so every `'` surviving in a once-expanded operand is data produced by
+/// that expansion (`dict["$k"]` with k=`'`). Escaped quotes are left for
+/// mask_subscript_escapes, which resolves `\'` to the same carrier.
+pub(crate) fn mark_expanded_once_data_squotes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            out.push(ch);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        out.push(if ch == '\'' { LITERAL_SINGLE_QUOTE } else { ch });
+    }
+    out
 }
 
 /// Resolve the subscript token's quoting the way the lexer does, leaving the
