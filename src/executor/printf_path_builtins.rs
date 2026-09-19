@@ -20,7 +20,13 @@ impl Executor {
             }
             if arg == "-v" {
                 if let Some(operand) = words.get(scan + 1).cloned() {
-                    match self.rewrite_operand_array_subscript(&operand) {
+                    // GNU printf.def:305 SET_VFLAGS reads W_ARRAYREF off the
+                    // operand word (`list_optflags`): with array_expand_once
+                    // it adds VA_ONEWORD, so `printf -v "A[]]"` keys on the
+                    // LAST `]`. `words` is cmd.words[1..], so the operand
+                    // sits at cmd index scan+2.
+                    let oneword = self.word_is_arrayref(cmd, scan + 2);
+                    match self.rewrite_operand_array_subscript_flags(&operand, oneword) {
                         Ok(rewritten) => words[scan + 1] = rewritten,
                         Err(()) => return Ok(1),
                     }

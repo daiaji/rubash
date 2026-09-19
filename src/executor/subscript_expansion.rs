@@ -48,7 +48,7 @@ pub(in crate::executor) enum SubscriptSource<'a> {
 
 /// How a builtin-operand subscript resolves: mirrors which GNU flag
 /// (ASS_NOEXPAND / AV_NOEXPAND, or none) the consumer's caller attached.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::executor) enum OperandSubscriptMode {
     /// Option-gated: verbatim with array_expand_once, a deferred
     /// expand_subscript_string pass without it (SET_VFLAGS /
@@ -212,34 +212,147 @@ impl Executor {
         }
     }
 
-    /// GNU `test -v name[sub]` / `[ -v name[sub] ]` / `printf -v name[sub]` /
-    /// `read name[sub]`: the argv operand already went through word
-    /// expansion, so its subscript resolves under the ExpandedOnce rules
-    /// (builtins/common.h `SET_VFLAGS` — verbatim with array_expand_once, a
-    /// deferred `expand_subscript_string` pass without it). The returned
-    /// operand carries the FINAL form for the env-only builtin lookup:
-    /// `name[<index>]` for indexed subscripts and `name[\x1e<hex>]` for
-    /// associative keys (the carrier encoding keeps `]`/`=`/quoting inside a
-    /// key from corrupting the re-parse). `Err(())` means evaluation already
-    /// failed — the operand-expected diagnostic was printed and the
-    /// evalerror abort raised, so the caller only supplies status 1.
+    /// GNU `test -v name[sub]` / `[ -v name[sub] ]` (test.c:650-668):
+    /// `aflags = array_expand_once ? AV_NOEXPAND : 0` is passed to
+    /// `valid_array_reference`, which consumes VA_* bits — and AV_NOEXPAND
+    /// (0x020) sets none of them (arrayfunc.h:62 vs :69-70), so the operand
+    /// is ALWAYS validated flag-0, the quote-aware matched-pair scan:
+    /// `a[80's]` is an unterminated quote and `a[]]` an empty subscript in
+    /// every option state. The ELEMENT lookup does consume AV flags
+    /// (get_array_value -> array_variable_name, arrayfunc.c:1414-1420):
+    /// array_expand_once takes the subscript verbatim, otherwise the
+    /// deferred `expand_subscript_string` pass runs once.
+    /// The returned operand carries the FINAL form for the env-only builtin
+    /// lookup: `name[<index>]` for indexed subscripts and `name[\x1e<hex>]`
+    /// for associative keys (the carrier encoding keeps `]`/`=`/quoting
+    /// inside a key from corrupting the re-parse). `Err(())` means
+    /// evaluation already failed — the operand-expected diagnostic was
+    /// printed and the evalerror abort raised, so the caller only supplies
+    /// status 1.
     pub(in crate::executor) fn rewrite_operand_array_subscript(
         &mut self,
         operand: &str,
     ) -> Result<String, ()> {
-        self.rewrite_operand_subscript(operand, OperandSubscriptMode::ExpandedOnce)
+        let expand_once =
+            crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once");
+        self.rewrite_operand_subscript_typed(
+            operand,
+            if expand_once {
+                OperandSubscriptMode::Verbatim
+            } else {
+                OperandSubscriptMode::ExpandedOnce
+            },
+            None,
+            false,
+            false,
+        )
     }
 
-    /// `[[ -v name[sub] ]]` (cond.c -> test.c's -v machinery): the operand's
-    /// subscript already went through the conditional word expansion, so the
-    /// text is consumed verbatim in both option modes — GNU protects the
-    /// expansion products embedded in it, and our evaluator treats the
-    /// surviving `$name`/`$(...)` text as "operand expected" data.
+    /// `rewrite_operand_array_subscript` with the VA_ONEWORD half of
+    /// `SET_VFLAGS` (builtins/common.h:279): `printf -v`/`wait -p` set it
+    /// when `array_expand_once` is on and the operand word carried
+    /// W_ARRAYREF; test -v and the declare family never do.
+    pub(in crate::executor) fn rewrite_operand_array_subscript_flags(
+        &mut self,
+        operand: &str,
+        oneword: bool,
+    ) -> Result<String, ()> {
+        self.rewrite_operand_subscript_typed(
+            operand,
+            OperandSubscriptMode::ExpandedOnce,
+            None,
+            crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once"),
+            oneword,
+        )
+    }
+
+    /// `[[ -v name[sub] ]]` (execute_cmd.c:4008-4031): the operand expands
+    /// under `cond_expand_word(op, 3)` (Q_ARITH, subst.c:4077) and GNU
+    /// then calls `set_expand_once(0, 0)`, so test.c's -v machinery always
+    /// validates and tokenizes the expanded operand flag-0 — the quote-aware
+    /// matched-pair scan in EVERY option state — and resolves the subscript
+    /// with one more `expand_array_subscript` pass.
+    ///
+    /// `arrayref` is the TEST_ARRAYEXP bit: `valid_array_reference(raw,
+    /// VA_NOEXPAND)` passed on the RAW operand (execute_cmd.c:4015). GNU
+    /// then keeps every `]`/`'`/`"` PRODUCED by expansion inside the
+    /// subscript backslash-protected (`set -x` prints `[[ -v F[\]] ]]` for
+    /// k=`]`), so flag-0 reads them as escaped data and the subscript
+    /// extends to the LAST `]` — modeled below as the last-`]` boundary on
+    /// the cooked text with cooked quotes hoisted to data carriers before
+    /// the expand pass. A raw word that fails flag-1 (`F[]]`) has no
+    /// protected `]` and fails flag-0 outright.
     pub(in crate::executor) fn rewrite_conditional_v_operand(
         &mut self,
         operand: &str,
+        arrayref: bool,
     ) -> Result<String, ()> {
-        self.rewrite_operand_subscript(operand, OperandSubscriptMode::Verbatim)
+        let Some((name, subscript)) = parse_array_subscript(operand) else {
+            return Ok(operand.to_string());
+        };
+        if !is_shell_name(name) || matches!(subscript, "@" | "*") {
+            return Ok(operand.to_string());
+        }
+        let assoc = is_marked_var(&self.env_vars, ASSOC_VARS, name);
+        // TEST_ARRAYEXP implies the raw token ended with `]` (flag-1 needs
+        // it as terminator), so the cooked text ends with `]` too and a
+        // non-empty subscript is the whole validity question. Without it,
+        // flag-0 decides on the cooked text directly.
+        // GNU's cond_expand_word \-protects every `'`/`"`/`]` the expansion
+        // PRODUCED (set -x shows `[[ -v H[80\'s] ]]`), so the flag-0 scan
+        // reads cooked quote bytes as data. The cooked text here carries no
+        // such protection, so hoist cooked `'`/`"` to the \x17/\x18 data
+        // carriers before running the flag-0 validity scan — an expansion-
+        // produced `'` is data, never an opening quote.
+        let hoisted_operand = operand.replace('\'', "\x17").replace('"', "\x18");
+        let valid = if arrayref && assoc {
+            !subscript.is_empty()
+        } else {
+            valid_array_reference_env(&hoisted_operand, false, false, &self.env_vars)
+        };
+        if !valid {
+            return Ok(operand.to_string());
+        }
+        // TEST_ARRAYEXP: the raw token already was a valid array reference,
+        // so get_array_value's aflags carry AV_NOEXPAND and the cooked
+        // subscript is the key VERBATIM — array_expand_index skips
+        // expand_subscript_string entirely (aa[$key] with key='$(date >&2)'
+        // must NOT execute the command substitution). Non-TEST_ARRAYEXP
+        // operands take the flag-0 tokenize + one deferred
+        // expand_subscript_string pass on the quote-hoisted subscript —
+        // produced `'`/`"` stay data while `$x`/`$(...)` still expand.
+        let hoisted;
+        let source = if arrayref {
+            SubscriptSource::Protected(subscript)
+        } else {
+            hoisted = subscript.replace('\'', "\x17").replace('"', "\x18");
+            SubscriptSource::Raw(&hoisted)
+        };
+        if assoc {
+            let key = self.resolve_array_subscript(source);
+            if key.is_empty() && !arrayref {
+                // GNU expand_subscript_string -> array_expand_index: a
+                // flag-0-valid reference whose subscript expands to nothing
+                // ('aa[$undef]', 'aa[$(true)]') reports
+                // `aa: bad array subscript` (sh_badsubscript) instead of
+                // silently testing a literal name.
+                eprintln!("{}{name}: bad array subscript", self.diagnostic_prefix());
+            }
+            return Ok(format!(
+                "{name}[{}]",
+                crate::executor::arithmetic::encode_arithmetic_assoc_key(&key)
+            ));
+        }
+        match self.eval_indexed_subscript(source) {
+            IndexedSubscript::Index(index) => Ok(format!("{name}[{index}]")),
+            IndexedSubscript::Empty => {
+                if !arrayref {
+                    eprintln!("{}{name}: bad array subscript", self.diagnostic_prefix());
+                }
+                Ok(operand.to_string())
+            }
+            IndexedSubscript::Error => Err(()),
+        }
     }
 
     /// GNU declare.def:429 (`assoc_noexpand = array_expand_once &&
@@ -268,7 +381,13 @@ impl Executor {
         operand: &str,
         mode: OperandSubscriptMode,
     ) -> Result<String, ()> {
-        self.rewrite_operand_subscript_typed(operand, mode, None)
+        self.rewrite_operand_subscript_typed(
+            operand,
+            mode,
+            None,
+            crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once"),
+            false,
+        )
     }
 
     /// `assoc` overrides the variable-type probe: GNU decide indexed-vs-
@@ -277,17 +396,40 @@ impl Executor {
     /// indexed array `making_array_special` creates (declare.def:641-642,
     /// 959-962) — a global assoc of the same name is shadowed and must not
     /// route the operand down the assoc path.
+    /// `noexpand`/`oneword` are the VA_NOEXPAND/VA_ONEWORD flag set the
+    /// caller derived (SET_VFLAGS builtins/common.h:279 for
+    /// read/printf -v/wait -p, `array_expand_once ? AV_NOEXPAND : 0` for
+    /// test -v, forced 0 for `[[ -v ]]` which calls set_expand_once(0,0)
+    /// at execute_cmd.c:4027). With VA_NOEXPAND|VA_ONEWORD an assoc
+    /// operand's subscript closes at the LAST `]` (`printf -v A[$k]` with
+    /// k=`]` stores key `]`).
     pub(in crate::executor) fn rewrite_operand_subscript_typed(
         &mut self,
         operand: &str,
         mode: OperandSubscriptMode,
         assoc: Option<bool>,
+        noexpand: bool,
+        oneword: bool,
     ) -> Result<String, ()> {
         let Some((name, subscript)) = parse_array_subscript(operand) else {
             return Ok(operand.to_string());
         };
         if !is_shell_name(name) || matches!(subscript, "@" | "*") {
             return Ok(operand.to_string());
+        }
+        if mode != OperandSubscriptMode::AlwaysExpand {
+            // GNU printf.def:305 / read.def:405 order: the builtin validates
+            // the operand with valid_array_reference(name, arrayflags)
+            // BEFORE binding. The naive parse above accepts `a[80's]`, but
+            // the flag-0 matched-pair scan (subst.c:2186 skipsubscript)
+            // treats the `'` as an unterminated quote — invalid. Pass the
+            // operand through so the consumer emits `not a valid
+            // identifier` (sh_invalidid) instead of binding `80s`. The
+            // AlwaysExpand mode models GNU paths that never run this
+            // operand check (declare-family assignment words).
+            if !valid_array_reference_env(operand, noexpand, oneword, &self.env_vars) {
+                return Ok(operand.to_string());
+            }
         }
         let source = match mode {
             OperandSubscriptMode::ExpandedOnce => SubscriptSource::ExpandedOnce(subscript),
@@ -676,12 +818,18 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
     let mut saw_span = false;
     while !rest.is_empty() {
         // '\u{E107}' is the compound-assignment hoisted single-quote
-        // sentinel (SQ_DATA, assignment_expansion.rs): it carries the same
-        // "no expansion inside" guarantee as a literal `'`.
+        // sentinel (SQ_DATA, assignment_expansion.rs) and '\x17' is the
+        // embedded-parameter walker's literal-single-quote data marker —
+        // arithmetic input arrives with `'` already converted to `\x17`
+        // (expand_arithmetic_special_parameters), so `$(( ${A['$(..)']}
+        // ))` must treat `\x17$(..)\x17` as the same literal span. Both
+        // carry the same "no expansion inside" guarantee as a literal `'`.
         let (inner, close) = if let Some(inner) = rest.strip_prefix('\'') {
             (inner, '\'')
         } else if let Some(inner) = rest.strip_prefix('\u{E107}') {
             (inner, '\u{E107}')
+        } else if let Some(inner) = rest.strip_prefix('\x17') {
+            (inner, '\x17')
         } else {
             return None;
         };
@@ -691,4 +839,76 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
         saw_span = true;
     }
     saw_span.then_some(out)
+}
+
+/// GNU `valid_array_reference` (`arrayfunc.c:1350` ->
+/// `tokenize_array_reference`, arrayfunc.c:1288): `name[sub]` is valid when
+/// the base is a valid identifier and the `]` matching the first `[` is the
+/// last character with a non-empty subscript.
+///
+/// `noexpand`/`oneword` model the `VA_NOEXPAND`/`VA_ONEWORD` flag set
+/// (`arrayfunc.h:69-70`) a builtin derived for the operand:
+///
+/// * `VA_NOEXPAND|VA_ONEWORD` AND `base` names an existing assoc:
+///   `tokenize_array_reference` closes the subscript at `strlen(t)-1` —
+///   the LAST `]` — so `A[]]` keys on `]` and `A[foo]bar]` keys on
+///   `foo]bar` (arrayfunc.c:1311-1314). Only len==1 (`A[]`) fails.
+/// * `VA_NOEXPAND` alone AND `base` names an existing assoc:
+///   `skipsubscript(t, 0, 1)` takes the FIRST `]` verbatim — `a[80's]`
+///   is a valid `80's` key, but `A[]]` ends the subscript at len 1 and
+///   is rejected.
+/// * otherwise: `skipsubscript` runs the flag-0 quote-aware matched-pair
+///   scan (subst.c:2186 -> skip_matched_pair subst.c:2086), so `'`/`"`
+///   open quoting and `a[80's]` has no depth-0 `]` — invalid.
+pub(crate) fn valid_array_reference_env(
+    name: &str,
+    noexpand: bool,
+    oneword: bool,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    let Some(open) = name.find('[') else {
+        return false;
+    };
+    let base = &name[..open];
+    if !is_shell_name(base) {
+        return false;
+    }
+    // tokenize_array_reference only consults the variable under VA_NOEXPAND;
+    // a flag-0 caller always runs the quote-aware else-branch, even for an
+    // assoc, and a flag-1 caller falls back to flag-0 when the variable is
+    // unset or not associative.
+    if noexpand && is_marked_var(env_vars, ASSOC_VARS, base) {
+        let sub = &name[open + 1..];
+        if oneword {
+            // strlen(t)-1 — the last `]` closes the subscript.
+            return sub.len() > 1 && sub.ends_with(']');
+        }
+        // skipsubscript flag-1: the FIRST `]` must be the last byte and
+        // must leave a non-empty subscript (arrayfunc.c:1323-1324).
+        return sub
+            .find(']')
+            .is_some_and(|close| close >= 1 && close == sub.len() - 1);
+    }
+    match scan_compound_subscript(name, open) {
+        Some((close, _)) => close == name.len() - 1 && close > open + 1,
+        None => false,
+    }
+}
+
+impl Executor {
+    /// GNU `execute_cmd.c:4366-4401 fix_arrayref_words`: whether the word
+    /// at `index` in `cmd.words` carried `W_ARRAYREF` — i.e. its raw token
+    /// passed flag-0 `valid_array_reference` (`[` outside quotes, matched
+    /// `]` at the end). `builtin_arrayref_flags` (builtins/common.c:1040)
+    /// and `SET_VFLAGS` (builtins/common.h:279) both consume this bit; the
+    /// expanded text cannot recover it (`dict["'"]` and `dict[']'` cook to
+    /// the same string).
+    pub(in crate::executor) fn word_is_arrayref(&self, cmd: &CommandNode, index: usize) -> bool {
+        cmd.word_metadata
+            .iter()
+            .find(|metadata| metadata.word_index == index)
+            .is_some_and(|metadata| {
+                valid_array_reference_env(&metadata.raw, false, false, &self.env_vars)
+            })
+    }
 }

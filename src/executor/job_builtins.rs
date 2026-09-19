@@ -128,8 +128,38 @@ impl Executor {
         // variable unbound before any waiting happens, in every wait form —
         // an invalid identifier or a readonly name fails immediately, and a
         // name that never gets bound stays unset.
-        if let Some(name) = wait_assign_var(&cmd.words[1..]) {
-            if !is_shell_name(&name) {
+        if let Some((name, name_index)) = wait_assign_var(&cmd.words[1..]) {
+            let expand_once =
+                crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once");
+            // GNU wait.def:156 SET_VFLAGS (builtins/common.h:279): the -p
+            // operand's arrayflags are VA_NOEXPAND when array_expand_once
+            // is on, plus VA_ONEWORD only when the option is on AND the
+            // operand word itself was a syntactic array reference
+            // (W_ARRAYREF; execute_cmd.c:4370 fix_arrayref_words on the
+            // raw token). A joined `-pNAME` word can never carry it (the
+            // raw `-pA[k]` is not a valid reference).
+            let w_arrayref = cmd
+                .word_metadata
+                .iter()
+                .find(|metadata| metadata.word_index == name_index + 1)
+                .is_some_and(|metadata| {
+                    crate::executor::subscript_expansion::valid_array_reference_env(
+                        &metadata.raw,
+                        false,
+                        false,
+                        &self.env_vars,
+                    )
+                });
+            // wait.def:157: valid_identifier OR valid_array_reference under
+            // the flag set — `A[$rkey]` (`A[]]` verbatim) is legal.
+            if !is_shell_name(&name)
+                && !crate::executor::subscript_expansion::valid_array_reference_env(
+                    &name,
+                    expand_once,
+                    expand_once && w_arrayref,
+                    &self.env_vars,
+                )
+            {
                 let mut stderr = Vec::new();
                 writeln!(
                     stderr,
@@ -149,7 +179,16 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 return Ok(1);
             }
-            self.env_vars.remove(&name);
+            // builtin_unbind_variable: an element name unbinds just that
+            // element; a scalar name unbinds the whole variable.
+            if name.contains('[') {
+                // SET_VFLAGS bindflags: ASS_NOEXPAND (verbatim subscript)
+                // follows array_expand_once alone; W_ARRAYREF only adds
+                // ASS_ONEWORD.
+                self.unset_array_element(&name, expand_once);
+            } else {
+                self.env_vars.remove(&name);
+            }
         }
         if let Some(request) = wait_any_request(&cmd.words[1..]) {
             // GNU builtins/wait.def:209-246 + jobs.c:3456 wait_for_any_job:
@@ -188,7 +227,8 @@ impl Executor {
                     self.job_table.remove_job_by_pid_preserve_status(pid);
                     self.forget_background_runtime(pid);
                     if let Some(wait_var) = &request.assign_var {
-                        self.apply_shell_assignment_command("wait", wait_var, pid.to_string());
+                        let arrayref = self.wait_var_arrayref();
+                        self.bind_wait_variable(wait_var, pid.to_string(), arrayref);
                     }
                     self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                     return Ok(status);
@@ -245,9 +285,10 @@ impl Executor {
                 // GNU wait.def:338-339: -p binds the pid of the LAST operand
                 // waited for (pstat.pid; NO_PID when the last operand
                 // failed, leaving the pre-unbound variable unset).
-                let wait_var = wait_assign_var(&cmd.words[1..]);
+                let wait_var = wait_assign_var(&cmd.words[1..])
+                    .map(|(name, _index)| (name, self.wait_var_arrayref()));
                 let status =
-                    self.wait_for_background_operands(&operands, cmd, wait_var.as_deref())?;
+                    self.wait_for_background_operands(&operands, cmd, wait_var.as_ref())?;
                 return Ok(status);
             }
         }
@@ -276,11 +317,79 @@ impl Executor {
         Ok(status)
     }
 
+    /// GNU wait.def:156 SET_VFLAGS for the `-p` operand:
+    /// VA_NOEXPAND|VA_ONEWORD when array_expand_once is on OR the operand
+    /// word itself was a syntactic array reference (W_ARRAYREF;
+    /// execute_cmd.c:4370). `name_index` is the operand's index inside
+    /// `cmd.words[1..]`; a joined `-pNAME` word can never carry W_ARRAYREF
+    /// because `-pA[k]` is not a valid reference.
+    /// GNU wait.def:156 SET_VFLAGS bindflags: the element subscript binds
+    /// verbatim when ASS_NOEXPAND is set, which follows array_expand_once
+    /// alone (VA_ONEWORD from W_ARRAYREF only widens the subscript close
+    /// to the last `]`; it does not make the bind verbatim).
+    fn wait_var_arrayref(&self) -> bool {
+        crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once")
+    }
+
+    /// GNU builtin_bind_var_to_int: an element name binds that element with
+    /// the operand's flag set (verbatim under VA_NOEXPAND|VA_ONEWORD, else
+    /// the deferred expand_subscript_string pass); a scalar name binds the
+    /// variable. An undeclared `A[k]` auto-creates the array like
+    /// bind_array_element does (assoc for a non-numeric key).
+    fn bind_wait_variable(&mut self, name: &str, value: String, arrayref: bool) {
+        let Some((base, subscript)) = parse_array_subscript(name) else {
+            self.apply_shell_assignment_command("wait", name, value);
+            return;
+        };
+        let base = base.to_string();
+        let source = if arrayref {
+            SubscriptSource::Protected(subscript)
+        } else {
+            SubscriptSource::ExpandedOnce(subscript)
+        };
+        let current = self.env_vars.get(&base).cloned().unwrap_or_default();
+        if is_marked_var(&self.env_vars, ASSOC_VARS, &base)
+            || (!is_marked_array_var(&self.env_vars, &base)
+                && !is_array_storage(&current)
+                && !matches!(
+                    self.eval_indexed_subscript(source),
+                    IndexedSubscript::Index(_)
+                ))
+        {
+            let mut entries = assoc_entries(&current);
+            let key = self.resolve_array_subscript(source);
+            if let Some(slot) = entries.iter_mut().find(|(entry_key, _)| *entry_key == key) {
+                slot.1 = value;
+            } else {
+                entries.push((key, value));
+            }
+            self.env_vars.insert(base.clone(), format_assoc_storage(entries));
+            if !is_marked_var(&self.env_vars, ASSOC_VARS, &base) {
+                mark_env_name(&mut self.env_vars, ASSOC_VARS, &base);
+            }
+            return;
+        }
+        match self.eval_indexed_subscript(source) {
+            IndexedSubscript::Index(index) => {
+                let mut entries = indexed_array_entries(&current);
+                entries.insert(index as usize, value);
+                self.env_vars
+                    .insert(base.clone(), format_indexed_array_storage(entries));
+                if !is_marked_array_var(&self.env_vars, &base) {
+                    mark_env_name(&mut self.env_vars, ARRAY_VARS, &base);
+                }
+            }
+            _ => {
+                self.apply_shell_assignment_command("wait", name, value);
+            }
+        }
+    }
+
     fn wait_for_background_operands(
         &mut self,
         operands: &[String],
         cmd: &CommandNode,
-        wait_var: Option<&str>,
+        wait_var: Option<&(String, bool)>,
     ) -> Result<i32, ExecuteError> {
         let resolved = operands
             .iter()
@@ -307,8 +416,8 @@ impl Executor {
             }
         }
 
-        if let (Some(wait_var), Some(pid)) = (wait_var, last_pid) {
-            self.apply_shell_assignment_command("wait", wait_var, pid.to_string());
+        if let (Some((wait_var, arrayref)), Some(pid)) = (wait_var, last_pid) {
+            self.bind_wait_variable(wait_var, pid.to_string(), *arrayref);
         }
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
@@ -1489,12 +1598,14 @@ impl Executor {
 struct WaitAnyRequest {
     operands: Vec<String>,
     assign_var: Option<String>,
+    assign_var_index: Option<usize>,
 }
 
 fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
     let mut index = 0;
     let mut wait_any = false;
     let mut assign_var = None;
+    let mut assign_var_index = None;
     while let Some(word) = words.get(index) {
         if word == "--" {
             index += 1;
@@ -1510,19 +1621,18 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
                 'f' => {}
                 'p' => {
                     let value_start = 1 + offset + option.len_utf8();
-                    let name = if value_start < word.len() {
-                        &word[value_start..]
+                    let (name, name_index) = if value_start < word.len() {
+                        (&word[value_start..], index)
                     } else {
                         index += 1;
-                        words.get(index)?
+                        (words.get(index)?.as_str(), index)
                     };
-                    if !is_shell_name(name) {
-                        return None;
-                    }
+                    // GNU wait.def:156-157: validity is decided downstream
+                    // by valid_identifier/valid_array_reference under
+                    // SET_VFLAGS — array-subscript names are legal and must
+                    // reach the execute path for the real check.
                     assign_var = Some(name.to_string());
-                    if value_start < word.len() {
-                        break;
-                    }
+                    assign_var_index = Some(name_index);
                     break;
                 }
                 _ => return None,
@@ -1534,6 +1644,7 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
     wait_any.then(|| WaitAnyRequest {
         operands: words[index..].to_vec(),
         assign_var,
+        assign_var_index,
     })
 }
 
@@ -1572,7 +1683,10 @@ fn wait_background_operands(words: &[String]) -> Option<Vec<String>> {
 
 /// The `-p` variable name from a wait command's option cluster, mirroring
 /// GNU internal_getopt "fnp:" argument consumption (wait.def:120-137).
-fn wait_assign_var(words: &[String]) -> Option<String> {
+/// Returns (name, operand_word_index) — the index of the word that carries
+/// the name inside `words` (the `-pNAME` word itself for the joined form),
+/// so the caller can consult its raw token for W_ARRAYREF.
+fn wait_assign_var(words: &[String]) -> Option<(String, usize)> {
     let mut index = 0;
     while let Some(word) = words.get(index) {
         if word == "--" || !word.starts_with('-') || word == "-" {
@@ -1584,9 +1698,11 @@ fn wait_assign_var(words: &[String]) -> Option<String> {
                 'p' => {
                     let value_start = 1 + offset + option.len_utf8();
                     if value_start < word.len() {
-                        return Some(word[value_start..].to_string());
+                        return Some((word[value_start..].to_string(), index));
                     }
-                    return words.get(index + 1).cloned();
+                    return words
+                        .get(index + 1)
+                        .map(|name| (name.clone(), index + 1));
                 }
                 _ => return None,
             }

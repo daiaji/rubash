@@ -220,6 +220,20 @@ fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
 }
 
 fn valid_printf_array_target(name: &str, env_vars: &HashMap<String, String>) -> bool {
+    // GNU printf.def:305: valid_array_reference(vname, arrayflags) with the
+    // VA_NOEXPAND flags SET_VFLAGS derives from array_expand_once
+    // (builtins/common.h:279) — a malformed quoted subscript (`a[80's]`)
+    // is not a valid identifier under the flag-0 matched-pair scan. The
+    // executor pre-pass already applied the SET_VFLAGS W_ARRAYREF half and
+    // rewrote the operand to its normalized `name[index]`/`name[\x1e..]`
+    // form, which the flag-0 scan validates (VA_ONEWORD never applies to
+    // the rewritten carrier text).
+    let noexpand = crate::builtins::shopt::option_enabled(env_vars, "array_expand_once");
+    if !crate::executor::subscript_expansion::valid_array_reference_env(
+        name, noexpand, false, env_vars,
+    ) {
+        return false;
+    }
     let Some((base, subscript)) = parse_printf_array_target(name) else {
         return false;
     };

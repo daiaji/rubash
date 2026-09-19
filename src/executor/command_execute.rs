@@ -177,6 +177,51 @@ impl Executor {
             return Err(ExecuteError::ExitCode(2));
         }
 
+        // GNU parse.y: `name=(list)` is a WORD only in assignment position
+        // (an env-prefix run of assignment words) or as an operand of a
+        // declaration builtin (declare/typeset/local/readonly/export accept
+        // `name=(...)` arguments). Anywhere else `(` is an unexpected token
+        // and the whole input aborts: `printf "%s\n" -a a=(a 'b  c')` →
+        // `syntax error near unexpected token `('` (array1.sub:1). The
+        // lexer keeps `name=(...)` atomic behind COMPOUND_ASSIGNMENT_MARKER
+        // for the declare path, so illegal positions surface here as a
+        // marker word whose preceding words are not all assignments.
+        if let Some(marker_index) = cmd
+            .words
+            .iter()
+            .position(|word| word.contains(COMPOUND_ASSIGNMENT_MARKER))
+        {
+            // GNU parse.y:5795-5810: PST_ASSIGNOK is set after an
+            // ASSIGNMENT_BUILTIN (mkbuiltins.c:157-161: alias, declare,
+            // export, local, readonly, typeset), after `eval`/`let`
+            // (STREQ special-case), and through `command` chains
+            // (PST_CMDBLTIN — `command declare a=(x)` stays legal).
+            let assignment_builtin = cmd
+                .words
+                .iter()
+                .find(|word| word.as_str() != "command")
+                .is_some_and(|word| {
+                    matches!(
+                        word.as_str(),
+                        "alias" | "declare" | "export" | "local" | "readonly" | "typeset"
+                            | "eval" | "let"
+                    )
+                });
+            let assignment_prefix = (0..marker_index).all(|index| {
+                split_assignment_word(&cmd.words[index]).is_some()
+                    || command_word_is_array_element_assignment(cmd, index)
+            });
+            if !assignment_builtin && !assignment_prefix {
+                self.mark_parse_error();
+                eprintln!(
+                    "{}syntax error near unexpected token `('",
+                    self.parser_diagnostic_prefix()
+                );
+                self.exit_code = 2;
+                return Err(ExecuteError::ExitCode(2));
+            }
+        }
+
         if cmd.function_command.is_none()
             && cmd
                 .word_metadata
@@ -520,8 +565,8 @@ impl Executor {
     fn strip_invalid_env_assignment_prefixes(&mut self, cmd: &CommandNode) -> CommandNode {
         // Find the run of leading array-style assignment words.
         let mut prefix_end = 0usize;
-        for word in &cmd.words {
-            if !is_array_element_assignment_word(word) {
+        for index in 0..cmd.words.len() {
+            if !command_word_is_array_element_assignment(cmd, index) {
                 break;
             }
             prefix_end += 1;

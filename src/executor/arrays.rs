@@ -25,6 +25,7 @@ use super::{
     Executor, ParameterTransform, ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
 use crate::lexer::remove_shell_quotes;
+use crate::CommandNode;
 
 pub(super) fn is_array_element_assignment_word(word: &str) -> bool {
     let Some((left, _)) = word.split_once('=') else {
@@ -93,6 +94,29 @@ pub(super) fn is_array_element_assignment_word(word: &str) -> bool {
         index_pos += 1;
     }
     false
+}
+
+/// Whether `cmd.words[index]` is an array-element assignment word.
+/// The parser's `array_element_assignments` nodes are authoritative — they
+/// were built with quote-aware raw scanning, so a subscript containing a
+/// quoted `]` (`A["]"]=v`, cooked `A[]]=v`) is recognized even though the
+/// de-quoted text no longer shows the real delimiter. The cooked-text scan
+/// remains as a fallback for synthetic commands built without parser
+/// metadata.
+pub(super) fn command_word_is_array_element_assignment(
+    cmd: &CommandNode,
+    index: usize,
+) -> bool {
+    if cmd
+        .array_element_assignments
+        .iter()
+        .any(|assignment| assignment.word_index == Some(index))
+    {
+        return true;
+    }
+    cmd.words
+        .get(index)
+        .is_some_and(|word| is_array_element_assignment_word(word))
 }
 
 /// Skip a `$(`/`${` body starting at the delimiter (`(`/`{`) position,

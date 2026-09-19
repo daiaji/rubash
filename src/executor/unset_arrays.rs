@@ -5,13 +5,39 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
+        // GNU execute_cmd.c:4370 fix_arrayref_words: a word that is a valid
+        // array reference at the SYNTACTIC level (flag-0
+        // valid_array_reference on the unexpanded token — `name[` outside
+        // quotes with a matched `]` at end) gets W_ARRAYREF. unset's
+        // builtin_arrayref_flags (builtins/common.c:1040) then gives it
+        // VA_ONEWORD|VA_NOEXPAND unconditionally, so the element subscript is
+        // bound verbatim. A `[` inside quotes (`"dict[$k]"`) or single
+        // quotes (`'dict[$k]'`) does not count — the expanded operand falls
+        // back to the flag-0/VA_NOEXPAND validity scan.
+        let arrayref_flags: Vec<bool> = (1..cmd.words.len())
+            .map(|index| {
+                cmd.word_metadata.get(index).is_some_and(|metadata| {
+                    crate::executor::subscript_expansion::valid_array_reference_env(
+                        &metadata.raw,
+                        false,
+                        false,
+                        &self.env_vars,
+                    )
+                })
+            })
+            .collect();
+
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
             if is_null_device(&target) {
-                return self.execute_unset_with_stderr(&cmd.words[1..], &mut std::io::sink());
+                return self.execute_unset_with_stderr(
+                    &cmd.words[1..],
+                    &arrayref_flags,
+                    &mut std::io::sink(),
+                );
             }
             let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-            return self.execute_unset_with_stderr(&cmd.words[1..], &mut file);
+            return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
@@ -20,15 +46,20 @@ impl Executor {
                 .create(true)
                 .append(true)
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
-            return self.execute_unset_with_stderr(&cmd.words[1..], &mut file);
+            return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
         }
 
-        self.execute_unset_with_stderr(&cmd.words[1..], &mut std::io::stderr().lock())
+        self.execute_unset_with_stderr(
+            &cmd.words[1..],
+            &arrayref_flags,
+            &mut std::io::stderr().lock(),
+        )
     }
 
     pub(in crate::executor) fn execute_unset_with_stderr<W>(
         &mut self,
         args: &[String],
+        arrayref_flags: &[bool],
         stderr: &mut W,
     ) -> Result<i32, ExecuteError>
     where
@@ -61,15 +92,16 @@ impl Executor {
         // GNU builtins/set.def:866-867: `unset -f` cancels -n, and -n is
         // only meaningful for variables anyway.
         let nameref_only = args.iter().any(|arg| arg == "-n") && !function_only;
-        let names: Vec<String> = args
+        let names: Vec<(usize, String)> = args
             .iter()
-            .filter(|arg| !arg.starts_with('-'))
-            .cloned()
+            .enumerate()
+            .filter(|(_, arg)| !arg.starts_with('-'))
+            .map(|(index, arg)| (index, arg.clone()))
             .collect();
 
         let mut function_status = 0;
         if !variable_only {
-            for name in &names {
+            for (_, name) in &names {
                 if marked_env_names(&self.env_vars, READONLY_FUNCTIONS)
                     .iter()
                     .any(|readonly| readonly == name)
@@ -103,7 +135,7 @@ impl Executor {
         // remaining names are still processed.
         let mut nameref_status = 0;
         let mut element_status = 0;
-        for name in names {
+        for (arg_index, name) in names {
             // GNU builtins/set.def:925-968 + 1024 with nameref=1: the
             // non-unsettable and readonly checks run against
             // find_variable_last_nameref (the chain's last nameref, or the
@@ -155,6 +187,42 @@ impl Executor {
                 }
                 continue;
             }
+            // GNU builtins/set.def:887-917: tokenize_array_reference(name,
+            // vflags) runs before the identifier check. A `[`-shaped operand
+            // that fails it is not an array reference at all — under
+            // `unset -v` it reports `not a valid identifier` (sh_invalidid +
+            // posix_utility_error), while a plain `unset` silently treats it
+            // as a potential function name. A W_ARRAYREF word (syntactic
+            // `name[` on the raw token) gets VA_ONEWORD|VA_NOEXPAND via
+            // builtin_arrayref_flags (builtins/common.c:1040) and binds the
+            // subscript verbatim.
+            if name.contains('[') {
+                let arrayref = arrayref_flags.get(arg_index).copied().unwrap_or(false);
+                if arrayref {
+                    if let Some(status) = self.unset_array_element(&name, true) {
+                        element_status = element_status.max(i32::from(status));
+                        continue;
+                    }
+                }
+                let noexpand =
+                    crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once");
+                if !crate::executor::subscript_expansion::valid_array_reference_env(
+                    &name,
+                    noexpand,
+                    false,
+                    &self.env_vars,
+                ) {
+                    if variable_only {
+                        writeln!(
+                            stderr,
+                            "{}unset: `{name}': not a valid identifier",
+                            self.diagnostic_prefix()
+                        )?;
+                        element_status = element_status.max(1);
+                    }
+                    continue;
+                }
+            }
             // GNU builtins/set.def:927-935 + 990-1010 (unset_builtin): a
             // subscripted name whose base is a nameref unbinds the referenced
             // array's element (unset n[0] with n->v removes v[0]); a plain
@@ -164,7 +232,15 @@ impl Executor {
                 element_status = element_status.max(i32::from(status));
                 continue;
             }
-            if let Some(status) = self.unset_array_element(&name) {
+            // GNU set.def:887 + unbind_array_element: a non-W_ARRAYREF word
+            // still gets base_vflags = VA_NOEXPAND under array_expand_once,
+            // so its subscript unbinds verbatim; only VA_ONEWORD (the last
+            // `]` tokenize) is exclusive to W_ARRAYREF.
+            let verbatim = crate::builtins::shopt::option_enabled(
+                &self.env_vars,
+                "array_expand_once",
+            );
+            if let Some(status) = self.unset_array_element(&name, verbatim) {
                 element_status = element_status.max(i32::from(status));
                 continue;
             }
@@ -308,7 +384,7 @@ impl Executor {
             }
             let cell = self.env_vars.get(&last).cloned().unwrap_or_default();
             if parse_array_subscript(&cell).is_some() {
-                return self.unset_array_element(&cell).or(Some(0));
+                return self.unset_array_element(&cell, false).or(Some(0));
             }
             // GNU set.def:936-937 + 962-966: the resolved referent is
             // unbound by name; a readonly referent is an error on the
@@ -353,7 +429,7 @@ impl Executor {
             return None;
         };
         let cell = cell.clone();
-        self.unset_array_element(&format!("{cell}[{subscript}]"))
+        self.unset_array_element(&format!("{cell}[{subscript}]"), false)
             .or(Some(0))
     }
 
@@ -438,7 +514,16 @@ impl Executor {
     /// scalar unbinding; the status propagates subscript-expansion errors
     /// (GNU arrayfunc.c:1290-1317 unbind_array_element -> arrayfunc.c:420
     /// expand_array_subscript sets return_code=1 on eval failure).
-    pub(in crate::executor) fn unset_array_element(&mut self, name: &str) -> Option<u8> {
+    /// `arrayref` models `VA_NOEXPAND` from `builtin_arrayref_flags`
+    /// (builtins/common.c:1040): the operand word carried W_ARRAYREF, so
+    /// `unbind_array_element` (arrayfunc.c:1165) binds the assoc subscript
+    /// verbatim — `akey = sub` — instead of running the deferred
+    /// `expand_subscript_string` pass.
+    pub(in crate::executor) fn unset_array_element(
+        &mut self,
+        name: &str,
+        arrayref: bool,
+    ) -> Option<u8> {
         let Some((array_name, subscript)) = parse_array_subscript(name) else {
             return None;
         };
@@ -464,7 +549,30 @@ impl Executor {
             // once; with array_expand_once (ASS_NOEXPAND) that text is the
             // literal key, otherwise unbind performs the deferred
             // expand_subscript_string pass here.
-            let key = self.resolve_array_subscript(SubscriptSource::ExpandedOnce(&subscript));
+            let source = if arrayref {
+                // VA_NOEXPAND: akey = sub verbatim (arrayfunc.c:1166) — the
+                // `'`/`"` inside `dict["$k"]` already dequoted to data.
+                SubscriptSource::Protected(&subscript)
+            } else {
+                SubscriptSource::ExpandedOnce(&subscript)
+            };
+            let key = self.resolve_array_subscript(source);
+            if !arrayref && key.is_empty() && !subscript.is_empty() {
+                // GNU arrayfunc.c:1160-1178 unbind_array_element: a
+                // non-verbatim assoc subscript whose deferred expansion
+                // produces an empty key fails array_expand_index, which
+                // reports "[%s]: bad array subscript" via builtin_error
+                // (e.g. `unset 'dict[$b]'` with b unset → `[$b]: bad
+                // array subscript`) and returns -1 → status 1.
+                let mut buf = Vec::new();
+                let _ = writeln!(
+                    &mut buf,
+                    "{}unset: [{subscript}]: bad array subscript",
+                    self.diagnostic_prefix()
+                );
+                let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), &buf);
+                return Some(1);
+            }
             let mut entries = assoc_entries(&current);
             entries.retain(|(entry_key, _)| *entry_key != key);
             self.env_vars
@@ -486,7 +594,7 @@ impl Executor {
                 );
                 return Some(0);
             }
-            let index = match self.eval_indexed_subscript(SubscriptSource::ExpandedOnce(&subscript))
+            let index = match self.eval_indexed_subscript(if arrayref { SubscriptSource::Protected(&subscript) } else { SubscriptSource::ExpandedOnce(&subscript) })
             {
                 IndexedSubscript::Index(index) => index,
                 // GNU: `unset 'a[]'` is a silent no-op.
@@ -527,7 +635,7 @@ impl Executor {
         if subscript == "*" || subscript == "@" {
             return None;
         }
-        match self.eval_indexed_subscript(SubscriptSource::ExpandedOnce(&subscript)) {
+        match self.eval_indexed_subscript(if arrayref { SubscriptSource::Protected(&subscript) } else { SubscriptSource::ExpandedOnce(&subscript) }) {
             IndexedSubscript::Index(0) => {}
             IndexedSubscript::Index(_) => return None,
             IndexedSubscript::Empty => return Some(0),

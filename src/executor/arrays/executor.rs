@@ -528,7 +528,8 @@ impl Executor {
     ) -> Option<Vec<String>> {
         let inner = word
             .strip_prefix("${")
-            .and_then(|word| word.strip_suffix('}'))?;
+            .and_then(|word| word.strip_suffix('}'));
+        let inner = inner?;
 
         if let Some((var_name, pattern, operation)) = parse_indirect_pattern_removal(inner) {
             let pattern = self.expand_parameter_pattern_word(pattern);

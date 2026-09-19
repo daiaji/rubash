@@ -37,22 +37,42 @@ impl Executor {
             return Some(value);
         }
         if matches!(var_name, "@" | "*") {
-            // GNU pos_params_pat_subst (subst.c:9322) calls
-            // string_list_pos_params with pchar from MATCH_STARSUB.
-            // string_list_pos_params (subst.c:3048) dispatches to
-            // string_list_dollar_star (join with IFS[0]) when
-            // expand_no_split_dollar_star is set and ifs_is_null, otherwise
-            // string_list_dollar_at (join with space). The `=`/`:=` operator
-            // sets expand_no_split_dollar_star (subst.c:4487), so inside
-            // `${c=${*/}}` with IFS= the join uses IFS[0] (empty), producing
-            // `12` instead of `1 2` (exp11.sub).
-            let separator = if var_name == "*"
-                && ASSIGNMENT_RHS.with(|flag| flag.get())
-                && self.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
-            {
-                String::new()
-            } else {
-                " ".to_string()
+            // GNU pos_params_pat_subst (subst.c:9322) ->
+            // string_list_pos_params (subst.c:3030-3074): `*` joins through
+            // string_list_dollar_star (IFS[0]) when
+            // expand_no_split_dollar_star is set — expand_string_assignment
+            // (subst.c:4365) raises it for the whole assignment RHS, so
+            // `b=${*/a/x}` joins with `+` under IFS=+ (array20.sub). An
+            // unquoted `*` with IFS unset/empty takes string_list_dollar_at
+            // -> ' ' outside assignment RHS; inside it the MATCH_ASSIGNRHS
+            // upgrade (subst.c:9340-9341) re-quotes to dollar_star, which
+            // joins with IFS[0] — '' for `IFS=` (concat, `${c=${*/}}` ->
+            // `12`, exp11.sub) and the default ' ' for unset IFS.
+            // `@` always goes through string_list_dollar_at
+            // (subst.c:3058-3072), whose separator is ' ' under
+            // PF_ASSIGNRHS or null IFS and IFS[0] otherwise.
+            //
+            // expand_no_split_dollar_star has two RB carriers: the
+            // `inside_assignment_rhs` field for expand_string_assignment
+            // (whole `b=...` RHS, subst.c:4365) and the ASSIGNMENT_RHS
+            // thread-local for the `=`/`:=` brace-op RHS (subst.c:4487).
+            let assign_rhs = self.inside_assignment_rhs.get()
+                || ASSIGNMENT_RHS.with(|flag| flag.get());
+            let separator = match self.env_vars.get("IFS").map(String::as_str) {
+                // IFS set and non-empty: dollar_star -> IFS[0] for `*`,
+                // dollar_at -> IFS[0] for `@` only outside assignment RHS.
+                Some(ifs) if !ifs.is_empty() => {
+                    let sep = ifs.chars().next().unwrap().to_string();
+                    if var_name == "*" || !assign_rhs {
+                        sep
+                    } else {
+                        " ".to_string()
+                    }
+                }
+                // IFS= (empty): `*` in assignment RHS concatenates through
+                // the re-quoted dollar_star path; every other shape is ' '.
+                Some(_) if var_name == "*" && assign_rhs => String::new(),
+                _ => " ".to_string(),
             };
             return Some(
                 self.positional_params

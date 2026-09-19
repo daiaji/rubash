@@ -44,6 +44,13 @@ pub const INHERIT_PROCESS_STDIN: &str = "__RUBASH_INHERIT_PROCESS_STDIN";
 pub const LOCAL_EXPORT_ENV: &str = "__RUBASH_LOCAL_EXPORT_ENV";
 pub const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
 pub const COMPOUND_ASSIGNMENT_MARKER: &str = "__RUBASH_CA1__";
+/// GNU declare.def:988-1011: an operand subscript whose evaluation already
+/// failed (diagnostic printed by the subscript evaluator) is carried to the
+/// declare-family builtin under this sentinel so it binds the variable with
+/// its attributes — `convert_var_to_array` and VSETATTR run before
+/// assign_array_element — without re-evaluating (which would double-print
+/// the `operand expected` diagnostic).
+pub const FAILED_SUBSCRIPT_SENTINEL: &str = "\u{E10A}";
 pub const ARRAY_FIELD_SPLIT_MARKER: char = '';
 pub const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str =
     "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";

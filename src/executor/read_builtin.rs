@@ -5,22 +5,30 @@ const READ_USAGE: &str =
 
 /// GNU read.def:405: `read` accepts a name that is either a valid identifier
 /// or a valid array reference `name[subscript]` (array.tests:80 `read x[1]`).
-fn is_valid_read_name(name: &str) -> bool {
+/// The array-reference check is `valid_array_reference(name, arrayflags)`
+/// (arrayfunc.c:1350 -> tokenize_array_reference arrayfunc.c:1288) with the
+/// `SET_VFLAGS` flag set (builtins/common.h:279): `VA_NOEXPAND` follows
+/// `array_expand_once`; `VA_ONEWORD` is added only when the option is on
+/// AND the raw word carried `W_ARRAYREF` (execute_cmd.c:4370). The double
+/// flag set takes the LAST `]` for an assoc (`read "A[]]"` keys on `]`),
+/// `VA_NOEXPAND` alone takes the first (`read 'a[80's]'` keys on `80's`
+/// but `A[]]` is invalid), and flag-0 runs the quote-aware matched-pair
+/// scan (`read a[80's]` reports not-a-valid-identifier).
+fn is_valid_read_name(
+    name: &str,
+    w_arrayref: bool,
+    env_vars: &HashMap<String, String>,
+) -> bool {
     if is_shell_name(name) {
         return true;
     }
-    // GNU general.c valid_array_reference: name[non-empty-subscript]
-    // with a valid identifier base.
-    if let Some(open) = name.find('[') {
-        if name.ends_with(']') {
-            let base = &name[..open];
-            let subscript = &name[open + 1..name.len() - 1];
-            if !subscript.is_empty() && is_shell_name(base) {
-                return true;
-            }
-        }
-    }
-    false
+    let expand_once = crate::builtins::shopt::option_enabled(env_vars, "array_expand_once");
+    crate::executor::subscript_expansion::valid_array_reference_env(
+        name,
+        expand_once,
+        expand_once && w_arrayref,
+        env_vars,
+    )
 }
 
 impl Executor {
@@ -49,7 +57,11 @@ impl Executor {
                             index += 1;
                             continue;
                         }
-                        if is_valid_read_name(&cmd.words[index]) {
+                        if is_valid_read_name(
+                            &cmd.words[index],
+                            self.word_is_arrayref(cmd, index),
+                            &self.env_vars,
+                        ) {
                             scalar_names.push(cmd.words[index].clone());
                             scalar_field_count += 1;
                         } else {
@@ -1795,7 +1807,7 @@ impl Executor {
                     return self.finish_read_error(cmd, &stderr, 2);
                 }
                 word if !stop_scalar_names => {
-                    if is_valid_read_name(word) {
+                    if is_valid_read_name(word, self.word_is_arrayref(cmd, index), &self.env_vars) {
                         scalar_names.push(word.to_string());
                         scalar_field_count += 1;
                     } else {

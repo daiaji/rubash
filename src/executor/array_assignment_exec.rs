@@ -70,10 +70,8 @@ impl Executor {
         // carries typed SHELL_VAR attributes. This stores the element count
         // shape needed by upstream builtins5.sub.
         if cmd.words.len() != 1 {
-            if !cmd
-                .words
-                .iter()
-                .all(|word| is_array_element_assignment_word(word))
+            if !(0..cmd.words.len())
+                .all(|index| command_word_is_array_element_assignment(cmd, index))
             {
                 return false;
             }
@@ -105,7 +103,7 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        if !is_array_element_assignment_word(&cmd.words[0]) {
+        if !command_word_is_array_element_assignment(cmd, 0) {
             return false;
         }
         let Some((left, value)) = cmd.words[0].split_once('=') else {

@@ -1,5 +1,59 @@
 use super::*;
 
+/// GNU background/coproc children are forks (execute_cmd.c
+/// execute_in_subshell / make_child): the subshell inherits every variable
+/// attribute (array/assoc/readonly/integer/nameref/trace/case transforms,
+/// declared-unset), the shell option state (set flags + shopt), the hash
+/// table, the directory stack, ignored-signal dispositions, ulimits, umask
+/// and the SECONDS epoch. Spawned `rubash -c` children re-import their
+/// process environment as `env_vars`, so forwarding these `__RUBASH_*`
+/// state keys restores exactly that fork inheritance. Keys that are
+/// per-process runtime state (FD tables, coproc pipes, command-substitution
+/// and heredoc payloads, trap table entries, line/pid bookkeeping,
+/// evaluation-context flags, test-harness sentinels) stay dropped.
+fn rubash_spawn_inherited_state(key: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "__RUBASH_ARRAY_VARS",
+        "__RUBASH_ASSOC_VARS",
+        "__RUBASH_ASSOC_128_VARS",
+        "__RUBASH_DECLARED_UNSET_VARS",
+        "__RUBASH_EXPORTED_VARS",
+        "__RUBASH_EXPORTED_FUNCTIONS",
+        "__RUBASH_READONLY_VARS",
+        "__RUBASH_READONLY_FUNCTIONS",
+        "__RUBASH_FUNC_TRACE_FUNCTIONS",
+        "__RUBASH_TRACE_VARS",
+        "__RUBASH_INTEGER_VARS",
+        "__RUBASH_UPPERCASE_VARS",
+        "__RUBASH_LOWERCASE_VARS",
+        "__RUBASH_CAPCASE_VARS",
+        "__RUBASH_NAMEREF_VARS",
+        "__RUBASH_HASH_TABLE",
+        "__RUBASH_DIR_STACK",
+        "__RUBASH_DISABLED_BUILTINS",
+        "__RUBASH_GETOPTS_OFFSET",
+        "__RUBASH_ULIMIT_C",
+        "__RUBASH_ULIMIT_F",
+        "__RUBASH_ULIMIT_N",
+        "__RUBASH_UMASK",
+        "__RUBASH_SECONDS_OFFSET",
+        "__RUBASH_SHELL_START_EPOCH",
+        "__RUBASH_TRAP_ORIG_IGN",
+        "__RUBASH_POSIX_MODE",
+        "__RUBASH_ZSH_OPTIONS",
+        "__RUBASH_ERREXIT",
+        "__RUBASH_XTRACE",
+        "__RUBASH_PHYSICAL_PWD",
+        "__RUBASH_SHOPT_STATE",
+        "__RUBASH_SHOPT_CHECKHASH",
+        "__RUBASH_COMPATIBLE_SHELL_PATH",
+        "__RUBASH_SHELL_ROOT",
+        "__RUBASH_TEMP_PATH",
+        "__RUBASH_NO_UPSTREAM_SCRIPTS",
+    ];
+    key.starts_with("__RUBASH_SETOPT_") || KEYS.contains(&key)
+}
+
 enum CoprocStderrForwardTarget {
     Stdout,
     Stderr,
@@ -235,7 +289,7 @@ impl Executor {
         let display_source = bash_command_source_text(&background_command.command);
         let mut child = Command::new(&exe);
         for (key, value) in &self.env_vars {
-            if !key.starts_with("__RUBASH_") {
+            if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 child.env(key, value);
             }
         }
@@ -246,10 +300,13 @@ impl Executor {
         // keys or the background child fires the inherited EXIT trap when
         // its command finishes (trap.tests: three stray "exiting" lines
         // around the monitored `sleep 7 & sleep 6 & sleep 5 & / wait`).
+        // SIG_IGN dispositions DO cross the fork boundary (trap.c
+        // original_signals -> SIG_HARD_IGNORE), so __RUBASH_TRAP_ORIG_IGN is
+        // forwarded above and must survive this reset filter.
         for key in self
             .env_vars
             .keys()
-            .filter(|key| key.starts_with("__RUBASH_TRAP"))
+            .filter(|key| key.starts_with("__RUBASH_TRAP") && *key != "__RUBASH_TRAP_ORIG_IGN")
         {
             child.env_remove(key);
         }
@@ -1270,7 +1327,7 @@ impl Executor {
         };
 
         for (key, value) in &self.env_vars {
-            if !key.starts_with("__RUBASH_") {
+            if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 child.env(key, value);
             }
         }

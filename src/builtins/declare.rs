@@ -884,6 +884,11 @@ where
         })
         .filter(|base| variables.contains_key(base) || frame_locals.iter().any(|n| n == base))
         .collect();
+    if std::env::var_os("__RB_DBG_DECLARE").is_some() {
+        for n in &attr_names {
+            eprintln!("__RB_DBG_DECLARE attr_name={n:?}");
+        }
+    }
     if assign_declare_names(
         command_name,
         &attr_names,

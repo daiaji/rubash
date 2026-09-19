@@ -23,6 +23,26 @@ pub(crate) fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>)
         return env_vars.contains_key(name) || env::var_os(name).is_some();
     }
 
+    // GNU test.c:650-668: a `[`-shaped operand that fails
+    // valid_array_reference is NOT an array reference at all and falls
+    // through to find_variable(arg), the literal-name lookup below. The
+    // flag set reaching valid_array_reference is flag-0 for BOTH callers:
+    // `test -v` passes AV_NOEXPAND (0x020), which sets none of the VA_*
+    // bits the function consumes (arrayfunc.h:62 vs :69-70), and `[[ -v ]]`
+    // forces array_expand_once off via set_expand_once(0,0)
+    // (execute_cmd.c:4027). `a[80's]` (unterminated quote) and `F[]]`
+    // (empty subscript) therefore report unset in every option state.
+    let valid_arrayref = !operand.contains('[')
+        || crate::executor::subscript_expansion::valid_array_reference_env(
+            operand,
+            false,
+            false,
+            env_vars,
+        );
+    if !valid_arrayref {
+        return env_vars.contains_key(operand) || env::var_os(operand).is_some();
+    }
+
     if let Some((name, subscript)) = parse_array_subscript(operand) {
         let arrays = marked_vars(env_vars, ARRAY_VARS);
         let assocs = marked_vars(env_vars, ASSOC_VARS);

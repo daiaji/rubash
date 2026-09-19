@@ -815,6 +815,22 @@ impl Executor {
             ) {
                 Some(rewritten) => rewritten,
                 None => {
+                    // GNU arrayfunc.c assign_array_var_from_string: the
+                    // target converts to an array BEFORE the element loop
+                    // runs, so a failed element subscript leaves a new
+                    // target bound as `()` (array32.sub `b=( [$bad]=hi )`
+                    // -> `declare -a b=()`), while an existing or
+                    // declared-but-unset target keeps its prior state —
+                    // same invariant as fail_compound_array_assignment.
+                    if !self.env_vars.contains_key(base_name)
+                        && !is_marked_var(&self.env_vars, DECLARED_UNSET_VARS, base_name)
+                    {
+                        self.env_vars.insert(
+                            base_name.to_string(),
+                            format_indexed_array_storage(BTreeMap::new()),
+                        );
+                        mark_env_name(&mut self.env_vars, ARRAY_VARS, base_name);
+                    }
                     self.exit_code = 1;
                     return false;
                 }
