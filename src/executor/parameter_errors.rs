@@ -769,7 +769,11 @@ impl Executor {
                                 let display =
                                     if let Some(storage) = self.parameter_array_storage(base) {
                                         if is_marked_var(&self.env_vars, ASSOC_VARS, base) {
-                                            assoc_hash_ordered_values(&storage).join(" ")
+                                            assoc_hash_ordered_values(
+                                                &storage,
+                                                assoc_nbuckets(&self.env_vars, base),
+                                            )
+                                            .join(" ")
                                         } else {
                                             array_values(&storage).join(" ")
                                         }

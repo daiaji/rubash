@@ -1255,7 +1255,7 @@ impl Executor {
                 let storage_name = self.resolved_variable_name(array_name)?;
                 let storage = self.parameter_array_storage(array_name)?;
                 let keys = if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
-                    assoc_keys(&storage)
+                    assoc_keys(&storage, assoc_nbuckets(&self.env_vars, &storage_name))
                 } else {
                     array_indices(&storage)
                 };

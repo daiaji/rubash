@@ -27,6 +27,7 @@ pub(super) const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 pub(super) const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 pub(super) const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 pub(super) const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
+pub(super) const ASSOC_128_VARS: &str = "__RUBASH_ASSOC_128_VARS";
 pub(super) const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 pub(super) const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 pub(super) const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";

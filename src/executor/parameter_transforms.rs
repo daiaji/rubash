@@ -264,11 +264,14 @@ impl Executor {
                 return String::new();
             };
             if is_marked_var(&self.env_vars, ASSOC_VARS, &array_name) {
-                return assoc_hash_ordered_entries(value)
-                    .into_iter()
-                    .map(|(key, value)| format_key_value_transform_part(&key, &value, quoted))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                return assoc_hash_ordered_entries(
+                    value,
+                    assoc_nbuckets(&self.env_vars, &array_name),
+                )
+                .into_iter()
+                .map(|(key, value)| format_key_value_transform_part(&key, &value, quoted))
+                .collect::<Vec<_>>()
+                .join(" ");
             }
 
             return indexed_array_entries(value)

@@ -20,6 +20,12 @@ pub const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 pub const TRACE_VARS: &str = "__RUBASH_TRACE_VARS";
 pub const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 pub const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
+/// Names whose associative hash table was created by a convert path
+/// (GNU arrayfunc.c:111 convert_var_to_assoc -> assoc_create(0) ==
+/// DEFAULT_HASH_BUCKETS 128) rather than make_new_assoc_variable
+/// (variables.c:2857 ASSOC_HASH_BUCKETS 1024). The bucket count changes
+/// iteration order, so it must ride with the variable like an attribute.
+pub const ASSOC_128_VARS: &str = "__RUBASH_ASSOC_128_VARS";
 pub const SHELL_START_EPOCH: &str = "__RUBASH_SHELL_START_EPOCH";
 pub const SECONDS_OFFSET: &str = "__RUBASH_SECONDS_OFFSET";
 pub const FUNCTION_STDIN: &str = "__RUBASH_FUNCTION_STDIN";

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{ARRAY_VARS, ASSOC_VARS, EXPORTED_VARS};
+use super::{ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, EXPORTED_VARS};
 
 pub(super) fn mark_exported(variables: &mut HashMap<String, String>, name: &str) {
     // TODO(variables.c/variables.h): Bash stores export as a variable
@@ -14,6 +14,9 @@ pub(super) fn mark_exported(variables: &mut HashMap<String, String>, name: &str)
 pub(super) fn mark_array(variables: &mut HashMap<String, String>, name: &str) {
     mark_typed(variables, ARRAY_VARS, name);
     unmark_typed(variables, ASSOC_VARS, name);
+    // The assoc hash table is discarded with the attribute; its bucket count
+    // must not survive into a later re-declaration.
+    unmark_typed(variables, ASSOC_128_VARS, name);
 }
 
 pub(super) fn mark_assoc(variables: &mut HashMap<String, String>, name: &str) {

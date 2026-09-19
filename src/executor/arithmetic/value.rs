@@ -8,8 +8,8 @@ use crate::executor::{
     env_derived_dynamic_parameter_value, format_assoc_storage, format_indexed_array_storage,
     indexed_array_entries, is_marked_var, is_noassign_bash_array, is_shell_name, mark_env_name,
     next_random_from_state, next_srandom_from_state, parse_array_subscript,
-    resolve_indexed_array_subscript, set_process_env, ARRAY_VARS, ASSOC_VARS, NAMEREF_VARS,
-    READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH,
+    resolve_indexed_array_subscript, set_process_env, unmark_env_name, ARRAY_VARS, ASSOC_128_VARS,
+    ASSOC_VARS, NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH,
 };
 
 impl ConditionalArithParser<'_> {
@@ -539,9 +539,21 @@ impl ConditionalArithParser<'_> {
             entries.push((key.to_string(), value));
         }
         let old_value = self.env_vars.get(name).cloned();
+        let had_value = old_value.is_some();
         self.env_vars
             .insert(name.to_string(), format_assoc_storage(entries));
         super::super::record_arith_write(name, old_value);
+        if !is_marked_var(self.env_vars, ASSOC_VARS, name) {
+            // GNU arrayfunc.c:481/497 find_or_make_array_variable: an
+            // existing scalar converts through convert_var_to_assoc (a
+            // 128-bucket table); an unbound name takes a fresh
+            // ASSOC_HASH_BUCKETS table.
+            if had_value {
+                mark_env_name(self.env_vars, ASSOC_128_VARS, name);
+            } else {
+                unmark_env_name(self.env_vars, ASSOC_128_VARS, name);
+            }
+        }
         mark_env_name(self.env_vars, ASSOC_VARS, name);
     }
 }

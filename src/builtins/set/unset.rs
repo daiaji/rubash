@@ -1,6 +1,7 @@
 use super::{
-    ARRAY_VARS, ASSOC_VARS, DECLARED_UNSET_VARS, EXECUTION_FAILURE, EXECUTION_SUCCESS,
-    EXPORTED_VARS, INTEGER_VARS, LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, UPPERCASE_VARS,
+    ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, DECLARED_UNSET_VARS, EXECUTION_FAILURE,
+    EXECUTION_SUCCESS, EXPORTED_VARS, INTEGER_VARS, LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS,
+    UPPERCASE_VARS,
 };
 use std::collections::HashMap;
 use std::env;
@@ -229,6 +230,7 @@ where
     unmark_variable(env_vars, READONLY_VARS, &unset_name);
     unmark_variable(env_vars, ARRAY_VARS, &unset_name);
     unmark_variable(env_vars, ASSOC_VARS, &unset_name);
+    unmark_variable(env_vars, ASSOC_128_VARS, &unset_name);
     unmark_variable(env_vars, INTEGER_VARS, &unset_name);
     unmark_variable(env_vars, UPPERCASE_VARS, &unset_name);
     unmark_variable(env_vars, LOWERCASE_VARS, &unset_name);

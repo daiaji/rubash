@@ -1,8 +1,6 @@
 use std::io::{self, Write};
 
-use super::storage::{
-    format_array_value, format_assoc_value, quote_declare_value,
-};
+use super::storage::{format_array_value, format_assoc_value, quote_declare_value};
 
 #[derive(Clone, Copy)]
 pub(super) struct DeclarationAttrs {
@@ -35,6 +33,7 @@ pub(super) fn print_declaration<W>(
     name: &str,
     value: &str,
     attrs: DeclarationAttrs,
+    nbuckets: usize,
     stdout: &mut W,
 ) -> io::Result<()>
 where
@@ -48,7 +47,7 @@ where
             writeln!(
                 stdout,
                 "declare {attrs} {name}={}",
-                format_assoc_value(value)
+                format_assoc_value(value, nbuckets)
             )
         }
     } else if attrs.array {
@@ -85,13 +84,14 @@ pub(super) fn print_plain_declaration<W>(
     name: &str,
     value: &str,
     attrs: DeclarationAttrs,
+    nbuckets: usize,
     stdout: &mut W,
 ) -> io::Result<()>
 where
     W: Write,
 {
     let rendered = if attrs.assoc {
-        format_assoc_value(value)
+        format_assoc_value(value, nbuckets)
     } else if attrs.array {
         format_array_value(value)
     } else {

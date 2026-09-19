@@ -9,8 +9,8 @@ use super::storage::{
     indexed_array_entries, is_noassign_bash_array, parse_array_tokens,
 };
 use super::{
-    ARRAY_VARS, ASSOC_VARS, COMPOUND_ASSIGNMENT_MARKER, DECLARED_UNSET_VARS, EXECUTION_FAILURE,
-    EXECUTION_SUCCESS, INTEGER_VARS, NAMEREF_VARS, READONLY_VARS,
+    ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, COMPOUND_ASSIGNMENT_MARKER, DECLARED_UNSET_VARS,
+    EXECUTION_FAILURE, EXECUTION_SUCCESS, INTEGER_VARS, NAMEREF_VARS, READONLY_VARS,
 };
 use crate::executor::arithmetic::eval_conditional_arith_value;
 use crate::executor::types::ARRAY_FIELD_SPLIT_MARKER;
@@ -150,8 +150,7 @@ where
                     let key =
                         crate::executor::arithmetic::decode_arithmetic_assoc_key(index_expression)
                             .unwrap_or_else(|| index_expression.to_string());
-                    let element =
-                        format!("([{}]={value})", super::storage::quote_assoc_key(&key));
+                    let element = format!("([{}]={value})", super::storage::quote_assoc_key(&key));
                     variables.insert(
                         base.to_string(),
                         append_assoc_value(&current, &element, integer, variables),
@@ -190,7 +189,9 @@ where
                 let array_exists = variables.get(base).is_some_and(|v| {
                     v.starts_with('\x1d') || (v.starts_with('(') && v.ends_with(')'))
                 });
-                if !append_elem && value.starts_with('(') && value.ends_with(')')
+                if !append_elem
+                    && value.starts_with('(')
+                    && value.ends_with(')')
                     && (!array_exists || array)
                 {
                     // GNU arrayfunc.c:557 expand_compound_array_assignment:
@@ -360,6 +361,7 @@ where
                         INTEGER_VARS,
                         ARRAY_VARS,
                         ASSOC_VARS,
+                        ASSOC_128_VARS,
                         READONLY_VARS,
                     ] {
                         unmark_typed(variables, marker, var_name);
@@ -378,21 +380,20 @@ where
         // (or is being made) an array (nameref20.sub: `declare ref=(X)`
         // creates `declare -a var`, nameref22.sub: `declare
         // array='(one two three)'` stays scalar).
-        let (value, compound_marked) = if let Some(compound) =
-            value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
-        {
-            (compound, true)
-        } else if value.is_empty() && var_name == "assoc" {
-            // TODO(parse.y/array.c): The current parser can split compound
-            // assignment words after `declare -A`. Preserve builtins5.sub's
-            // declaration shape until compound assignments remain atomic.
-            ("([one]=one [two]=two [three]=three)", true)
-        } else if value.is_empty() && var_name == "array" {
-            // TODO(parse.y/array.c): Same narrow bridge for `declare -a`.
-            ("(one two three)", true)
-        } else {
-            (value, false)
-        };
+        let (value, compound_marked) =
+            if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
+                (compound, true)
+            } else if value.is_empty() && var_name == "assoc" {
+                // TODO(parse.y/array.c): The current parser can split compound
+                // assignment words after `declare -A`. Preserve builtins5.sub's
+                // declaration shape until compound assignments remain atomic.
+                ("([one]=one [two]=two [three]=three)", true)
+            } else if value.is_empty() && var_name == "array" {
+                // TODO(parse.y/array.c): Same narrow bridge for `declare -a`.
+                ("(one two three)", true)
+            } else {
+                (value, false)
+            };
         let value = if append {
             let current = variables.get(var_name).cloned().unwrap_or_default();
             if assoc || marked_vars(variables, ASSOC_VARS).contains(var_name) {
@@ -478,7 +479,8 @@ where
             } else {
                 eval_arith_value(value).to_string()
             }
-        } else if value.starts_with('(') && value.ends_with(')')
+        } else if value.starts_with('(')
+            && value.ends_with(')')
             && (compound_marked
                 || array
                 || marked_vars(variables, ARRAY_VARS).contains(var_name)
@@ -520,8 +522,7 @@ where
         if nameref
             && append
             && (value == var_name
-                || declare_indexed_element(&value)
-                    .is_some_and(|(base, _)| base == var_name))
+                || declare_indexed_element(&value).is_some_and(|(base, _)| base == var_name))
         {
             let line = if in_function {
                 format!(

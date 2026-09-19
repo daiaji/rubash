@@ -97,11 +97,12 @@ impl Executor {
             return Some(
                 self.parameter_array_storage(array_name)
                     .map(|value| {
-                        if storage_name
+                        if let Some(resolved) = storage_name
                             .as_deref()
-                            .is_some_and(|name| is_marked_var(&self.env_vars, ASSOC_VARS, name))
+                            .filter(|name| is_marked_var(&self.env_vars, ASSOC_VARS, name))
                         {
-                            assoc_keys(&value).join(&separator)
+                            assoc_keys(&value, assoc_nbuckets(&self.env_vars, resolved))
+                                .join(&separator)
                         } else {
                             array_indices(&value).join(&separator)
                         }

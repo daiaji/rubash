@@ -31,7 +31,7 @@ pub(super) fn format_array_value(value: &str) -> String {
         .pipe_parenthesized()
 }
 
-pub(super) fn format_assoc_value(value: &str) -> String {
+pub(super) fn format_assoc_value(value: &str, nbuckets: usize) -> String {
     let entries = parse_assoc_words(value);
     if entries.is_empty() {
         if value == "()" {
@@ -43,7 +43,7 @@ pub(super) fn format_assoc_value(value: &str) -> String {
     // print_assoc_assignment walks the hash table: bucket order with
     // head-insertion chains (hashlib.c). The general order helper replaces
     // the previous per-test hardcoded key sequences.
-    let ordered = crate::executor::bash_assoc_order(&entries);
+    let ordered = crate::executor::bash_assoc_order(&entries, nbuckets);
     let rendered = ordered
         .into_iter()
         .map(|(_, (key, entry_value))| {
@@ -88,7 +88,10 @@ pub(super) fn eval_arith_value(value: &str) -> i128 {
             // (unicode1.sub C_UTF_8 array).
             if let Some(hex) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
                 i128::from_str_radix(hex, 16).unwrap_or(0)
-            } else if part.len() > 1 && part.starts_with('0') && part.bytes().all(|b| b.is_ascii_digit()) {
+            } else if part.len() > 1
+                && part.starts_with('0')
+                && part.bytes().all(|b| b.is_ascii_digit())
+            {
                 i128::from_str_radix(part, 8).unwrap_or(0)
             } else {
                 part.parse::<i128>().unwrap_or(0)

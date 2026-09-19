@@ -366,12 +366,30 @@ pub(in crate::executor) fn assoc_value_at(value: &str, key: &str) -> Option<Stri
         .find_map(|(entry_key, entry_value)| (entry_key == key).then_some(entry_value))
 }
 
-pub(in crate::executor) fn assoc_keys(value: &str) -> Vec<String> {
+pub(in crate::executor) fn assoc_keys(value: &str, nbuckets: usize) -> Vec<String> {
     // bash_assoc_order items are (entry_index, (key, value)); collect keys.
-    bash_assoc_order(&assoc_entries(value))
+    bash_assoc_order(&assoc_entries(value), nbuckets)
         .into_iter()
         .map(|(_, (key, _))| key)
         .collect()
+}
+
+/// GNU assoc iteration depends on the table's bucket count, which is fixed
+/// at table creation: make_new_assoc_variable uses ASSOC_HASH_BUCKETS=1024
+/// (variables.c:2857, assoc.h:28), convert_var_to_assoc uses
+/// assoc_create(0)==DEFAULT_HASH_BUCKETS=128 (arrayfunc.c:114-117,
+/// hashlib.h:72), and the dynamic vars inherit their source table's size —
+/// BASH_CMDS from hashed_filenames (hashcmd.h:24 FILENAME_HASH_BUCKETS=256),
+/// BASH_ALIASES from aliases (alias.c:49 ALIAS_HASH_BUCKETS=64)
+/// (variables.c:1692,1762). assoc_copy preserves the source count
+/// (hashlib.c:174 hash_copy -> hash_create(table->nbuckets)).
+pub(crate) fn assoc_nbuckets(env_vars: &HashMap<String, String>, name: &str) -> usize {
+    match name {
+        "BASH_CMDS" => 256,
+        "BASH_ALIASES" => 64,
+        _ if is_marked_var(env_vars, ASSOC_128_VARS, name) => 128,
+        _ => 1024,
+    }
 }
 
 /// FNV-1 (multiply first, then xor) over `char` bytes, 32 bit — hashlib.c
@@ -391,16 +409,12 @@ fn bash_hash_string(key: &str) -> u32 {
 /// nbuckets * 2 (rehash walks old buckets 0..n and re-inserts each item at its
 /// new chain head). Iteration visits bucket 0..n, each chain head to tail. A
 /// repeated key keeps its first-insert slot and the last value wins
-/// (hash_search replaces data in place).
-///
-/// Declared associative variables (`declare -A` / `typeset -A`) are created by
-/// make_new_assoc_variable with ASSOC_HASH_BUCKETS == 1024 buckets
-/// (variables.c:2857); only the implicit scalar→assoc conversion
-/// (convert_var_to_assoc, arrayfunc.c:117) starts from DEFAULT_HASH_BUCKETS
-/// (128). The declared path is the common case, so model 1024 here
-/// (appendop.tests: `typeset -A foo=([one]=bar ...)` enumerates [0] before
-/// [two] at 1024 buckets, [two] before [0] at 128).
-pub(crate) fn bash_assoc_order(entries: &[(String, String)]) -> Vec<(usize, (String, String))> {
+/// (hash_search replaces data in place). `nbuckets` is the table's creation
+/// size — see assoc_nbuckets for the per-source values.
+pub(crate) fn bash_assoc_order(
+    entries: &[(String, String)],
+    nbuckets: usize,
+) -> Vec<(usize, (String, String))> {
     // First occurrence fixes the slot; last occurrence supplies the value.
     let mut first_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut unique: Vec<usize> = Vec::new();
@@ -412,7 +426,7 @@ pub(crate) fn bash_assoc_order(entries: &[(String, String)]) -> Vec<(usize, (Str
         unique.push(index);
     }
 
-    let mut nbuckets: usize = 1024;
+    let mut nbuckets: usize = nbuckets.max(1);
     let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); nbuckets];
     let mut count = 0usize;
     for &entry_index in &unique {
@@ -439,15 +453,18 @@ pub(crate) fn bash_assoc_order(entries: &[(String, String)]) -> Vec<(usize, (Str
         .collect()
 }
 
-pub(in crate::executor) fn assoc_hash_ordered_entries(value: &str) -> Vec<(String, String)> {
-    bash_assoc_order(&assoc_entries(value))
+pub(in crate::executor) fn assoc_hash_ordered_entries(
+    value: &str,
+    nbuckets: usize,
+) -> Vec<(String, String)> {
+    bash_assoc_order(&assoc_entries(value), nbuckets)
         .into_iter()
         .map(|(_, entry)| entry)
         .collect()
 }
 
-pub(in crate::executor) fn assoc_hash_ordered_values(value: &str) -> Vec<String> {
-    bash_assoc_order(&assoc_entries(value))
+pub(in crate::executor) fn assoc_hash_ordered_values(value: &str, nbuckets: usize) -> Vec<String> {
+    bash_assoc_order(&assoc_entries(value), nbuckets)
         .into_iter()
         .map(|(_, (_, entry_value))| entry_value)
         .collect()

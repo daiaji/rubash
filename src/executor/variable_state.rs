@@ -348,7 +348,7 @@ impl Executor {
         {
             if let Some(storage) = self.parameter_array_storage(array_name) {
                 let values = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
-                    assoc_hash_ordered_values(&storage)
+                    assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, array_name))
                 } else {
                     array_values(&storage)
                 };

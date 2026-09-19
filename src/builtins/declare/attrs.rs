@@ -5,8 +5,8 @@ use std::io::{self, Write};
 use super::diagnostic::diagnostic_prefix;
 use super::marks::{mark_array, mark_assoc, mark_exported, mark_typed, marked_vars, unmark_typed};
 use super::{
-    ARRAY_VARS, ASSOC_VARS, CAPCASE_VARS, EXECUTION_FAILURE, EXPORTED_VARS, INTEGER_VARS,
-    LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, TRACE_VARS, UPPERCASE_VARS,
+    ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, CAPCASE_VARS, EXECUTION_FAILURE, EXPORTED_VARS,
+    INTEGER_VARS, LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, TRACE_VARS, UPPERCASE_VARS,
 };
 
 #[derive(Clone, Copy)]
@@ -40,6 +40,7 @@ pub(super) fn apply_declare_attrs<W>(
     options: DeclareOptions,
     mut attr_status: i32,
     deleted_names: &std::collections::HashSet<String>,
+    preexisting_vars: &std::collections::HashSet<String>,
     in_function: bool,
     stderr: &mut W,
 ) -> io::Result<i32>
@@ -199,6 +200,7 @@ where
             }
             if unset_assoc {
                 unmark_typed(variables, ASSOC_VARS, name);
+                unmark_typed(variables, ASSOC_128_VARS, name);
             }
             if unset_integer {
                 unmark_typed(variables, INTEGER_VARS, name);
@@ -246,6 +248,19 @@ where
             mark_array(variables, name);
         }
         if assoc {
+            // GNU declare.def:810-823/953-958: `declare -A` on an unbound name
+            // goes through make_new_assoc_variable (variables.c:2851), a
+            // fresh ASSOC_HASH_BUCKETS (1024) table; on an existing non-assoc
+            // variable it goes through convert_var_to_assoc (arrayfunc.c:111),
+            // whose assoc_create(0) yields the 128-bucket default. The bucket
+            // count decides iteration order, so record which path ran.
+            if !marked_vars(variables, ASSOC_VARS).contains(name) {
+                if preexisting_vars.contains(name) {
+                    mark_typed(variables, ASSOC_128_VARS, name);
+                } else {
+                    unmark_typed(variables, ASSOC_128_VARS, name);
+                }
+            }
             mark_assoc(variables, name);
             // GNU arrayfunc.c:111-140 convert_var_to_assoc: applying
             // att_assoc to a variable holding a scalar moves the value into

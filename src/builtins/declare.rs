@@ -21,8 +21,8 @@ use attrs::{apply_declare_attrs, DeclareOptions};
 use diagnostic::diagnostic_prefix;
 use marks::{marked_vars, unmark_typed};
 use names::{
-    check_selfref, declare_base_name, valid_array_reference, valid_declare_name,
-    valid_identifier, valid_nameref_value,
+    check_selfref, declare_base_name, valid_array_reference, valid_declare_name, valid_identifier,
+    valid_nameref_value,
 };
 use storage::{format_array_value, format_assoc_value, indexed_array_entries, parse_assoc_words};
 
@@ -33,8 +33,8 @@ const EXECUTION_FAILURE: i32 = 1;
 /// (variables.c:1096 print_assignment -> arrayfunc.c:1257 print_assoc_assignment).
 /// Used by the `set` builtin to print assoc arrays as `name=(["key"]="value" )`
 /// instead of `name='(...)'`.
-pub(crate) fn format_assoc_for_output(value: &str) -> String {
-    format_assoc_value(value)
+pub(crate) fn format_assoc_for_output(value: &str, nbuckets: usize) -> String {
+    format_assoc_value(value, nbuckets)
 }
 
 /// Format an indexed array storage value for `set` output
@@ -56,6 +56,7 @@ const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
+const ASSOC_128_VARS: &str = "__RUBASH_ASSOC_128_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
@@ -377,7 +378,7 @@ where
     let mut nameref = false;
     let mut trace = false;
     let mut unset_trace = false;
-        let mut readonly = false;
+    let mut readonly = false;
     let mut unset_export = false;
     let mut unset_array = false;
     let mut unset_assoc = false;
@@ -777,13 +778,10 @@ where
                     // but when the target is missing the rewrite silently
                     // keeps the nameref (nameref17.sub: typeset +n foo4 with
                     // cell -> existing bar4 errors, cell -> missing stays).
-                    let cell = variables
-                        .get(&last_nameref)
-                        .cloned()
-                        .unwrap_or_default();
-                    let readonly_with_cell =
-                        marked_vars(variables, READONLY_VARS).contains(last_nameref.as_str())
-                            && !cell.is_empty();
+                    let cell = variables.get(&last_nameref).cloned().unwrap_or_default();
+                    let readonly_with_cell = marked_vars(variables, READONLY_VARS)
+                        .contains(last_nameref.as_str())
+                        && !cell.is_empty();
                     if readonly_with_cell {
                         let cell_base = cell.split('[').next().unwrap_or(cell.as_str());
                         let target_exists = !in_function
@@ -825,9 +823,8 @@ where
                     // instead applies the flag to the cell's array BASE
                     // name (nameref18.sub: `declare -A r` with r -> `A[0]`
                     // yields `declare -A A`).
-                    let compound_value = value.is_some_and(|v| {
-                        v.starts_with(COMPOUND_ASSIGNMENT_MARKER)
-                    });
+                    let compound_value =
+                        value.is_some_and(|v| v.starts_with(COMPOUND_ASSIGNMENT_MARKER));
                     if compound_value && !valid_identifier(&target) {
                         writeln!(
                             stderr,
@@ -867,6 +864,26 @@ where
     // freshly-created (invisible/empty-cell) variable deletes it outright;
     // the attribute pass must not resurrect the name.
     let mut deleted_names = std::collections::HashSet::new();
+    // GNU declare.def:810-823 checks whether the variable is already bound
+    // BEFORE the command's own assignment runs: `declare -A foo` on an
+    // existing variable converts it through convert_var_to_assoc
+    // (arrayfunc.c:111, a 128-bucket table), while an unbound name takes
+    // make_new_assoc_variable (variables.c:2851, 1024 buckets). Snapshot
+    // operand names now -- after assign_declare_names an operand like
+    // `declare -A foo=v` would look pre-existing even though GNU created it.
+    let preexisting_vars: std::collections::HashSet<String> = attr_names
+        .iter()
+        .map(|name| {
+            let base = name
+                .split_once('=')
+                .map(|(base, _)| base)
+                .unwrap_or(name)
+                .trim_end_matches('+');
+            let base = base.split('[').next().unwrap_or(base);
+            base.to_string()
+        })
+        .filter(|base| variables.contains_key(base) || frame_locals.iter().any(|n| n == base))
+        .collect();
     if assign_declare_names(
         command_name,
         &attr_names,
@@ -928,6 +945,7 @@ where
             options,
             attr_status,
             &deleted_names,
+            &preexisting_vars,
             in_function,
             stderr,
         )?;

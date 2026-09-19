@@ -84,10 +84,11 @@ where
             trace: marked_vars(variables, super::TRACE_VARS).contains(&name),
         };
         if let Some(value) = variables.get(&name) {
+            let nbuckets = crate::executor::assoc_nbuckets(variables, &name);
             if plain {
-                print_plain_declaration(&name, value, attrs, stdout)?;
+                print_plain_declaration(&name, value, attrs, nbuckets, stdout)?;
             } else {
-                print_declaration(&name, value, attrs, stdout)?;
+                print_declaration(&name, value, attrs, nbuckets, stdout)?;
             }
         } else if attrs.has_scalar_attribute() || declared_unset.contains(&name) {
             print_unset_declaration(&name, attrs, stdout)?;

@@ -621,7 +621,7 @@ impl Executor {
             .or_else(|| expression.strip_suffix("[*]"))
             .unwrap_or_default();
         let ordered = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
-            assoc_hash_ordered_values(value)
+            assoc_hash_ordered_values(value, assoc_nbuckets(&self.env_vars, array_name))
         } else {
             array_values(value)
         };

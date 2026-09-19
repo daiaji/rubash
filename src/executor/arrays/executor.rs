@@ -2,7 +2,7 @@ use super::storage::quote_assoc_display_key;
 use super::*;
 use crate::executor::NamerefResolution;
 use crate::executor::{
-    assoc_hash_ordered_entries, assoc_hash_ordered_values, assoc_keys,
+    assoc_hash_ordered_entries, assoc_hash_ordered_values, assoc_keys, assoc_nbuckets,
     eval_conditional_arith_value_with_writes, IndexedSubscript, SubscriptSource,
     DECLARED_UNSET_VARS, NAMEREF_VARS,
 };
@@ -59,7 +59,7 @@ impl Executor {
             return format!("declare -{flags} {name}");
         }
         if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
-            let entries = assoc_hash_ordered_entries(value);
+            let entries = assoc_hash_ordered_entries(value, assoc_nbuckets(&self.env_vars, name));
             if entries.is_empty() {
                 // GNU array_var_assignment (subst.c:8693-8697): a set-but-empty
                 // array gets `=()` (val == 0 but var_isset); only invisible/unset
@@ -114,7 +114,11 @@ impl Executor {
             // assoc[$key] still look up the literal key (assoc13).
             if key == "*" {
                 return Some(
-                    assoc_hash_ordered_values(&storage).join(&self.ifs_first_char_separator()),
+                    assoc_hash_ordered_values(
+                        &storage,
+                        assoc_nbuckets(&self.env_vars, &storage_name),
+                    )
+                    .join(&self.ifs_first_char_separator()),
                 );
             }
             let key = self.assoc_subscript_key(key);
@@ -308,7 +312,10 @@ impl Executor {
                 let storage_name = self.resolved_variable_name(name)?;
                 let storage = self.parameter_array_storage(name)?;
                 if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
-                    return Some(assoc_keys(&storage));
+                    return Some(assoc_keys(
+                        &storage,
+                        assoc_nbuckets(&self.env_vars, &storage_name),
+                    ));
                 }
                 return Some(array_indices(&storage));
             }
@@ -319,7 +326,7 @@ impl Executor {
                 let storage_name = self.resolved_variable_name(name)?;
                 let storage = self.parameter_array_storage(name)?;
                 let keys = if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
-                    assoc_keys(&storage)
+                    assoc_keys(&storage, assoc_nbuckets(&self.env_vars, &storage_name))
                 } else {
                     array_indices(&storage)
                 };
@@ -355,14 +362,20 @@ impl Executor {
                 if let Some(array_name) = target.strip_suffix("[@]") {
                     if let Some(storage) = self.parameter_array_storage(array_name) {
                         if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
-                            return Some(assoc_hash_ordered_values(&storage));
+                            return Some(assoc_hash_ordered_values(
+                                &storage,
+                                assoc_nbuckets(&self.env_vars, array_name),
+                            ));
                         }
                         return Some(array_values(&storage));
                     }
                 } else if let Some(array_name) = target.strip_suffix("[*]") {
                     if let Some(storage) = self.parameter_array_storage(array_name) {
                         let values = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
-                            assoc_hash_ordered_values(&storage)
+                            assoc_hash_ordered_values(
+                                &storage,
+                                assoc_nbuckets(&self.env_vars, array_name),
+                            )
                         } else {
                             array_values(&storage)
                         };
@@ -387,7 +400,10 @@ impl Executor {
         }
         let storage = self.parameter_array_storage(name)?;
         if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
-            return Some(assoc_hash_ordered_values(&storage));
+            return Some(assoc_hash_ordered_values(
+                &storage,
+                assoc_nbuckets(&self.env_vars, name),
+            ));
         }
         Some(array_values(&storage))
     }
@@ -427,7 +443,13 @@ impl Executor {
             ASSOC_VARS,
             &self.resolved_variable_name(array_name).unwrap_or_default(),
         ) {
-            assoc_hash_ordered_values(&storage)
+            assoc_hash_ordered_values(
+                &storage,
+                assoc_nbuckets(
+                    &self.env_vars,
+                    &self.resolved_variable_name(array_name).unwrap_or_default(),
+                ),
+            )
         } else {
             array_values(&storage)
         }
@@ -496,7 +518,13 @@ impl Executor {
             ASSOC_VARS,
             &self.resolved_variable_name(array_name).unwrap_or_default(),
         ) {
-            assoc_hash_ordered_values(&storage)
+            assoc_hash_ordered_values(
+                &storage,
+                assoc_nbuckets(
+                    &self.env_vars,
+                    &self.resolved_variable_name(array_name).unwrap_or_default(),
+                ),
+            )
         } else {
             array_values(&storage)
         }
@@ -514,7 +542,7 @@ impl Executor {
         let storage = self.parameter_array_storage(array_name)?;
         if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
             return Some(
-                assoc_hash_ordered_entries(&storage)
+                assoc_hash_ordered_entries(&storage, assoc_nbuckets(&self.env_vars, &storage_name))
                     .into_iter()
                     .flat_map(|(key, value)| [key, value])
                     .collect(),

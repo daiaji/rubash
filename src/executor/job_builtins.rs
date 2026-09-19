@@ -397,6 +397,7 @@ impl Executor {
             NAMEREF_VARS,
             ARRAY_VARS,
             ASSOC_VARS,
+            ASSOC_128_VARS,
             DECLARED_UNSET_VARS,
         ] {
             unmark_env_name(&mut self.env_vars, marker, &pid_name);
@@ -414,7 +415,7 @@ impl Executor {
         }
         self.env_vars.remove(&unbind_name);
         self.shell_state.variables.remove(&unbind_name);
-        for marker in [ARRAY_VARS, ASSOC_VARS, DECLARED_UNSET_VARS] {
+        for marker in [ARRAY_VARS, ASSOC_VARS, ASSOC_128_VARS, DECLARED_UNSET_VARS] {
             unmark_env_name(&mut self.env_vars, marker, &unbind_name);
         }
     }
