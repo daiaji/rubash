@@ -1185,8 +1185,23 @@ impl Executor {
             } else if let Some((var_name, pattern, replacement, global)) = {
                 // The hoist pass carries the element's wrapping quotes as
                 // DQ_DATA markers; strip them before matching the patsub
-                // shape (`\u{E102}${a[@]/#/"q"}\u{E102}`).
-                let core = token.trim_matches('\u{E102}');
+                // shape (`\u{E102}${a[@]/#/"q"}\u{E102}`). Parse the RAW
+                // token rather than `token`: unquote_storage_value already
+                // decoded `\'`/`\"` escapes to bare quotes, which
+                // mark_patsub_replacement_quotes then re-reads as quote
+                // SYNTAX and eats (array6.sub: `${a[@]/#/-iname \'}` must
+                // keep \' as escaped-quote data entering
+                // expand_patsub_replacement_text, GNU subst.c
+                // parameter_brace_patsub's own quote pass).
+                let core = token_raw.trim_matches('\u{E102}');
+                let core = core
+                    .strip_prefix("\\\"")
+                    .and_then(|inner| inner.strip_suffix("\\\""))
+                    .or_else(|| {
+                        core.strip_prefix('"')
+                            .and_then(|inner| inner.strip_suffix('"'))
+                    })
+                    .unwrap_or(core);
                 core.strip_prefix("${")
                     .and_then(|token| token.strip_suffix('}'))
                     .and_then(parse_parameter_replacement)
@@ -1227,6 +1242,32 @@ impl Executor {
                     );
                     let replacement = self.expand_patsub_replacement_text(replacement);
                     changed = true;
+                    // GNU expand_words_no_vars (arrayfunc.c:557): an UNQUOTED
+                    // element word's expansion is field-split on IFS
+                    // whitespace (a3=(${a[@]/#/-iname \'}) stores the four
+                    // elements -iname 'abc -iname 'def, not two quoted
+                    // pairs); a quoted element stays one word.
+                    let element_quoted = {
+                        let core = token_raw.trim_matches('\u{E102}');
+                        core.starts_with("\\\"")
+                            || core.starts_with('"')
+                            || token_raw.starts_with('\u{E102}')
+                    };
+                    let split_fields = |text: String| -> Vec<String> {
+                        if element_quoted {
+                            vec![text]
+                        } else {
+                            let fields = field_split_values_with_ifs(
+                                &text,
+                                self.env_vars.get("IFS").map(String::as_str),
+                            );
+                            if fields.is_empty() {
+                                vec![text]
+                            } else {
+                                fields
+                            }
+                        }
+                    };
                     if var_name.ends_with("[*]") || var_name == "*" {
                         // A quoted `[*]` form joins into ONE compound element
                         // (GNU join_array_values with the first IFS char).
@@ -1237,16 +1278,21 @@ impl Executor {
                             })
                             .collect::<Vec<_>>()
                             .join(&self.ifs_first_char_separator());
-                        values.push(store!(&joined));
+                        for field in split_fields(joined) {
+                            values.push(store!(&field));
+                        }
                     } else {
-                        values.extend(element_values.iter().map(|value| {
-                            store!(&self.replace_patsub_pattern(
+                        for value in &element_values {
+                            let replaced = self.replace_patsub_pattern(
                                 value,
                                 &pattern,
                                 &replacement,
                                 global,
-                            ))
-                        }));
+                            );
+                            for field in split_fields(replaced) {
+                                values.push(store!(&field));
+                            }
+                        }
                     }
                 }
             } else if let Some(name) = token
