@@ -317,16 +317,16 @@ impl Executor {
             .or_else(|| var_name.strip_suffix("[*]"))
         {
             return self
-                .parameter_array_storage(array_name)
-                .map(|value| {
-                    let values = array_parameter_slice(
-                        &value,
-                        offset,
-                        length.and_then(|length| usize::try_from(length).ok()),
-                    )
-                    .into_iter()
-                    .map(normalize_array_expanded_value)
-                    .collect::<Vec<_>>();
+                .array_subscript_range_values(
+                    array_name,
+                    offset,
+                    length.and_then(|length| usize::try_from(length).ok()),
+                )
+                .map(|values| {
+                    let values = values
+                        .into_iter()
+                        .map(normalize_array_expanded_value)
+                        .collect::<Vec<_>>();
                     self.join_expanded_array_values(values, var_name)
                 })
                 .unwrap_or_default();

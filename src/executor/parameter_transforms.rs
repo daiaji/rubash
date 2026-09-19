@@ -264,7 +264,11 @@ impl Executor {
                 return String::new();
             };
             if is_marked_var(&self.env_vars, ASSOC_VARS, &array_name) {
-                return assoc_hash_ordered_entries(
+                // GNU assoc_to_kvpair (assoc.c:346) appends a space after
+                // every `key "value"` element — including the last — while
+                // the indexed array_to_kvpair (array.c:896) only separates,
+                // and @k's string_list_pos_params path has no trailing pad.
+                let joined = assoc_hash_ordered_entries(
                     value,
                     assoc_nbuckets(&self.env_vars, &array_name),
                 )
@@ -272,6 +276,11 @@ impl Executor {
                 .map(|(key, value)| format_key_value_transform_part(&key, &value, quoted))
                 .collect::<Vec<_>>()
                 .join(" ");
+                return if quoted && !joined.is_empty() {
+                    format!("{joined} ")
+                } else {
+                    joined
+                };
             }
 
             return indexed_array_entries(value)

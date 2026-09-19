@@ -201,6 +201,45 @@ impl Executor {
             .unwrap_or(0)
     }
 
+    /// GNU assoc_subrange (assoc.c:244): on an associative array the
+    /// substring offset is a 1-based position into the hash-ordered word
+    /// list — `${a[*]:0}` and `${a[*]:1}` both start at the first element,
+    /// `:2:1` returns the second element — and verify_substring_values
+    /// (subst.c:8437) resolves a negative offset against n+1. Indexed
+    /// arrays keep array_subrange's index-based semantics.
+    pub(in crate::executor) fn array_subscript_range_values(
+        &self,
+        array_name: &str,
+        offset: isize,
+        length: Option<usize>,
+    ) -> Option<Vec<String>> {
+        let storage = self.parameter_array_storage(array_name)?;
+        let resolved = self
+            .resolved_variable_name(array_name)
+            .unwrap_or_else(|| array_name.to_string());
+        if !is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+            return Some(array_parameter_slice(&storage, offset, length));
+        }
+        let values = assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, &resolved));
+        let count = values.len() as i128;
+        let start = if offset < 0 {
+            offset as i128 + count + 1
+        } else {
+            offset as i128
+        };
+        if start < 0 || start > count {
+            return Some(Vec::new());
+        }
+        let skip = (start - 1).max(0) as usize;
+        Some(
+            values
+                .into_iter()
+                .skip(skip)
+                .take(length.unwrap_or(usize::MAX))
+                .collect(),
+        )
+    }
+
     pub(in crate::executor) fn array_at_word_values(&self, word: &str) -> Option<Vec<String>> {
         let quoted_array_word =
             (word.starts_with('"') && word.ends_with('"')) || word.starts_with('\x1d');
@@ -225,13 +264,11 @@ impl Executor {
                     .strip_suffix("[@]")
                     .or_else(|| name.strip_suffix("[*]"))
                 {
-                    return self.parameter_array_storage(array_name).map(|value| {
-                        array_parameter_slice(
-                            &value,
-                            offset,
-                            length.and_then(|length| usize::try_from(length).ok()),
-                        )
-                    });
+                    return self.array_subscript_range_values(
+                        array_name,
+                        offset,
+                        length.and_then(|length| usize::try_from(length).ok()),
+                    );
                 }
             }
         }
@@ -261,13 +298,11 @@ impl Executor {
                             length.and_then(|length| usize::try_from(length).ok()),
                         ));
                     }
-                    return self.parameter_array_storage(array_name).map(|value| {
-                        array_parameter_slice(
-                            &value,
-                            offset,
-                            length.and_then(|length| usize::try_from(length).ok()),
-                        )
-                    });
+                    return self.array_subscript_range_values(
+                        array_name,
+                        offset,
+                        length.and_then(|length| usize::try_from(length).ok()),
+                    );
                 }
             }
             if let Some(values) = self.indirect_array_reference_word_values(word, true) {
@@ -432,7 +467,15 @@ impl Executor {
             return Some(vec![self.parameter_key_value_transform(var_name, true)]);
         }
         if transform == ParameterTransform::KeyValueSplit {
-            return self.array_key_value_split_transform_values(array_name);
+            let values = self.array_key_value_split_transform_values(array_name)?;
+            if quoted_array_word && starred {
+                // GNU array_transform (subst.c:8869): @k hands the kv word
+                // list to string_list_pos_params(itype, list, qflags), so a
+                // quoted `*` joins every key/value word with IFS[0] into a
+                // single word (dollar_star) while `@` stays per-word.
+                return Some(vec![values.join(&self.ifs_first_char_separator())]);
+            }
+            return Some(values);
         }
         if !array_value_transform_splits_words(transform) {
             return None;
