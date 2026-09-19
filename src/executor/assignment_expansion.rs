@@ -176,11 +176,25 @@ pub(in crate::executor) fn hoist_data_double_quotes(value: &str, marker: &str) -
 /// or the construct breaks (assoc15.sub: `[$'\001']=$'\001\001\001\001'`).
 /// `${...}` bodies are also preserved verbatim, matching
 /// `hoist_data_double_quotes`.
+/// Sentinels for expansion-trigger characters inside a hoisted `'...'`
+/// span (GNU W_QUOTED - the span content never expands). Restored by the
+/// same callers that restore the quote `marker`.
+pub(in crate::executor) const SQ_DOLLAR_DATA: &str = "\u{E10A}";
+pub(in crate::executor) const SQ_BACKTICK_DATA: &str = "\u{E10B}";
+pub(in crate::executor) const SQ_BACKSLASH_DATA: &str = "\u{E10C}";
+
+pub(in crate::executor) fn restore_sq_content_markers(value: String) -> String {
+    value
+        .replace(SQ_DOLLAR_DATA, "$")
+        .replace(SQ_BACKTICK_DATA, "`")
+        .replace(SQ_BACKSLASH_DATA, "\\")
+}
+
 pub(in crate::executor) fn hoist_data_single_quotes(value: &str, marker: &str) -> String {
     let mut out = String::with_capacity(value.len());
-    let mut chars = value.char_indices().peekable();
     let chars_vec: Vec<(usize, char)> = value.char_indices().collect();
     let mut idx = 0;
+    let mut in_span = false;
     while idx < chars_vec.len() {
         let (_, ch) = chars_vec[idx];
         // Skip $'...' ANSI-C quote bodies: the ' delimiters belong to the
@@ -220,6 +234,20 @@ pub(in crate::executor) fn hoist_data_single_quotes(value: &str, marker: &str) -
         }
         if ch == '\'' {
             out.push_str(marker);
+            in_span = !in_span;
+        } else if in_span {
+            // GNU parse_string_to_word_list (arrayfunc.c:581) marks the
+            // whole '...' word W_QUOTED, so the expansion pass never sees
+            // the span's `$`/backtick/`\` - hoisting only the
+            // delimiters would still let '$xtra' expand (assoc12.sub).
+            // Carry the inner expansion triggers to sentinels too; the
+            // caller restores them alongside the quote marker.
+            match ch {
+                '$' => out.push_str(SQ_DOLLAR_DATA),
+                '`' => out.push_str(SQ_BACKTICK_DATA),
+                '\\' => out.push_str(SQ_BACKSLASH_DATA),
+                _ => out.push(ch),
+            }
         } else {
             out.push(ch);
         }
@@ -318,7 +346,11 @@ impl Executor {
     /// re-scan would re-process it as syntax, so carry those quotes with the
     /// internal DATA_DOUBLE_QUOTE marker across expansion and restore them on
     /// the way out (assignment_expansion hoist/restore contract).
-    pub(in crate::executor) fn expand_assignment_value(&mut self, name: &str, value: &str) -> String {
+    pub(in crate::executor) fn expand_assignment_value(
+        &mut self,
+        name: &str,
+        value: &str,
+    ) -> String {
         // GNU subst.c param_expand carries PF_ASSIGNRHS through the whole
         // assignment value expansion (W_ASSIGNMENT words); key-list `@`
         // expansions read this flag to pick the dollar_at join. Command
@@ -360,10 +392,12 @@ impl Executor {
         let hoisted_sq = hoist_data_single_quotes(&hoisted_dq, SQ_DATA);
         let hoisted_bs = hoist_data_backslashes(&hoisted_sq, BS_DATA);
         let expanded = self.expand_assignment_value_inner(name, &hoisted_bs);
-        expanded
-            .replace(DQ_DATA, "\"")
-            .replace(SQ_DATA, "'")
-            .replace(BS_DATA, "\\\\")
+        restore_sq_content_markers(
+            expanded
+                .replace(DQ_DATA, "\"")
+                .replace(SQ_DATA, "'")
+                .replace(BS_DATA, "\\\\"),
+        )
     }
 
     /// GNU subst.c:4357 expand_string_assignment (reached with
@@ -402,8 +436,7 @@ impl Executor {
         let kvlist = tokens.first().is_some_and(|token| !token.starts_with('['));
         let mut elements: Vec<String> = Vec::new();
         for (index, token) in tokens.iter().enumerate() {
-            let expand_after_colon =
-                token.starts_with('[') || (assoc && kvlist && index % 2 == 1);
+            let expand_after_colon = token.starts_with('[') || (assoc && kvlist && index % 2 == 1);
             elements.push(self.expand_compound_element_tilde(token, expand_after_colon));
         }
         format!("({})", elements.join(" "))
@@ -480,7 +513,9 @@ impl Executor {
         let expanded = tilde_expand::expand_tilde_segment(tilde_word, &self.env_vars);
         let mut protected = String::with_capacity(expanded.len() * 2 + rest.len());
         for ch in expanded.chars() {
-            if !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '/' | '.' | ':' | ',' | '%' | '@' | '+' | '-')) {
+            if !(ch.is_ascii_alphanumeric()
+                || matches!(ch, '_' | '/' | '.' | ':' | ',' | '%' | '@' | '+' | '-'))
+            {
                 protected.push('\\');
             }
             protected.push(ch);
@@ -1569,9 +1604,7 @@ fn split_compound_element_words(value: &str) -> Vec<String> {
             token.push(ch);
             let rest = &value[offset + 1..];
             let rest_chars: Vec<char> = rest.chars().collect();
-            if let Some(end) =
-                crate::lexer::skip_parenthesized_unit_corrected(&rest_chars, 0)
-            {
+            if let Some(end) = crate::lexer::skip_parenthesized_unit_corrected(&rest_chars, 0) {
                 let unit: String = rest_chars[..end].iter().collect();
                 token.push_str(&unit);
                 for _ in 0..end {

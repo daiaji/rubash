@@ -114,7 +114,9 @@ pub(in crate::builtins::declare) fn unquote_storage_value(value: &str) -> String
         }
         // \x1c is the expansion-whitespace tag (expansion_ws_marked): the
         // whitespace it precedes is data, the tag itself is not.
-        return decoded.replace('\x1c', "").replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "");
+        return decoded
+            .replace('\x1c', "")
+            .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "");
     };
 
     let mut unquoted = String::new();
@@ -132,7 +134,9 @@ pub(in crate::builtins::declare) fn unquote_storage_value(value: &str) -> String
     if escaped {
         unquoted.push('\\');
     }
-    unquoted.replace('\x1c', "").replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
+    unquoted
+        .replace('\x1c', "")
+        .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
 }
 
 fn unquote_ansi_c_storage(value: &str) -> String {
@@ -166,7 +170,9 @@ pub(in crate::builtins::declare) fn split_indexed_tagged_token(token: &str) -> V
     let mut current = String::new();
     let mut chars = token.chars().peekable();
     while let Some(ch) = chars.next() {
-        if (ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG) && matches!(chars.peek(), Some(' ' | '\t' | '\n')) {
+        if (ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG)
+            && matches!(chars.peek(), Some(' ' | '\t' | '\n'))
+        {
             chars.next();
             if !current.is_empty() {
                 parts.push(std::mem::take(&mut current));

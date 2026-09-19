@@ -316,6 +316,40 @@ impl Executor {
                     if is_compound {
                         return Ok(arg.clone());
                     }
+                    // GNU declare.def:592-600 + tokenize_array_reference
+                    // (arrayfunc.c:1288): the operand name's subscript must
+                    // be a complete matched pair — `declare 'm[x[y]=a'`
+                    // expands to `m[x[y]=a`, whose nested `[` leaves the
+                    // subscript unterminated, so GNU reports
+                    // `not a valid identifier`. Pass the operand through
+                    // untouched so valid_declare_name reaches the same
+                    // diagnostic (and later operands still run).
+                    // declare.def:429,439: assoc_noexpand requires BOTH
+                    // array_expand_once and W_ASSIGNMENT on the raw operand
+                    // word; only then does assignment(name, 2) close the
+                    // expanded subscript at the first `]`
+                    // (`declare myarray["foo[bar"]=v` stores key `foo[bar`
+                    // under assoc_expand_once). Otherwise
+                    // tokenize_array_reference requires the matched-pair
+                    // close at the end of the name.
+                    let expand_once = w_assignment
+                        && crate::builtins::shopt::option_enabled(
+                            &self.env_vars,
+                            "array_expand_once",
+                        );
+                    let subscript_ok = lhs.find('[').is_some_and(|open| {
+                        if expand_once {
+                            lhs[open + 1..]
+                                .find(']')
+                                .is_some_and(|close| open + 1 + close == lhs.len() - 1)
+                        } else {
+                            crate::executor::subscript_expansion::scan_compound_subscript(lhs, open)
+                                .is_some_and(|(close, _)| close == lhs.len() - 1)
+                        }
+                    });
+                    if !subscript_ok {
+                        return Ok(arg.clone());
+                    }
                     // GNU declare.def:639-642,953-962: `declare name[sub]=v`
                     // (no -A flag) binds through the variable declare
                     // actually creates — at function scope that is a fresh

@@ -172,16 +172,15 @@ impl Executor {
             } else {
                 let needs_hoist = !raw_value.contains("$(") && !raw_value.contains('`');
                 let hoisted = if needs_hoist {
-                    hoist_data_single_quotes(
-                        &hoist_data_double_quotes(raw_value, DQ_DATA),
-                        SQ_DATA,
-                    )
+                    hoist_data_single_quotes(&hoist_data_double_quotes(raw_value, DQ_DATA), SQ_DATA)
                 } else {
                     raw_value.to_string()
                 };
-                self.expand_embedded_parameters_mut(&hoisted)
-                    .replace(DQ_DATA, "\"")
-                    .replace(SQ_DATA, "'")
+                crate::executor::assignment_expansion::restore_sq_content_markers(
+                    self.expand_embedded_parameters_mut(&hoisted)
+                        .replace(DQ_DATA, "\"")
+                        .replace(SQ_DATA, "'"),
+                )
             };
             // A compound `( ... )` RHS already took its per-element tilde
             // pass (assign_assoc_from_kvlist key/value split,

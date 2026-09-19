@@ -489,7 +489,9 @@ pub(in crate::executor) fn split_indexed_tagged_token(token: &str) -> Vec<String
     let mut current = String::new();
     let mut chars = token.chars().peekable();
     while let Some(ch) = chars.next() {
-        if (ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG) && matches!(chars.peek(), Some(' ' | '\t' | '\n')) {
+        if (ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG)
+            && matches!(chars.peek(), Some(' ' | '\t' | '\n'))
+        {
             chars.next();
             if !current.is_empty() {
                 parts.push(std::mem::take(&mut current));
@@ -727,7 +729,9 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
         // The markers are restored to actual quotes at output time.
         // \x1c is the expansion-whitespace tag (expansion_ws_marked): the
         // whitespace it precedes is data, the tag itself is not.
-        return decoded.replace('\x1c', "").replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "");
+        return decoded
+            .replace('\x1c', "")
+            .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "");
     };
 
     let mut unquoted = String::new();

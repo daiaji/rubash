@@ -488,19 +488,6 @@ impl Executor {
         Ok(variable_expanded)
     }
 
-    fn expand_unquoted_parameter_transform_word(&self, word: &str) -> Option<String> {
-        let start = word.find("${")?;
-        let end = word[start..].find('}')? + start;
-        let inner = &word[start + 2..end];
-        if !(inner.ends_with("@Q") || inner.ends_with("@K")) {
-            return None;
-        }
-        let value = self.expand_braced_transform_parameter(inner)?;
-        let prefix = self.expand_word(&word[..start]);
-        let suffix = self.expand_word(&word[end + 1..]);
-        Some(format!("{prefix}{value}{suffix}"))
-    }
-
     fn expand_simple_substitution_fragments(
         &mut self,
         cmd: &CommandNode,
@@ -508,6 +495,19 @@ impl Executor {
         word: &str,
         raw: &str,
     ) -> Option<Vec<String>> {
+        // An array-element assignment word (`m[$(...)]=v`) must keep its
+        // name[subscript]=value shape: the subscript is expanded once via
+        // expand_subscript_string (subst.c:11063), and the expanded text can
+        // itself contain `=`/`]` (m[$(echo a]=b)]=v keys on `a]=b`). The
+        // fragment fast path would splice the substitution output into the
+        // word and let the executor re-split it at the wrong `=`/`]`.
+        if cmd
+            .array_element_assignments
+            .iter()
+            .any(|assignment| assignment.word_index == Some(index))
+        {
+            return None;
+        }
         let raw_fragments = split_raw_word_fragments(raw);
         if raw_fragments.len() < 3
             || !raw_fragments.iter().any(|fragment| fragment.substitution)
@@ -915,18 +915,52 @@ impl Executor {
             .iter()
             .any(|assignment| assignment.word_index == Some(index))
         {
-            if let Some(raw_value) = raw
+            let raw_quoted_value = raw
                 .and_then(|raw| raw.split_once('=').map(|(_, value)| value))
                 .and_then(|value| {
                     value
                         .strip_prefix('\"')
                         .and_then(|value| value.strip_suffix('\"'))
                 })
-            {
+                .is_some();
+            if raw_quoted_value {
+                // The value must be the cooked token text: the lexer tags
+                // data quotes inside `"..."` with \x17/\x18, while the raw
+                // text would feed live quote syntax to the embedded
+                // parameter walker — `a[k]="a'b"` stored `ab`
+                // (expand_embedded_parameters dequotes `'` as syntax).
+                let assignment = cmd
+                    .array_element_assignments
+                    .iter()
+                    .find(|assignment| assignment.word_index == Some(index));
+                if let Some(assignment) = assignment {
+                    // The LHS comes from the recorded subscript, not the
+                    // expanded word: a quoted `]` inside the subscript
+                    // (`a["a]a"]="v"`) survives expansion as data and would
+                    // re-split the word at the wrong `]`/`=` (GNU
+                    // expand_subscript_string, subst.c:11063 — the subscript
+                    // is expanded once, verbatim).
+                    let name = assignment.name.as_str();
+                    let raw_subscript = assignment.subscript_metadata.raw.as_str();
+                    let associative = is_marked_var(&self.env_vars, ASSOC_VARS, name)
+                        || self.is_assoc_parameter_array(name);
+                    if associative {
+                        let key = self.expand_subscript_string(raw_subscript);
+                        let value = self.expand_quoted_parameter_word(assignment.value.as_str());
+                        return vec![format!(
+                            "{name}[{}]{}{value}",
+                            crate::executor::arithmetic::encode_arithmetic_assoc_key(&key),
+                            assignment.operator
+                        )];
+                    }
+                }
                 if let Some((left, _)) = expanded.split_once('=') {
+                    let cooked = assignment
+                        .map(|assignment| assignment.value.as_str())
+                        .unwrap_or_default();
                     return vec![format!(
                         "{left}={}",
-                        self.expand_quoted_parameter_word(raw_value)
+                        self.expand_quoted_parameter_word(cooked)
                     )];
                 }
             }
@@ -956,9 +990,10 @@ impl Executor {
                 raw,
             )];
         }
-        if let Some(formatted) = self.expand_unquoted_parameter_transform_word(word) {
-            return vec![formatted];
-        }
+        // An unquoted ${arr[@]@K}/${arr[@]@Q} word needs no special path:
+        // the generic `expanded` text already carries the transform result
+        // and splits through field_split_values_with_ifs below, matching
+        // GNU's quote_escapes+field-split pipeline (subst.c:8705).
         if expanded.is_empty() && self.removes_unquoted_null_word(cmd, index) {
             Vec::new()
         } else if raw_word_contains_process_substitution(raw)

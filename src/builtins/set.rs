@@ -205,6 +205,38 @@ where
         if !valid_identifier(name) {
             continue;
         }
+        // GNU variables.c:1096-1104 print_assignment: array and assoc cells
+        // print through array_to_assign/assoc_to_assign (hash-bucket order,
+        // per-element quoting, unquoted parens), not the scalar
+        // sh_single_quote path — `set` prints myarray=(["a]a"]="abc" ).
+        // var_isset (variables.c:1912) is `var->value != 0`: `declare -A x`
+        // marks x assoc without binding a cell, so print_assignment skips it
+        // entirely — only an explicit `x=()` binds the empty table.
+        if value.is_empty()
+            && (unset::is_marked_variable(env_vars, ASSOC_VARS, name)
+                || unset::is_marked_variable(env_vars, ARRAY_VARS, name))
+        {
+            continue;
+        }
+        if unset::is_marked_variable(env_vars, ASSOC_VARS, name) {
+            let nbuckets = crate::executor::assoc_nbuckets(env_vars, name);
+            writeln!(
+                stdout,
+                "{}={}",
+                name,
+                crate::builtins::declare::format_assoc_for_output(value, nbuckets)
+            )?;
+            continue;
+        }
+        if unset::is_marked_variable(env_vars, ARRAY_VARS, name) {
+            writeln!(
+                stdout,
+                "{}={}",
+                name,
+                crate::builtins::declare::format_array_for_output(value)
+            )?;
+            continue;
+        }
         writeln!(stdout, "{}={}", name, shell_quote(value))?;
     }
 

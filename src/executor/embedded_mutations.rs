@@ -44,10 +44,7 @@ fn expansion_ws_marked(alternate: bool, preserve_quotes: bool, in_double: bool) 
 // where it glues its whitespace into the element word.
 pub(crate) const COMPOUND_EXPANSION_WS_TAG: char = '\u{E109}';
 
-pub(in crate::executor) fn mark_expansion_whitespace(
-    value: &str,
-    preserve_quotes: bool,
-) -> String {
+pub(in crate::executor) fn mark_expansion_whitespace(value: &str, preserve_quotes: bool) -> String {
     if !preserve_quotes {
         return mark_alternate_whitespace(value);
     }
@@ -616,7 +613,8 @@ impl Executor {
                                     )
                                 });
                             if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                                output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                                output
+                                    .push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                             } else {
                                 output.push_str(&value);
                             }
@@ -630,7 +628,8 @@ impl Executor {
                                     )
                                 });
                             if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                                output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                                output
+                                    .push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                             } else {
                                 output.push_str(&value);
                             }
@@ -662,7 +661,10 @@ impl Executor {
                             if let Some(value) = self.eval_arithmetic_expansion_value(&expression) {
                                 let value = value.to_string();
                                 if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                                    output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                                    output.push_str(&mark_expansion_whitespace(
+                                        &value,
+                                        preserve_quotes,
+                                    ));
                                 } else {
                                     output.push_str(&value);
                                 }
@@ -707,7 +709,10 @@ impl Executor {
                                         ),
                                     );
                                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                                        output.push_str(&mark_expansion_whitespace(
+                                            &value,
+                                            preserve_quotes,
+                                        ));
                                     } else {
                                         output.push_str(&value);
                                     }
@@ -738,7 +743,8 @@ impl Executor {
                         if let Some(value) = self.eval_arithmetic_expansion_value(&expression) {
                             let value = value.to_string();
                             if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                                output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                                output
+                                    .push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                             } else {
                                 output.push_str(&value);
                             }

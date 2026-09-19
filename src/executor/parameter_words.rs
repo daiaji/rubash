@@ -81,7 +81,9 @@ impl Executor {
             return self.expand_embedded_parameters(word);
         }
 
-        if let Some((var_name, default)) = name.split_once(":-") {
+        if let Some((var_name, default)) =
+            super::expand_braced_ops::split_once_outside_subscript_str(name, ":-")
+        {
             if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
@@ -98,7 +100,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, alternate)) = name.split_once(":+") {
+        if let Some((var_name, alternate)) =
+            super::expand_braced_ops::split_once_outside_subscript_str(name, ":+")
+        {
             if is_parameter_error_name(var_name) {
                 if self
                     .parameter_operator_value(var_name)
@@ -115,7 +119,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, error_word)) = name.split_once(":?") {
+        if let Some((var_name, error_word)) =
+            super::expand_braced_ops::split_once_outside_subscript_str(name, ":?")
+        {
             if is_parameter_error_name(var_name) {
                 if self
                     .parameter_operator_value(var_name)
@@ -130,7 +136,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, error_word)) = name.split_once('?') {
+        if let Some((var_name, error_word)) =
+            super::expand_braced_ops::split_once_outside_subscript(name, '?')
+        {
             // GNU subst.c parameter_brace_expand: `${#?}` is the length of
             // `$?`, not `$#` with the `?` error operator. Only the bare `#?`
             // form (no error word) is the length-of-special case; `${#?word}`
@@ -143,7 +151,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, word)) = name.split_once(":=") {
+        if let Some((var_name, word)) =
+            super::expand_braced_ops::split_once_outside_subscript_str(name, ":=")
+        {
             if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
@@ -153,7 +163,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, word)) = name.split_once('=') {
+        if let Some((var_name, word)) =
+            super::expand_braced_ops::split_once_outside_subscript(name, '=')
+        {
             if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
@@ -205,7 +217,9 @@ impl Executor {
                 .unwrap_or_default();
         }
 
-        if let Some((var_name, alternate)) = name.split_once('+') {
+        if let Some((var_name, alternate)) =
+            super::expand_braced_ops::split_once_outside_subscript(name, '+')
+        {
             if is_parameter_error_name(var_name) {
                 if self.parameter_operator_value(var_name).is_some() {
                     return unescape_parameter_operator_result(
@@ -219,7 +233,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, default)) = name.split_once('-') {
+        if let Some((var_name, default)) =
+            super::expand_braced_ops::split_once_outside_subscript(name, '-')
+        {
             if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
@@ -331,7 +347,9 @@ impl Executor {
             return self.expand_embedded_parameters_mut_with_context(word, context);
         }
 
-        if let Some((var_name, default)) = name.split_once(":-") {
+        if let Some((var_name, default)) =
+            super::expand_braced_ops::split_once_outside_subscript_str(name, ":-")
+        {
             if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
@@ -350,7 +368,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, alternate)) = name.split_once(":+") {
+        if let Some((var_name, alternate)) =
+            super::expand_braced_ops::split_once_outside_subscript_str(name, ":+")
+        {
             if is_parameter_error_name(var_name) {
                 if self
                     .parameter_operator_value(var_name)
@@ -369,7 +389,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, error_word)) = name.split_once(":?") {
+        if let Some((var_name, error_word)) =
+            super::expand_braced_ops::split_once_outside_subscript_str(name, ":?")
+        {
             if is_parameter_error_name(var_name) {
                 if self
                     .parameter_operator_value(var_name)
@@ -385,7 +407,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, error_word)) = name.split_once('?') {
+        if let Some((var_name, error_word)) =
+            super::expand_braced_ops::split_once_outside_subscript(name, '?')
+        {
             // GNU subst.c parameter_brace_expand: `${#?}` is the length of
             // `$?`, not `$#` with the `?` error operator. Only the bare `#?`
             // form (no error word) is the length-of-special case; `${#?word}`
@@ -401,7 +425,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, word)) = name.split_once(":=") {
+        if let Some((var_name, word)) =
+            super::expand_braced_ops::split_once_outside_subscript_str(name, ":=")
+        {
             if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
@@ -425,7 +451,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, word)) = name.split_once('=') {
+        if let Some((var_name, word)) =
+            super::expand_braced_ops::split_once_outside_subscript(name, '=')
+        {
             if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
@@ -491,7 +519,9 @@ impl Executor {
                 .unwrap_or_default();
         }
 
-        if let Some((var_name, alternate)) = name.split_once('+') {
+        if let Some((var_name, alternate)) =
+            super::expand_braced_ops::split_once_outside_subscript(name, '+')
+        {
             if is_parameter_error_name(var_name) {
                 if self.parameter_operator_value(var_name).is_some() {
                     let alternate = self.tilde_expand_operator_word(alternate, context);
@@ -505,7 +535,9 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, default)) = name.split_once('-') {
+        if let Some((var_name, default)) =
+            super::expand_braced_ops::split_once_outside_subscript(name, '-')
+        {
             if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)

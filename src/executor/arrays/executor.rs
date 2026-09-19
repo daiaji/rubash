@@ -464,6 +464,10 @@ impl Executor {
             return Some(vec![value]);
         }
         if transform == ParameterTransform::KeyValueQuoted {
+            // The unquoted result goes through the caller's
+            // field_split_array_values_with_ifs — matching GNU, where
+            // quote_escapes (subst.c:8705) leaves whitespace bare so the
+            // kvpair string splits while its quotes stay literal data.
             return Some(vec![self.parameter_key_value_transform(var_name, true)]);
         }
         if transform == ParameterTransform::KeyValueSplit {
@@ -497,7 +501,16 @@ impl Executor {
             array_values(&storage)
         }
         .into_iter()
-        .map(|value| self.apply_parameter_transform_value(&value, transform))
+        .map(|value| {
+            if transform == ParameterTransform::Attributes {
+                // GNU list_transform -> string_transform (subst.c:8753):
+                // 'a' reports the variable's attributes
+                // (var_attribute_string), once per list element.
+                self.parameter_attribute_transform(var_name)
+            } else {
+                self.apply_parameter_transform_value(&value, transform)
+            }
+        })
         .collect::<Vec<_>>();
         if quoted_array_word && starred {
             // GNU string_list_pos_params (subst.c:3030): a quoted `*` joins
@@ -717,6 +730,9 @@ fn array_value_transform_splits_words(transform: ParameterTransform) -> bool {
             | ParameterTransform::Upper
             | ParameterTransform::UpperFirst
             | ParameterTransform::Lower
+            // GNU list_transform (subst.c:8906) applies @a per element, so
+            // `${arr[@]@a}` yields one attribute string per element.
+            | ParameterTransform::Attributes
     )
 }
 

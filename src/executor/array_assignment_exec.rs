@@ -44,7 +44,13 @@ impl Executor {
         if matches!(name, "BASH_ALIASES" | "BASH_CMDS" | "DIRSTACK") {
             return None;
         }
-        let synthetic = format!("{name}={}", assignment.raw_value);
+        // GNU assign_array_element (arrayfunc.c:815-865): the value part of
+        // `name[sub]=word` is expanded once as an assignment string; the
+        // parser's cooked `value` already carries the lexer's quote/data
+        // marking, while `raw_value` (source text) would feed live quote
+        // syntax into an expansion pass that treats `'` as compound-element
+        // data — `a[k]='n1'` stored the quotes verbatim.
+        let synthetic = format!("{name}={}", assignment.value);
         let expanded =
             self.expand_word_mut_with_context(&synthetic, SubstitutionQuoteContext::Unquoted);
         let prefix = format!("{name}=");
@@ -244,7 +250,11 @@ impl Executor {
             return true;
         }
 
-        let index = index.trim_end_matches(']');
+        // Only the LAST `]` is the delimiter — `m[]]=v` keys on `]`, and
+        // `m[a]]=v` keys on `a]`: trimming every trailing bracket would
+        // erase a key that is itself made of `]` characters
+        // (GNU assign_array_element uses the subscript text verbatim).
+        let index = index.strip_suffix(']').unwrap_or(index);
         if value_is_syntactic_compound_list {
             // GNU subst.c:3603 reports the LHS name[subscript] only, not the
             // whole assignment word.

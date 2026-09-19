@@ -218,6 +218,8 @@ impl Executor {
             return String::new();
         }
 
+        // GNU var_attribute_string (builtins/setattr.def:421-457) emits the
+        // flags in this fixed order: a A f i n r t x c l u.
         let mut attrs = String::new();
         if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
             attrs.push('A');
@@ -229,14 +231,26 @@ impl Executor {
         {
             attrs.push('a');
         }
+        if self.functions.contains_key(base_name) {
+            attrs.push('f');
+        }
         if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
             attrs.push('i');
+        }
+        if is_marked_var(&self.env_vars, NAMEREF_VARS, base_name) {
+            attrs.push('n');
         }
         if is_marked_var(&self.env_vars, READONLY_VARS, base_name) {
             attrs.push('r');
         }
+        if is_marked_var(&self.env_vars, TRACE_VARS, base_name) {
+            attrs.push('t');
+        }
         if is_marked_var(&self.env_vars, EXPORTED_VARS, base_name) {
             attrs.push('x');
+        }
+        if is_marked_var(&self.env_vars, CAPCASE_VARS, base_name) {
+            attrs.push('c');
         }
         if is_marked_var(&self.env_vars, LOWERCASE_VARS, base_name) {
             attrs.push('l');
@@ -268,14 +282,12 @@ impl Executor {
                 // every `key "value"` element — including the last — while
                 // the indexed array_to_kvpair (array.c:896) only separates,
                 // and @k's string_list_pos_params path has no trailing pad.
-                let joined = assoc_hash_ordered_entries(
-                    value,
-                    assoc_nbuckets(&self.env_vars, &array_name),
-                )
-                .into_iter()
-                .map(|(key, value)| format_key_value_transform_part(&key, &value, quoted))
-                .collect::<Vec<_>>()
-                .join(" ");
+                let joined =
+                    assoc_hash_ordered_entries(value, assoc_nbuckets(&self.env_vars, &array_name))
+                        .into_iter()
+                        .map(|(key, value)| format_key_value_transform_part(&key, &value, quoted))
+                        .collect::<Vec<_>>()
+                        .join(" ");
                 return if quoted && !joined.is_empty() {
                     format!("{joined} ")
                 } else {

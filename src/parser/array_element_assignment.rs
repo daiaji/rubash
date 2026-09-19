@@ -15,9 +15,35 @@ pub(super) fn record_array_element_assignment_for_word(
     // A[]]=rbracket and the `=` no longer follows the subscript). Fall back
     // to the raw spelling, whose quote-aware subscript scan still finds the
     // real delimiters and keeps raw_subscript/raw_value verbatim.
-    if let Some(mut assignment) = array_element_assignment_from_word(word, raw)
-        .or_else(|| array_element_assignment_from_word(raw, raw))
-    {
+    let cooked_parse = array_element_assignment_from_word(word, raw);
+    // A cooked parse can also succeed at the WRONG boundary: in
+    // `a['a]=test2;#a']=v` the de-quoted text `a[a]=test2;#a']=v` makes the
+    // `]` inside the single quotes look like the subscript close, cutting the
+    // value to `test2;#a']=v`. GNU assignment() (general.c:480) runs
+    // skipsubscript on the unexpanded word — quoting still present — so when
+    // the raw subscript de-quotes to something different from the cooked
+    // parse's subscript, the raw spelling owns the boundaries.
+    let assignment = match (cooked_parse, array_element_assignment_from_word(raw, raw)) {
+        (Some(cooked), Some(raw_parse)) => {
+            let cooked_subscript = cooked.subscript.as_str();
+            let raw_subscript = raw_parse.subscript_metadata.raw.as_str();
+            if crate::lexer::remove_shell_quotes(raw_subscript) != cooked_subscript {
+                // The raw node carries raw subscript/value text; downstream
+                // expansion paths expect the cooked (quote-carrier) form for
+                // `value` and `subscript` — `a['x]=y']="def"` must expand the
+                // RHS `"def"` to `def`, not store the literal quotes.
+                let mut assignment = raw_parse;
+                assignment.value = crate::lexer::remove_shell_quotes(assignment.raw_value.as_str());
+                assignment.subscript =
+                    crate::lexer::remove_shell_quotes(assignment.subscript_metadata.raw.as_str());
+                Some(assignment)
+            } else {
+                Some(cooked)
+            }
+        }
+        (cooked, raw_parse) => cooked.or(raw_parse),
+    };
+    if let Some(mut assignment) = assignment {
         assignment.word_index = Some(word_index);
         command.array_element_assignments.push(assignment);
         return true;
@@ -158,7 +184,8 @@ fn matching_subscript_end(word: &str, open: usize) -> Option<usize> {
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
-    for (index, ch) in chars.into_iter().skip(start) {
+    let mut iter = chars.into_iter().skip(start).peekable();
+    while let Some((index, ch)) = iter.next() {
         if escaped {
             escaped = false;
             continue;
@@ -166,6 +193,40 @@ fn matching_subscript_end(word: &str, open: usize) -> Option<usize> {
         if ch == '\\' && !single {
             escaped = true;
             continue;
+        }
+        if !single && !double {
+            // GNU skip_matched_pair (subst.c:2086): `$(...)`, `${...}` and
+            // backquote spans are skipped as units — a `]` inside them is
+            // substitution text, never the subscript close
+            // (`A[$(echo ])]=v` keys on `]`).
+            if ch == '`' {
+                while let Some((_, inner)) = iter.next() {
+                    if inner == '`' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ch == '$' && matches!(iter.peek(), Some(&(_, '(' | '{'))) {
+                let (open_ch, close_ch) = if matches!(iter.peek(), Some(&(_, '('))) {
+                    ('(', ')')
+                } else {
+                    ('{', '}')
+                };
+                iter.next();
+                let mut sub_depth = 1usize;
+                while let Some((_, inner)) = iter.next() {
+                    if inner == open_ch {
+                        sub_depth += 1;
+                    } else if inner == close_ch {
+                        sub_depth -= 1;
+                        if sub_depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
         }
         match ch {
             '\'' if !double => single = !single,

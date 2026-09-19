@@ -21,9 +21,8 @@ use super::{
     apply_parameter_case_mod, assoc_value_at, eval_arith_value, eval_conditional_arith_value,
     is_marked_var, is_shell_name, parse_indirect_pattern_removal, parse_parameter_case_mod,
     parse_parameter_replacement, parse_parameter_transform, remove_parameter_pattern,
-    split_indexed_tagged_token, split_storage_words, strip_matching_quotes,
-    unquote_storage_value, Executor,
-    ParameterTransform, ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
+    split_indexed_tagged_token, split_storage_words, strip_matching_quotes, unquote_storage_value,
+    Executor, ParameterTransform, ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
 use crate::lexer::remove_shell_quotes;
 
@@ -35,7 +34,121 @@ pub(super) fn is_array_element_assignment_word(word: &str) -> bool {
     let Some((name, index)) = left.split_once('[') else {
         return false;
     };
-    is_shell_name(name) && index.ends_with(']')
+    if !is_shell_name(name) {
+        return false;
+    }
+    // GNU skipsubscript (subst.c:2186 -> skip_matched_pair subst.c:2086):
+    // the subscript closes at the `]` that returns the bracket count to
+    // zero; nested `[` increments it, and quotes, escapes, backticks,
+    // `$(...)` and `${...}` hide their contents. `declare m["foo[bar"]=v`
+    // expands to `m[foo[bar]=v`, whose nested `[` leaves the subscript
+    // unterminated — GNU reports `not a valid identifier` — while
+    // `a[foo]bar]=v` has subscript `foo` and a `bar]` suffix that makes
+    // the word not an assignment at all (GNU: command not found).
+    let bytes = index.as_bytes();
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut index_pos = 0usize;
+    while index_pos < bytes.len() {
+        let ch = bytes[index_pos];
+        if ch == b'\\' && !single {
+            index_pos += 2;
+            continue;
+        }
+        if single {
+            if ch == b'\'' {
+                single = false;
+            }
+            index_pos += 1;
+            continue;
+        }
+        if double {
+            if ch == b'"' {
+                double = false;
+            }
+            index_pos += 1;
+            continue;
+        }
+        match ch {
+            b'\'' => single = true,
+            b'"' => double = true,
+            b'`' => {
+                index_pos += 1;
+                while index_pos < bytes.len() && bytes[index_pos] != b'`' {
+                    index_pos += if bytes[index_pos] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'$' if bytes.get(index_pos + 1) == Some(&b'(')
+                || bytes.get(index_pos + 1) == Some(&b'{') =>
+            {
+                index_pos = skip_dollar_pair(bytes, index_pos + 1);
+                continue;
+            }
+            b'[' => depth += 1,
+            b']' if depth == 0 => return index_pos == bytes.len() - 1,
+            b']' => depth -= 1,
+            _ => {}
+        }
+        index_pos += 1;
+    }
+    false
+}
+
+/// Skip a `$(`/`${` body starting at the delimiter (`(`/`{`) position,
+/// tracking nested delimiters, quotes, escapes and backticks
+/// (skip_matched_pair handling of `$(...)`/`${...}`).
+fn skip_dollar_pair(bytes: &[u8], open_pos: usize) -> usize {
+    let (open, close) = if bytes[open_pos] == b'(' {
+        (b'(', b')')
+    } else {
+        (b'{', b'}')
+    };
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut index = open_pos + 1;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if ch == b'\\' && !single {
+            index += 2;
+            continue;
+        }
+        if single {
+            if ch == b'\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == b'"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            b'\'' => single = true,
+            b'"' => double = true,
+            b'`' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'`' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+            }
+            _ if ch == open => depth += 1,
+            _ if ch == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    bytes.len()
 }
 
 pub(super) fn append_scalar_value(current: &str, value: &str) -> String {
@@ -495,17 +608,6 @@ pub(super) fn word_is_unquoted_array_list_expansion(word: &str) -> bool {
         return false;
     };
     let name = inner.split_once(':').map_or(inner, |(name, _)| name);
-    if let Some((_var_name, transform)) = parse_parameter_transform(name) {
-        match transform {
-            // GNU subst.c parameter_brace_transform renders @A/@a/@K as one
-            // word and never field-splits array transform results (no
-            // W_SPLITSPACE is set for VT_ARRAYVAR results).
-            ParameterTransform::Assignment
-            | ParameterTransform::Attributes
-            | ParameterTransform::KeyValueQuoted => return false,
-            _ => {}
-        }
-    }
     let name = parse_parameter_transform(name)
         .map(|(name, _)| name)
         .or_else(|| parse_indirect_pattern_removal(name).map(|(name, _, _)| name))

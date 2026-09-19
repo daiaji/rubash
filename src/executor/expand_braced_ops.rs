@@ -217,6 +217,11 @@ fn split_once_outside_subscript_impl<'a>(name: &'a str, op: &[u8]) -> Option<(&'
     let mut bracket_depth = 0usize;
     let mut brace_depth = 0usize;
     let mut escaped = false;
+    // GNU skip_matched_pair (subst.c:2086): `'` and `"` spans are skipped as
+    // units, so a `]` or `=` inside a quoted subscript (`a['x]=y']`) is data,
+    // never a delimiter or an operator.
+    let mut single = false;
+    let mut double = false;
     let mut index = 0;
     while index < bytes.len() {
         if escaped {
@@ -225,14 +230,40 @@ fn split_once_outside_subscript_impl<'a>(name: &'a str, op: &[u8]) -> Option<(&'
             continue;
         }
         let ch = bytes[index];
-        if ch == b'\\' {
+        if ch == b'\\' && !single {
             escaped = true;
             index += 1;
+            continue;
+        }
+        if ch == b'\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == b'"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if single || double {
+            index += 1;
+            continue;
+        }
+        if ch == b'`' {
+            index = skip_backtick_span(bytes, index + 1);
             continue;
         }
         if ch == b'$' && bytes.get(index + 1) == Some(&b'{') {
             brace_depth += 1;
             index += 2;
+            continue;
+        }
+        // `$(...)` bodies are scanned as matched pairs by skip_matched_pair,
+        // so a `]`, `=` or other operator character produced inside a command
+        // substitution (`x[$(echo a]=b)]`) never ends the subscript or splits
+        // the operator.
+        if ch == b'$' && bytes.get(index + 1) == Some(&b'(') {
+            index = skip_parenthesized_span(bytes, index + 2);
             continue;
         }
         if ch == b'}' && brace_depth > 0 {
@@ -258,4 +289,54 @@ fn split_once_outside_subscript_impl<'a>(name: &'a str, op: &[u8]) -> Option<(&'
         index += 1;
     }
     None
+}
+
+/// Skip a backtick command substitution starting just after the opening
+/// backquote (skip_matched_pair handling of `` `...` ``).
+fn skip_backtick_span(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == b'`' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// Skip a `$(...)` body starting just after the `$(`, tracking nested parens
+/// and quote spans (skip_matched_pair handling of `$(...)`).
+fn skip_parenthesized_span(bytes: &[u8], mut index: usize) -> usize {
+    let mut depth = 1usize;
+    let mut quote = 0u8;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        index += 1;
+        if ch == b'\\' {
+            index += 1;
+            continue;
+        }
+        if quote != 0 {
+            if ch == quote {
+                quote = 0;
+            }
+            continue;
+        }
+        match ch {
+            b'\'' | b'"' => quote = ch,
+            b'`' => index = skip_backtick_span(bytes, index),
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
+        }
+    }
+    bytes.len()
 }

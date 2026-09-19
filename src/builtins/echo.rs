@@ -103,9 +103,10 @@ fn remove_residual_shell_quotes(arg: &str, unescape_alias_quotes: bool) -> Strin
         return arg.replace("\\'", "'");
     }
 
-    if arg.len() >= 2 && arg.starts_with('"') && arg.ends_with('"') {
-        return arg[1..arg.len() - 1].to_string();
-    }
+    // GNU echo prints `"..."`-wrapped arguments verbatim: expansion output
+    // carrying literal quotes (`x='"lit"'; echo $x` -> `"lit"`,
+    // `${a[@]@K}` -> `"v"`) is data, and quote removal belongs to the
+    // expansion pipeline that produced the word, not to echo.
 
     // Workaround: $'...' inside $(...) is not recognized by the word-based
     // command substitution shortcut (split_shell_words_with_quote_info in

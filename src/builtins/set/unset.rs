@@ -239,7 +239,11 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
-fn is_marked_variable(env_vars: &HashMap<String, String>, key: &str, name: &str) -> bool {
+pub(super) fn is_marked_variable(
+    env_vars: &HashMap<String, String>,
+    key: &str,
+    name: &str,
+) -> bool {
     env_vars
         .get(key)
         .map(|value| value.split('\x1f').any(|marked| marked == name))

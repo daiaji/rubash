@@ -380,25 +380,80 @@ impl<'a> Lexer<'a> {
         let mut depth = 1usize;
         let mut escaped = false;
         let mut close = None;
-        for (offset, ch) in rest.char_indices().skip(1) {
+        let chars: Vec<(usize, char)> = rest.char_indices().collect();
+        let mut idx = 1;
+        let mut single = false;
+        let mut double = false;
+        while idx < chars.len() {
+            let (offset, ch) = chars[idx];
             if escaped {
                 escaped = false;
+                idx += 1;
                 continue;
             }
             if ch == '\\' {
                 escaped = true;
+                idx += 1;
                 continue;
             }
+            if !single && !double {
+                // GNU skip_matched_pair (subst.c:2086): `$(...)`, `${...}`
+                // and backquote spans are skipped as units — a `]` inside
+                // them is substitution text, never the subscript close
+                // (`A[$(echo ])]=v` keys on `]`).
+                if ch == '`' {
+                    idx += 1;
+                    while idx < chars.len() && chars[idx].1 != '`' {
+                        idx += 1;
+                    }
+                    idx += 1;
+                    continue;
+                }
+                if ch == '$' && idx + 1 < chars.len() && matches!(chars[idx + 1].1, '(' | '{') {
+                    let (open_ch, close_ch) = if chars[idx + 1].1 == '(' {
+                        ('(', ')')
+                    } else {
+                        ('{', '}')
+                    };
+                    idx += 2;
+                    let mut sub_depth = 1usize;
+                    while idx < chars.len() {
+                        let inner = chars[idx].1;
+                        idx += 1;
+                        if inner == open_ch {
+                            sub_depth += 1;
+                        } else if inner == close_ch {
+                            sub_depth -= 1;
+                            if sub_depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
             match ch {
-                '[' => depth += 1,
-                ']' => {
+                '\'' if !double => {
+                    single = !single;
+                    idx += 1;
+                }
+                '"' if !single => {
+                    double = !double;
+                    idx += 1;
+                }
+                '[' if !single && !double => {
+                    depth += 1;
+                    idx += 1;
+                }
+                ']' if !single && !double => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
                         close = Some(offset);
                         break;
                     }
+                    idx += 1;
                 }
-                _ => {}
+                _ => idx += 1,
             }
         }
         close

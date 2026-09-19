@@ -1,4 +1,8 @@
 use super::names::valid_declare_name;
+
+fn valid_declare_name(arg: &str) -> bool {
+    valid_declare_name(arg, false)
+}
 use std::collections::HashMap;
 
 use super::execute_with_io_named;

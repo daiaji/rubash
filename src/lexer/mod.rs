@@ -25,9 +25,9 @@ use continuation::{
 };
 
 pub(crate) use continuation::has_unclosed_command_substitution;
-pub(crate) use skip::skip_parenthesized_unit_corrected;
 use heredoc::heredoc_delimiters;
 use scanner::Lexer;
+pub(crate) use skip::skip_parenthesized_unit_corrected;
 
 pub(crate) use ansi::decode_ansi_c_quoted;
 pub(crate) use quotes::remove_shell_quotes;

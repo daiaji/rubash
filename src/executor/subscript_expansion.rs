@@ -103,6 +103,15 @@ impl Executor {
         // `expand_word_internal` sees the same already-dequoted characters).
         let masked = mask_subscript_escapes(raw);
         let expanded = self.expand_embedded_parameters(&masked);
+        // Expansion-produced whitespace rides the \x1c/E109 data tags so the
+        // field/compound splitter leaves it alone; a resolved subscript is
+        // cooked text only (GNU expand_subscript_string -> expand_string
+        // yields plain bytes), so the tags come off here — otherwise a key
+        // like `20 40 80` stores marker-laden bytes that never match the
+        // canonical form reads and the kvlist path produce.
+        let expanded = expanded
+            .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
+            .replace('\x1c', "");
         // A leading unquoted `~` tilde-expands; `x~` and `a:~` stay literal
         // and `"~"` never reaches here (its first character is the quote).
         if raw.starts_with('~') {
@@ -571,7 +580,12 @@ fn dequote_compound_subscript(sub: &str) -> String {
             _ => out.push(ch),
         }
     }
-    out
+    // The stored subscript text already went through word expansion once, so
+    // it can carry the \x1c/E109 expansion-whitespace data tags; the resolved
+    // key is cooked text only — strip the tags the same way
+    // expand_subscript_string does for its freshly-expanded result.
+    out.replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
+        .replace('\x1c', "")
 }
 
 /// Encode a resolved associative compound-element key for the `[key]=value`
@@ -661,8 +675,17 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
     let mut rest = text;
     let mut saw_span = false;
     while !rest.is_empty() {
-        let inner = rest.strip_prefix('\'')?;
-        let end = inner.find('\'')?;
+        // '\u{E107}' is the compound-assignment hoisted single-quote
+        // sentinel (SQ_DATA, assignment_expansion.rs): it carries the same
+        // "no expansion inside" guarantee as a literal `'`.
+        let (inner, close) = if let Some(inner) = rest.strip_prefix('\'') {
+            (inner, '\'')
+        } else if let Some(inner) = rest.strip_prefix('\u{E107}') {
+            (inner, '\u{E107}')
+        } else {
+            return None;
+        };
+        let end = inner.find(close)?;
         out.push_str(&inner[..end]);
         rest = &inner[end + 1..];
         saw_span = true;
