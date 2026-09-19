@@ -12,26 +12,26 @@ A GNU Bash-compatible shell implementation written in Rust.
 
 Rubash is a from-scratch reimplementation of GNU Bash in Rust — lexer, parser, expansion engine, executor, builtins, and all. It targets byte-level compatibility with GNU Bash 5.3.0 and runs on Windows natively.
 
-**Current status**: 45 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 1247 lines, down from 3427 on Sep 9 (−64%). (The previously reported `intl`=1209 was missing-locale environment noise; the harness now generates `en_US.UTF-8`, and `intl` measures 2 lines.) Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
+**Current status**: 46 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 1105 lines, down from 3427 on Sep 9 (−68%). (The previously reported `intl`=1209 was missing-locale environment noise; the harness now generates `en_US.UTF-8`, and `intl` measures 2 lines.) Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
 
 ## Compatibility at a Glance
 
 ```
 GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
-(ledger: 2026-09-19 full re-run, master `652c1042`)
+(ledger: 2026-09-19 full re-run, master `652c1042`; assoc re-verified 0-diff 2026-09-20, `4883ad0b`)
 
-  PASS (0 diff):   45 suites  ██████████████████░░░░░░░░░░░░░  54%
+  PASS (0 diff):   46 suites  ██████████████████░░░░░░░░░░░░░  55%
   DIFF (1-50):     26 suites  ██████████░░░░░░░░░░░░░░░░░░░░░  31%
-  DIFF (51-250):   12 suites  █████░░░░░░░░░░░░░░░░░░░░░░░░░  14%
+  DIFF (51-250):   11 suites  ████░░░░░░░░░░░░░░░░░░░░░░░░░░  13%
   DIFF (251+):      0 suites  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%
   ────────────────────────────────────────────────────────────────
-  Total diff:      1247 lines (intl=2 after harness locale fix)
-  Was 3427 on Sep 9 → −64% in 10 days
+  Total diff:      1105 lines (intl=2 after harness locale fix)
+  Was 3427 on Sep 9 → −68% in 11 days
 ```
 
 ### Fully passing suites (zero diff)
 
-`appendop` `arith` `arith-for` `attr` `builtins` `case` `casemod` `comsub-eof` `complete` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp2` `posixpat` `precedence` `printf` `quote` `rhs-exp` `rsh` `shopt` `strip` `tilde` `tilde2` `trap`
+`appendop` `arith` `arith-for` `attr` `assoc` `builtins` `case` `casemod` `comsub-eof` `complete` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp2` `posixpat` `precedence` `printf` `quote` `rhs-exp` `rsh` `shopt` `strip` `tilde` `tilde2` `trap`
 
 ### Major recent fixes (Sep 2026)
 
