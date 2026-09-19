@@ -106,7 +106,13 @@ impl Executor {
             return true;
         }
         if !is_array_element_assignment_word(&cmd.words[0]) {
+            if std::env::var_os("RUBASH_DEBUG_AEA").is_some() {
+                eprintln!("[aea-reject] words={:?}", cmd.words);
+            }
             return false;
+        }
+        if std::env::var_os("RUBASH_DEBUG_AEA").is_some() {
+            eprintln!("[aea] words={:?}", cmd.words);
         }
         let Some((left, value)) = cmd.words[0].split_once('=') else {
             return false;
@@ -294,6 +300,9 @@ impl Executor {
             }
             let current = self.env_vars.get(name).cloned().unwrap_or_default();
             let mut entries = assoc_entries(&current);
+            if std::env::var_os("RUBASH_DEBUG_AEA").is_some() {
+                eprintln!("[aea-write] name={name} index={index:?} key={key:?} current={current:?} entries={entries:?}");
+            }
             let value = if append {
                 let current = entries
                     .iter()
@@ -347,6 +356,9 @@ impl Executor {
                     .collect::<Vec<_>>()
                     .join(" ")
             );
+            if std::env::var_os("RUBASH_DEBUG_AEA").is_some() {
+                eprintln!("[aea-store] {name} <- {new_value:?}");
+            }
             self.env_vars.insert(name.to_string(), new_value);
             self.exit_code = 0;
             return true;

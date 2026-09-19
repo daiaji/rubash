@@ -1425,7 +1425,10 @@ impl Executor {
         self.quoted_positional_at_word_values_with_raw(alternate, Some(&synthetic_raw), None)
     }
 
-    fn expand_alternate_word_fragment(&mut self, fragment: &str) -> Vec<String> {
+    pub(in crate::executor) fn expand_alternate_word_fragment(
+        &mut self,
+        fragment: &str,
+    ) -> Vec<String> {
         // In POSIX mode, quotes inside a double-quoted parameter expansion
         // word are literal for quote-state purposes. Preserve that context
         // when expanding an alternate fragment instead of reparsing it as an

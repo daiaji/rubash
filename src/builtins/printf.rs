@@ -531,10 +531,16 @@ fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
 }
 
 fn quote_assoc_key(key: &str) -> String {
+    // The storage form is re-parsed by split_storage_words on every
+    // read: a bare `'` opens a single-quote span that swallows the
+    // rest of the pair list (assoc9.sub printf -v a[$b] with
+    // b="80's" stored key `80s`), so it forces quoting like
+    // whitespace, `"`, `\`, `]`, backtick and `$` — matching the
+    // executor/declare quoters.
     if !key.is_empty()
         && !key
             .chars()
-            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '"' | '\\' | ']'))
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '\'' | '"' | '\\' | ']' | '`' | '$'))
     {
         return key.to_string();
     }

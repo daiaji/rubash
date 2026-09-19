@@ -496,6 +496,9 @@ impl Executor {
         };
 
         if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+            if std::env::var_os("RUBASH_DEBUG_AEA").is_some() {
+                eprintln!("[unset] name={name:?} sub={subscript:?}");
+            }
             // GNU arrayfunc.c:1241-1251 unbind_array_element assoc branch:
             // the operand's subscript already went through word expansion
             // once; with array_expand_once (ASS_NOEXPAND) that text is the

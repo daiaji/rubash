@@ -44,6 +44,13 @@ pub const INHERIT_PROCESS_STDIN: &str = "__RUBASH_INHERIT_PROCESS_STDIN";
 pub const LOCAL_EXPORT_ENV: &str = "__RUBASH_LOCAL_EXPORT_ENV";
 pub const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
 pub const COMPOUND_ASSIGNMENT_MARKER: &str = "__RUBASH_CA1__";
+/// Lead-in byte inside a `( ... )` compound-assignment body marking it as a
+/// whole-single-quoted declare operand whose expansion GNU defers to the
+/// builtin (arrayfunc.c:557 expand_compound_array_assignment). The lexer
+/// carriers in the body (\x1f, \x18, \x1a, \x14, \x17) stand for the
+/// ORIGINAL syntax characters there — real `$`, `"`, backtick, `\`, `'` —
+/// unlike escape-produced carriers elsewhere in an operand, which are data.
+pub const DEFERRED_COMPOUND_BODY: char = '\u{3}';
 pub const ARRAY_FIELD_SPLIT_MARKER: char = '';
 pub const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str =
     "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";

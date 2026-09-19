@@ -5,8 +5,9 @@ use super::diagnostic::diagnostic_prefix;
 use super::marks::{mark_typed, marked_vars, unmark_typed};
 use super::names::valid_nameref_value;
 use super::storage::{
-    append_array_value, append_assoc_value, eval_arith_value, format_indexed_array_storage,
-    indexed_array_entries, is_noassign_bash_array, parse_array_tokens,
+    append_array_value, append_assoc_value, eval_arith_value, format_assoc_storage,
+    format_indexed_array_storage, indexed_array_entries, is_noassign_bash_array,
+    parse_array_tokens, parse_assoc_words,
 };
 use super::{
     ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, COMPOUND_ASSIGNMENT_MARKER, DECLARED_UNSET_VARS,
@@ -189,11 +190,11 @@ where
                 let array_exists = variables.get(base).is_some_and(|v| {
                     v.starts_with('\x1d') || (v.starts_with('(') && v.ends_with(')'))
                 });
-                if !append_elem
-                    && value.starts_with('(')
-                    && value.ends_with(')')
-                    && (!array_exists || array)
-                {
+                if !append_elem && value.starts_with('(') && value.ends_with(')') && array {
+                    // GNU declare.def:944,992: a parenthesized RHS on a
+                    // subscripted operand is a whole-array compound assign
+                    // only when creating_array (-a) is on; the subscript is
+                    // discarded (`declare -a b[1]='(z)'` -> [0]="z").
                     // GNU arrayfunc.c:557 expand_compound_array_assignment:
                     // re-parse and expand the compound value (array.tests:115
                     // declare -a f='("${d[@]}")' expands d into f).
@@ -220,6 +221,21 @@ where
                         }
                     }
                     continue;
+                }
+                if !append_elem
+                    && value.starts_with('(')
+                    && value.ends_with(')')
+                    && !array_exists
+                {
+                    // GNU declare.def:937-944 internal_warning: a quoted
+                    // `(…)` RHS on a subscripted operand whose target is
+                    // not yet an array (and without -a) warns, then binds
+                    // the literal text at the subscript below.
+                    writeln!(
+                        stderr,
+                        "{}warning: {raw_target}={value}: quoted compound array assignment deprecated",
+                        diagnostic_prefix(variables)
+                    )?;
                 }
                 let index = if index_expression.trim().is_empty() {
                     Some(0)
@@ -512,7 +528,9 @@ where
                     }
                 }
             } else {
-                eval_arith_value(value).to_string()
+                let scalar = eval_arith_value(value).to_string();
+                scalar_assign_to_array(var_name, &scalar, variables)
+                    .unwrap_or(scalar)
             }
         } else if value.starts_with('(')
             && value.ends_with(')')
@@ -532,6 +550,9 @@ where
             // literal scalar (nameref22.sub: declare array='(one two three)'
             // prints `declare -- array="(one two three)"`).
             let expanded_value = expand_compound_array_value(value, variables);
+            if std::env::var_os("RUBASH_DEBUG_CA").is_some() {
+                eprintln!("[CA] assign {var_name} value={value:?} -> {expanded_value:?}");
+            }
             match append_array_value("()", &expanded_value, false, variables) {
                 Ok(storage) => storage,
                 Err(pattern) => {
@@ -546,7 +567,8 @@ where
                 }
             }
         } else {
-            value.to_string()
+            scalar_assign_to_array(var_name, value, variables)
+                .unwrap_or_else(|| value.to_string())
         };
         // GNU variables.c:3341-3358 bind_variable_value: an ASS_NAMEREF
         // assignment runs check_selfref on the RESULTING cell, so
@@ -580,6 +602,37 @@ where
         unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
     }
     Ok(status)
+}
+
+/// GNU variables.c:3320 bind_variable -> assign_array_element: a scalar RHS
+/// assigned to an existing array/assoc binds subscript 0 (assoc key "0")
+/// instead of replacing the variable (array19.sub: `declare -l foo="$value"`
+/// on foo=(one two three) yields [0]="abcde" [1]="two" [2]="three"; on an
+/// assoc, `declare A=scalar` stores ["0"]="scalar" keeping existing keys).
+/// Returns None when VAR_NAME is not an existing array/assoc.
+fn scalar_assign_to_array(
+    var_name: &str,
+    scalar: &str,
+    variables: &HashMap<String, String>,
+) -> Option<String> {
+    let current = variables.get(var_name)?;
+    if marked_vars(variables, ASSOC_VARS).contains(var_name) {
+        let mut entries = parse_assoc_words(current);
+        match entries.iter_mut().find(|(key, _)| key == "0") {
+            Some((_, existing)) => *existing = scalar.to_string(),
+            None => entries.insert(0, ("0".to_string(), scalar.to_string())),
+        }
+        Some(format_assoc_storage(entries))
+    } else if marked_vars(variables, ARRAY_VARS).contains(var_name)
+        || current.starts_with('')
+        || (current.starts_with('(') && current.ends_with(')'))
+    {
+        let mut entries = indexed_array_entries(current);
+        entries.insert(0, scalar.to_string());
+        Some(format_indexed_array_storage(entries))
+    } else {
+        None
+    }
 }
 
 /// Return the first bare (non `[key]=value`) element of an associative array

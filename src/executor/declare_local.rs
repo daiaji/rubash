@@ -267,6 +267,7 @@ impl Executor {
         &mut self,
         args: &[String],
         word_metadata: &[crate::parser::WordMetadata],
+        command_name: &str,
     ) -> Result<Vec<String>, ()> {
         // Whether the operand list carries `-A` (set form); an unmarked
         // variable declared with -A takes the assoc element rules.
@@ -278,9 +279,107 @@ impl Executor {
             }
             parse_options && arg.starts_with('-') && arg != "-" && arg[1..].contains('A')
         });
-        args.iter()
-            .enumerate()
-            .map(|(index, arg)| {
+        // Same scan for the indexed `-a` flag: GNU creating_array covers
+        // both att_array and att_assoc (declare.def:813).
+        let mut parse_options = true;
+        let array_hint = args.iter().any(|arg| {
+            if parse_options && arg == "--" {
+                parse_options = false;
+                return false;
+            }
+            parse_options && arg.starts_with('-') && arg != "-" && arg[1..].contains('a')
+        });
+        // Option words of this invocation, for replaying earlier operands
+        // into the scratch environment below (the builtin applies `-a`/`-A`
+        // to every operand it binds).
+        let mut parse_options = true;
+        let option_args: Vec<String> = args
+            .iter()
+            .filter(|arg| {
+                if *arg == "--" {
+                    parse_options = false;
+                    return false;
+                }
+                parse_options
+                    && (arg.starts_with('-') || arg.starts_with('+'))
+                    && arg.as_str() != "-"
+                    && arg.as_str() != "+"
+            })
+            .cloned()
+            .collect();
+        // GNU declare.def:697-831 runs the operand loop inside the builtin,
+        // so a deferred compound operand expands with earlier operands
+        // already bound (`declare -a a=('x y') d='($a)'` sees `a`). The
+        // element resolution below needs the same ordering: replay the
+        // already-rewritten earlier operands into a scratch env and expand
+        // under it.
+        let mut compound_env: Option<HashMap<String, String>> = None;
+        let mut out_args: Vec<String> = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            match self.rewrite_declare_operand(
+                index,
+                arg,
+                word_metadata,
+                command_name,
+                assoc_hint,
+                &option_args,
+                &mut compound_env,
+                &out_args,
+                array_hint,
+            ) {
+                Ok(rewritten) => out_args.push(rewritten),
+                // GNU declare.def operand loop: an evalexp failure inside a
+                // `name[sub]` subscript aborts the REST of the operand list
+                // (`declare -i a[$(bad)]=42 b=99` leaves b unset), but the
+                // failed operand's base still goes through
+                // making_array_special + VSETATTR (`declare -ai a=()`). The
+                // builtin therefore sees a value-less `base[0]` hint for it
+                // and nothing after.
+                Err(()) => {
+                    self.declare_compound_element_failed.set(true);
+                    let lhs = arg.split_once('=').map(|(lhs, _)| lhs).unwrap_or(arg);
+                    let base = lhs
+                        .trim_end_matches('+')
+                        .split('[')
+                        .next()
+                        .unwrap_or(lhs);
+                    if !base.is_empty() {
+                        // An existing array/assoc keeps its cell; a fresh
+                        // name still materializes as an empty array
+                        // (`declare -ai a=()`) because the assignment ran
+                        // make_new_array_variable before the subscript
+                        // failed (declare.def:953-962).
+                        if is_marked_var(&self.env_vars, ASSOC_VARS, base)
+                            || is_marked_var(&self.env_vars, ARRAY_VARS, base)
+                            || self.env_vars.contains_key(base)
+                        {
+                            out_args.push(format!("{base}[0]"));
+                        } else {
+                            out_args.push(format!(
+                                "{base}={COMPOUND_ASSIGNMENT_MARKER}()"
+                            ));
+                        }
+                    }
+                    return Ok(out_args);
+                }
+            }
+        }
+        Ok(out_args)
+    }
+
+    fn rewrite_declare_operand(
+        &mut self,
+        index: usize,
+        arg: &str,
+        word_metadata: &[crate::parser::WordMetadata],
+        command_name: &str,
+        assoc_hint: bool,
+        option_args: &[String],
+        compound_env: &mut Option<HashMap<String, String>>,
+        prior_args: &[String],
+        array_hint: bool,
+    ) -> Result<String, ()> {
+        {
                 // GNU declare.def:429: assoc_noexpand requires W_ASSIGNMENT
                 // on the operand word, and parse.y:5787 only sets it on an
                 // UNQUOTED assignment-shaped token (general.c:480
@@ -299,7 +398,7 @@ impl Executor {
                     // `declare name[sub]` without `=` is a size-hint
                     // declaration; GNU discards the subscript text without
                     // evaluating it (declare.def:605 making_array_special).
-                    return Ok(arg.clone());
+                    return Ok(arg.to_string());
                 };
                 let (lhs, append) = lhs
                     .strip_suffix('+')
@@ -308,13 +407,48 @@ impl Executor {
                 let compound = value
                     .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
                     .unwrap_or(value);
-                let is_compound = compound.starts_with('(') && compound.ends_with(')');
+                let paren_value = compound.starts_with('(') && compound.ends_with(')');
+                // GNU declare.def:935-951 (shell_compatibility_level > 43):
+                // a `(...)` operand value is a compound assignment only when
+                // the operand word carried W_COMPASSIGN (an unquoted `=(` —
+                // the  deferred marker identifies a whole-quoted RHS
+                // instead), or when the target is an existing array/assoc or
+                // -a/-A is creating one. A quoted/expanded `(...)` RHS on a
+                // scalar stays a literal string: `declare -- a='(1 2)'`
+                // binds "(1 2)", `declare a1=$v` with v='(7 8)' likewise.
+                let deferred = paren_value
+                    && compound[1..]
+                        .starts_with(crate::executor::types::DEFERRED_COMPOUND_BODY);
+                let w_compassign =
+                    value.starts_with(COMPOUND_ASSIGNMENT_MARKER) && !deferred;
+                let creating_array = assoc_hint || array_hint;
+                let array_exists = is_marked_var(&self.env_vars, ASSOC_VARS, lhs)
+                    || is_marked_var(&self.env_vars, ARRAY_VARS, lhs);
+                let is_compound =
+                    paren_value && (w_compassign || creating_array || array_exists);
+                if std::env::var_os("RUBASH_DEBUG_CA").is_some() {
+                    eprintln!("[gate] arg={arg:?} value={value:?} paren={paren_value} def={deferred} wc={w_compassign} create={creating_array} exists={array_exists} -> {is_compound}");
+                }
+                if paren_value && !is_compound {
+                    // Scalar verbatim: keep the compound text (and its
+                    // protected carriers) as the literal value. The 
+                    // deferred marker is parse-internal; drop it so the
+                    // sq'd body stores the plain characters.
+                    let inner = &compound[1..compound.len() - 1];
+                    let inner = inner
+                        .strip_prefix(crate::executor::types::DEFERRED_COMPOUND_BODY)
+                        .unwrap_or(inner);
+                    return Ok(format!(
+                        "{lhs}{}=({inner})",
+                        if append { "+" } else { "" }
+                    ));
+                }
                 if lhs.contains('[') {
                     // GNU subst.c:3599-3605: `name[sub]=(list)` fails
                     // "cannot assign list to array member" before the
                     // subscript is ever evaluated — leave it alone.
                     if is_compound {
-                        return Ok(arg.clone());
+                        return Ok(arg.to_string());
                     }
                     // GNU declare.def:592-600 + tokenize_array_reference
                     // (arrayfunc.c:1288): the operand name's subscript must
@@ -348,7 +482,7 @@ impl Executor {
                         }
                     });
                     if !subscript_ok {
-                        return Ok(arg.clone());
+                        return Ok(arg.to_string());
                     }
                     // GNU declare.def:639-642,953-962: `declare name[sub]=v`
                     // (no -A flag) binds through the variable declare
@@ -378,13 +512,28 @@ impl Executor {
                     };
                     let rewritten =
                         self.rewrite_operand_subscript_typed(lhs, mode, Some(operand_assoc))?;
+                    if rewritten.ends_with("[]") {
+                        // GNU arrayfunc.c array_expand_index: an empty
+                        // subscript reports `name[]: bad array subscript`
+                        // but the operand still ran making_array_special +
+                        // VSETATTR — the variable materializes as an empty
+                        // array (`declare -ar c=()`), the command fails,
+                        // and later operands keep processing.
+                        eprintln!(
+                            "{}{rewritten}: bad array subscript",
+                            self.diagnostic_prefix()
+                        );
+                        self.declare_compound_element_failed.set(true);
+                        let base = rewritten.trim_end_matches("[]");
+                        return Ok(format!("{base}={COMPOUND_ASSIGNMENT_MARKER}()"));
+                    }
                     return Ok(format!(
                         "{rewritten}{}={value}",
                         if append { "+" } else { "" }
                     ));
                 }
                 if !is_compound {
-                    return Ok(arg.clone());
+                    return Ok(arg.to_string());
                 }
                 // `declare [-aA] name=(...)`: element subscripts inside the
                 // stored compound text resolve through
@@ -394,6 +543,33 @@ impl Executor {
                 // word expansion on this path, so the resolver runs its
                 // non-preexpanded (declare) model.
                 let assoc = assoc_hint || is_marked_var(&self.env_vars, ASSOC_VARS, lhs);
+                let scratch = compound_env.get_or_insert_with(|| self.env_vars.clone());
+                // Replay the earlier operands so the compound element
+                // expansion sees their bindings, like declare.def's
+                // left-to-right operand loop.
+                let mut replay_args = option_args.to_vec();
+                replay_args.extend(
+                    prior_args
+                        .iter()
+                        .filter(|arg| {
+                            !(arg.starts_with('-') || arg.starts_with('+'))
+                                || arg.as_str() == "-"
+                                || arg.as_str() == "+"
+                        })
+                        .cloned(),
+                );
+                let mut sink_out = Vec::new();
+                let mut sink_err = Vec::new();
+                let _ = crate::builtins::declare::execute_with_io_named_in_context(
+                    command_name,
+                    &replay_args,
+                    scratch,
+                    &mut sink_out,
+                    &mut sink_err,
+                    self.function_depth > 0,
+                    &[],
+                );
+                std::mem::swap(&mut self.env_vars, scratch);
                 let rewritten = match self.rewrite_compound_element_subscripts(
                     lhs, compound, assoc, false,
                 ) {
@@ -408,6 +584,7 @@ impl Executor {
                         partial
                     }
                 };
+                std::mem::swap(&mut self.env_vars, scratch);
                 let marker = if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
                     COMPOUND_ASSIGNMENT_MARKER
                 } else {
@@ -417,8 +594,7 @@ impl Executor {
                     "{lhs}{}={marker}{rewritten}",
                     if append { "+" } else { "" }
                 ))
-            })
-            .collect()
+        }
     }
 
     pub(in crate::executor) fn execute_declare(
@@ -434,7 +610,12 @@ impl Executor {
         }
         let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
         self.declare_compound_element_failed.set(false);
-        let mut args = match self.rewrite_declare_operand_subscripts(&args, &cmd.word_metadata) {
+        let command_name = cmd.words.first().map(String::as_str).unwrap_or("declare");
+        let mut args = match self.rewrite_declare_operand_subscripts(
+            &args,
+            &cmd.word_metadata,
+            command_name,
+        ) {
             Ok(args) => args,
             // array_expand_index -> evalexp failure: diagnostic + evalerror
             // abort already raised; GNU discards the rest of the list.
@@ -681,8 +862,13 @@ impl Executor {
             2
         } else {
             let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
-            let mut args = match self.rewrite_declare_operand_subscripts(&args, &cmd.word_metadata)
-            {
+            let local_command_name =
+                cmd.words.first().map(String::as_str).unwrap_or("local");
+            let mut args = match self.rewrite_declare_operand_subscripts(
+                &args,
+                &cmd.word_metadata,
+                local_command_name,
+            ) {
                 Ok(args) => args,
                 Err(()) => return Ok(1),
             };

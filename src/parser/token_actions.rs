@@ -286,14 +286,39 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                                 && raw_rhs.starts_with("'(")
                                 && raw_rhs.ends_with(")'")
                             {
-                                // Strip only the outer single quotes; the
-                                // inner double quotes are the element
-                                // grouping the storage parser needs.
-                                let inner = &raw_rhs[1..raw_rhs.len() - 1];
+                                // token.value carries the single-quoted body
+                                // with the lexer's carriers intact (\x1f for
+                                // `$`, \x18 for `"`, ...), so word expansion
+                                // leaves it verbatim. GNU defers the compound
+                                // expansion to declare_builtin ->
+                                // expand_compound_array_assignment
+                                // (arrayfunc.c:557) — after earlier operands
+                                // have bound — so `declare -a a=('x') d='($a)'
+                                // must still see the unexpanded `$a` here. The
+                                // \x03 lead-in inside the parens marks the
+                                // carriers as deferred SYNTAX (the builtin
+                                // decodes them back to real chars and expands)
+                                // rather than escape-produced data.
+                                let inner = token
+                                    .value
+                                    .split_once('=')
+                                    .map(|(_, value)| value)
+                                    .unwrap_or_else(|| &raw_rhs[1..raw_rhs.len() - 1]);
+                                // The protected value may lead with the
+                                // sq-protection tag (\x1c); keep it and mark
+                                // the compound body after it.
+                                let (tag, body) = inner
+                                    .strip_prefix('\u{1c}')
+                                    .map(|body| ("\u{1c}", body))
+                                    .unwrap_or(("", inner));
+                                let deferred = body
+                                    .strip_prefix('(')
+                                    .map(|rest| format!("{tag}(\u{3}{rest}"))
+                                    .unwrap_or_else(|| inner.to_string());
                                 word = format!(
                                     "{lhs}={}{}",
                                     crate::executor::types::COMPOUND_ASSIGNMENT_MARKER,
-                                    inner
+                                    deferred
                                 );
                             }
                         }

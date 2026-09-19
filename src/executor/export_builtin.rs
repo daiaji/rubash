@@ -16,11 +16,14 @@ impl Executor {
         // GNU export.def shares declare.def's operand handling: an
         // `export name[sub]=value` subscript resolves under the same
         // ExpandedOnce (W_ASSIGNMENT -> ASS_NOEXPAND) rules.
-        let args =
-            match self.rewrite_declare_operand_subscripts(&cmd.words[1..], &cmd.word_metadata) {
-                Ok(args) => args,
-                Err(()) => return Ok(1),
-            };
+        let args = match self.rewrite_declare_operand_subscripts(
+            &cmd.words[1..],
+            &cmd.word_metadata,
+            "export",
+        ) {
+            Ok(args) => args,
+            Err(()) => return Ok(1),
+        };
         // Same GNU variables.c:2920-2937 make_variable_value rule as the
         // readonly path: an operand whose target is integer-attributed
         // evaluates the RHS arithmetic (`export i=3+4` binds 7).

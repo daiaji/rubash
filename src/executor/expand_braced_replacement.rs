@@ -46,11 +46,20 @@ impl Executor {
             // sets expand_no_split_dollar_star (subst.c:4487), so inside
             // `${c=${*/}}` with IFS= the join uses IFS[0] (empty), producing
             // `12` instead of `1 2` (exp11.sub).
-            let separator = if var_name == "*"
-                && ASSIGNMENT_RHS.with(|flag| flag.get())
-                && self.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
-            {
-                String::new()
+            let separator = if var_name == "*" {
+                // string_list_pos_params (subst.c:3035-3056): `$*` takes
+                // string_list_dollar_star — IFS[0] join — in every context
+                // except unquoted-with-null-IFS outside a nosplit expansion
+                // (ASSIGNMENT_RHS marks the assignment/`${op=}` contexts
+                // where expand_no_split_dollar_star is set), which takes
+                // string_list_dollar_at.
+                if self.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
+                    && !ASSIGNMENT_RHS.with(|flag| flag.get())
+                {
+                    " ".to_string()
+                } else {
+                    self.ifs_first_char_separator()
+                }
             } else {
                 " ".to_string()
             };

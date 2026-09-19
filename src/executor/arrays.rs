@@ -903,7 +903,7 @@ fn dequote_compound_element_rhs(rhs: &str) -> String {
 /// `'` closes at index 2 and the rest is unquoted text. Inside `'` quotes
 /// a backslash is literal; inside `"` it escapes the next char
 /// (subst.c string_extract_double_quoted).
-fn token_is_fully_quoted(token: &str) -> bool {
+pub(super) fn token_is_fully_quoted(token: &str) -> bool {
     let mut chars = token.char_indices().peekable();
     let Some((_, quote @ ('\'' | '"'))) = chars.next() else {
         return false;
