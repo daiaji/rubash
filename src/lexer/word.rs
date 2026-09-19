@@ -316,6 +316,12 @@ impl<'a> Lexer<'a> {
         let Some(head) = prefix.strip_suffix('=') else {
             return false;
         };
+        // GNU general.c:519 assignment(): `name+=` is an assignment word
+        // (`+` is valid only immediately before the `=`), so `name+=(list)`
+        // opens a compound assignment exactly like `name=(list)`. Strip a
+        // single trailing `+` before validating the head — `a+b=(` still
+        // fails the identifier check because the `+` is not trailing.
+        let head = head.strip_suffix('+').unwrap_or(head);
         // Optional trailing balanced [subscript] before the `=`.
         let head = if head.ends_with(']') {
             let Some(open_rel) = head.rfind('[') else {
