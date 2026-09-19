@@ -983,7 +983,8 @@ impl Executor {
             if pre_existing.iter().any(|existing| existing == &name) {
                 continue;
             }
-            if is_marked_var(&self.env_vars, EXPORTED_VARS, &name) {
+            let was_exported = is_marked_var(&self.env_vars, EXPORTED_VARS, &name);
+            if was_exported {
                 if let Some(value) = self.env_vars.get(&name).cloned() {
                     set_local_export_env_value(&mut self.env_vars, &name, value);
                 }
@@ -995,6 +996,12 @@ impl Executor {
             // makes ${X-unset} report unset until the frame returns).
             self.shell_state.variables.remove(&name);
             set_var_attrs(&mut self.env_vars, &name, VarAttrs::default());
+            // GNU variables.c:2729 (make_local_variable): a non-inheriting
+            // local still inherits the export attribute — and only that
+            // attribute — from the variable it shadows.
+            if was_exported {
+                mark_env_name(&mut self.env_vars, EXPORTED_VARS, &name);
+            }
         }
     }
 

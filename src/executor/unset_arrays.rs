@@ -365,23 +365,35 @@ impl Executor {
         let Some(scope_index) = self.visible_local_scope_index(name) else {
             return false;
         };
-        if scope_index >= current_scope_index {
-            return false;
-        }
-        // GNU variables.c:3984-4001 makunbound: with localvar_unset, an
-        // outer-context local is reinserted as an invisible, unset local in
-        // its own context — the live binding disappears (lookups report
-        // unset instead of falling through to the outer binding) while the
-        // frame's saved snapshot still restores the pre-local value at
-        // function end, and the local attribute survives a later
-        // reassignment. The frame snapshots stay untouched.
-        if crate::builtins::shopt::option_enabled(&self.env_vars, "localvar_unset") {
+        // GNU variables.c:3984-4001 makunbound: unsetting a local in its own
+        // context (context == variable_context) — or, with localvar_unset,
+        // an outer-context local — disposes the value and reinserts the
+        // binding invisible in its owning context. The live binding
+        // disappears (lookups report unset instead of falling through to the
+        // outer binding), `declare -p` still reports the name's attributes,
+        // the local attribute survives a later reassignment, and the frame's
+        // saved snapshot still restores the pre-local value at function
+        // end. The frame snapshots stay untouched.
+        if scope_index == current_scope_index
+            || crate::builtins::shopt::option_enabled(&self.env_vars, "localvar_unset")
+        {
+            // GNU resets the attributes wholesale — att_local +
+            // att_invisible — preserving att_exported only when the local
+            // came from a temporary environment (exported_p && tempvar_p).
+            // A live tempenv binding of the same name is the provenance
+            // marker (`v=t f` where f runs `local v=x` keeps -x; an exported
+            // outer variable's local copy does not).
+            let keep_exported = is_marked_var(&self.env_vars, EXPORTED_VARS, name)
+                && self.tempenv_names.iter().any(|tempenv| tempenv == name);
             self.env_vars.remove(name);
             env::remove_var(name);
             self.shell_state.variables.remove(name);
-            // GNU resets the attributes (att_local + att_invisible; exported
-            // kept only for tempvars) — clear the live attribute marks.
-            set_var_attrs(&mut self.env_vars, name, VarAttrs::default());
+            let mut attrs = VarAttrs {
+                declared_unset: true,
+                ..VarAttrs::default()
+            };
+            attrs.exported = keep_exported;
+            set_var_attrs(&mut self.env_vars, name, attrs);
             // GNU variables.c:6205-6217 sv_ignoreeof: unbinding the variable
             // drives the ignoreeof option off.
             if matches!(name, "IGNOREEOF" | "ignoreeof") {
