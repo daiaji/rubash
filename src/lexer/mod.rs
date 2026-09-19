@@ -25,6 +25,7 @@ use continuation::{
 };
 
 pub(crate) use continuation::has_unclosed_command_substitution;
+pub(crate) use skip::skip_parenthesized_unit_corrected;
 use heredoc::heredoc_delimiters;
 use scanner::Lexer;
 

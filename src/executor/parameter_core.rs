@@ -159,24 +159,30 @@ impl Executor {
             // outer pass), never data to hoist — the sentinel would reach
             // the comsub source verbatim. Same invariant as
             // expand_assignment_value_hoisting's `$(`-guard.
-            let needs_hoist = !raw_value.contains("$(") && !raw_value.contains('`');
-            let hoisted = if needs_hoist {
-                hoist_data_single_quotes(&hoist_data_double_quotes(raw_value, DQ_DATA), SQ_DATA)
-            } else {
-                raw_value.to_string()
-            };
-            let expanded = self
-                .expand_embedded_parameters_mut(&format!(
-                    "{}{}",
-                    if compound_assignment {
-                        COMPOUND_ASSIGNMENT_MARKER
-                    } else {
-                        ""
-                    },
-                    hoisted
+            // GNU arrayfunc.c:557 expand_compound_array_assignment tokenizes
+            // the raw parenthesized text first; the preserve variant keeps
+            // element quote syntax through the walker so the storage
+            // tokenizer sees GNU's raw words, covering the `$(`/backtick
+            // bodies the hoist guard excludes (assoc11.sub quote elements,
+            // `d=(x $(echo 'y z') w)` assoc glue).
+            let expanded = if compound_assignment {
+                self.expand_compound_assignment_parameters_mut(&format!(
+                    "{COMPOUND_ASSIGNMENT_MARKER}{raw_value}"
                 ))
-                .replace(DQ_DATA, "\"")
-                .replace(SQ_DATA, "'");
+            } else {
+                let needs_hoist = !raw_value.contains("$(") && !raw_value.contains('`');
+                let hoisted = if needs_hoist {
+                    hoist_data_single_quotes(
+                        &hoist_data_double_quotes(raw_value, DQ_DATA),
+                        SQ_DATA,
+                    )
+                } else {
+                    raw_value.to_string()
+                };
+                self.expand_embedded_parameters_mut(&hoisted)
+                    .replace(DQ_DATA, "\"")
+                    .replace(SQ_DATA, "'")
+            };
             if !expanded.contains('=')
                 && tilde_expand::assignment_value_needs_tilde_expansion(raw_value, true)
                 && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")

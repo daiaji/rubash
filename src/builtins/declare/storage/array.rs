@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use super::{
-    eval_arith_value, parse_array_tokens, parse_array_words, split_storage_words,
-    unquote_storage_value,
+    eval_arith_value, parse_array_tokens, parse_array_words, split_indexed_tagged_token,
+    split_storage_words, unquote_storage_value,
 };
 use crate::executor::glob::{pathname_expand_word, PathnameExpansion};
 
@@ -42,7 +42,10 @@ pub(in crate::builtins::declare) fn append_array_value(
         .unwrap_or(0);
     let scalar_append = !value.starts_with('(');
 
-    for token in parse_array_tokens(value) {
+    for token in parse_array_tokens(value)
+        .into_iter()
+        .flat_map(|token| split_indexed_tagged_token(&token))
+    {
         // GNU arrayfunc.c:753 assign_compound_array_list: only words with
         // the W_ASSIGNMENT flag (set during parsing) are checked for
         // [subscript]=value form. Words produced by field-splitting an

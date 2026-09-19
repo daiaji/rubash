@@ -859,7 +859,10 @@ fn skip_backtick_corrected(chars: &[char], mut index: usize) -> Option<usize> {
 /// the index of the opening `(` (the one right after `$`), return the index
 /// past the matching `)` or `None` if unbalanced.  Uses the corrected
 /// `update_command_substitution_case_depth` / `case_pattern_starts_with_esac_rest`.
-fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> Option<usize> {
+pub(crate) fn skip_parenthesized_unit_corrected(
+    chars: &[char],
+    open: usize,
+) -> Option<usize> {
     let mut depth = 0usize;
     let mut index = open;
     let mut single = false;

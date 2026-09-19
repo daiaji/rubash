@@ -225,9 +225,10 @@ fn assoc_token_scan_state(token: &str) -> (usize, bool, bool) {
                     after_subscript = true;
                 }
             }
-            '[' if !in_single && !in_double && !subscript_open && !after_subscript => {
-                subscript_open = true;
-            }
+            // A `[` only opens a subscript at word start
+            // (arrayfunc.c assign_compound_array_list): a bare `[` inside a
+            // k/v-pair word is data, not an unclosed subscript — `foo[bar`
+            // must not glue the following words into one key (assoc11.sub).
             _ => {}
         }
     }

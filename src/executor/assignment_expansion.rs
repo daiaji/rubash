@@ -653,20 +653,34 @@ impl Executor {
             const DATA_ESCAPED_DQUOTE: &str = "\u{E104}";
             const DATA_ESCAPED_SQUOTE: &str = "\u{E105}";
             const DATA_ESCAPED_BACKSLASH: &str = "\u{E106}";
+            // In preserve mode the walker emits escape pairs verbatim with
+            // quote-context awareness, so hoisting `\X` here is both
+            // redundant and wrong: a context-blind `.replace("\\'", ..)`
+            // eats the backslash inside the single-quoted element `'\'`
+            // and leaves an unclosed quote that swallows the rest of the
+            // list (assoc11.sub). Only the \x17/\x18 quote sentinels still
+            // need hoisting for this path.
             let hoisted_value = if compound_paren_value {
                 value
                     .replace('\x17', DATA_SINGLE_QUOTE)
                     .replace('\x18', DATA_DOUBLE_QUOTE)
-                    .replace("\\\\", DATA_ESCAPED_BACKSLASH)
-                    .replace("\\`", DATA_BACKTICK)
-                    .replace("\\\"", DATA_ESCAPED_DQUOTE)
-                    .replace("\\'", DATA_ESCAPED_SQUOTE)
             } else {
                 value
                     .replace('\x17', DATA_SINGLE_QUOTE)
                     .replace('\x18', DATA_DOUBLE_QUOTE)
             };
-            let expanded_value = self.expand_embedded_parameters_mut(&hoisted_value);
+            // GNU arrayfunc.c:557 expand_compound_array_assignment tokenizes
+            // the raw parenthesized text first; each element's own quote
+            // syntax must survive the walker so split_storage_words sees the
+            // same words GNU's tokenizer produced. The preserve variant
+            // keeps '...'/"..." delimiters in the output instead of
+            // dequoting them into bare quote data that the re-split would
+            // read back as syntax (assoc11.sub: ('"' dquote "'" squote)).
+            let expanded_value = if compound_paren_value {
+                self.expand_compound_assignment_parameters_mut(&hoisted_value)
+            } else {
+                self.expand_embedded_parameters_mut(&hoisted_value)
+            };
             // A compound assignment never takes a whole-value quote-removal
             // pass: element words carry their own quote structure through the
             // embedded walker, and quotes that patsub replacement produced as
@@ -1458,6 +1472,29 @@ fn split_compound_element_words(value: &str) -> Vec<String> {
                 for _ in 0..rest[..scan.end].chars().count() {
                     chars.next();
                 }
+            }
+            continue;
+        }
+        if ch == '$' && !single && matches!(chars.peek(), Some((_, '('))) {
+            // GNU parse.y:4473 parse_comsub: the $(...) body is scanned by
+            // shell_getc under its own quoting state, so quotes inside the
+            // command substitution neither split the element nor leak into
+            // the element-level quote state (assoc11.sub: the ' inside
+            // $(echo 'foo[bar') must not swallow the following words).
+            token.push(ch);
+            let rest = &value[offset + 1..];
+            let rest_chars: Vec<char> = rest.chars().collect();
+            if let Some(end) =
+                crate::lexer::skip_parenthesized_unit_corrected(&rest_chars, 0)
+            {
+                let unit: String = rest_chars[..end].iter().collect();
+                token.push_str(&unit);
+                for _ in 0..end {
+                    chars.next();
+                }
+            } else {
+                token.push('(');
+                chars.next();
             }
             continue;
         }

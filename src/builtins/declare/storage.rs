@@ -6,7 +6,9 @@ pub(super) use array::{append_array_value, format_indexed_array_storage, indexed
 pub(super) use assoc::{
     append_assoc_value, format_assoc_storage, parse_assoc_words, quote_assoc_key,
 };
-pub(super) use words::{parse_array_tokens, split_storage_words, unquote_storage_value};
+pub(super) use words::{
+    parse_array_tokens, split_indexed_tagged_token, split_storage_words, unquote_storage_value,
+};
 
 pub(super) fn parse_single_element_array(value: &str) -> Option<&str> {
     value.strip_prefix('(')?.strip_suffix(')')

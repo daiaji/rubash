@@ -180,6 +180,7 @@ use alias_helpers::*;
 use assignment_helpers::*;
 // Shared with builtins::declare for `declare -p` assoc rendering.
 pub(crate) use assignment_helpers::{assoc_nbuckets, bash_assoc_order};
+pub(crate) use embedded_mutations::COMPOUND_EXPANSION_WS_TAG;
 use builtin_names::*;
 use command_subst_helpers::*;
 use command_text::*;

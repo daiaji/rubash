@@ -21,7 +21,8 @@ use super::{
     apply_parameter_case_mod, assoc_value_at, eval_arith_value, eval_conditional_arith_value,
     is_marked_var, is_shell_name, parse_indirect_pattern_removal, parse_parameter_case_mod,
     parse_parameter_replacement, parse_parameter_transform, remove_parameter_pattern,
-    split_storage_words, strip_matching_quotes, unquote_storage_value, Executor,
+    split_indexed_tagged_token, split_storage_words, strip_matching_quotes,
+    unquote_storage_value, Executor,
     ParameterTransform, ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
 use crate::lexer::remove_shell_quotes;
@@ -589,6 +590,7 @@ pub(super) fn append_array_value(
     let brace_expand = crate::builtins::set::shell_option_enabled(env_vars, "braceexpand");
     let tokens = array_assignment_tokens(value)
         .into_iter()
+        .flat_map(|token| split_indexed_tagged_token(&token))
         .flat_map(|token| {
             if brace_expand && !token.contains("${") && !token.contains('=') {
                 crate::expand::braces::expand_braces(&token)

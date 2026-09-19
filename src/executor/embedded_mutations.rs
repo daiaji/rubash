@@ -13,11 +13,48 @@ pub(in crate::executor) const QUOTED_NULL_MARKER: char = '\u{E002}';
 // Whitespace that an expansion produced inside a quoted region of an
 // alternate word must survive field splitting (GNU carries CTLESC on
 // quoted expansion results); the \x1c prefix marks it for the splitter.
-fn mark_alternate_whitespace(value: &str) -> String {
+pub(in crate::executor) fn mark_alternate_whitespace(value: &str) -> String {
     let mut marked = String::with_capacity(value.len());
     for ch in value.chars() {
         if matches!(ch, ' ' | '\t' | '\n') {
             marked.push('\x1c');
+        }
+        marked.push(ch);
+    }
+    marked
+}
+
+// GNU arrayfunc.c: an associative compound word is expanded with
+// expand_assignment_string_to_string / expand_subscript_string (line 652,
+// 817, 865), which never field-splits, while indexed elements go through
+// expand_words_no_vars (line 610), which does. In preserve_quotes mode the
+// walker therefore tags whitespace produced by an expansion in an unquoted
+// region: the associative storage pass keeps it glued inside the element
+// and the indexed pass re-splits on it. Alternate rhs words keep their
+// existing quoted-region marking.
+fn expansion_ws_marked(alternate: bool, preserve_quotes: bool, in_double: bool) -> bool {
+    (alternate && in_double) || (preserve_quotes && !in_double)
+}
+
+// The compound tag must NOT be \x1c: that byte is the IFS-protection
+// sentinel (command_prepare.rs mark_literal_ifs_chars /
+// strip_ifs_protection_markers), and the assignment-builtin boundary
+// strips it before the value reaches storage. U+E109 is disjoint from the
+// DATA_* quote sentinels (E101-E108) and survives to split_storage_words,
+// where it glues its whitespace into the element word.
+pub(crate) const COMPOUND_EXPANSION_WS_TAG: char = '\u{E109}';
+
+pub(in crate::executor) fn mark_expansion_whitespace(
+    value: &str,
+    preserve_quotes: bool,
+) -> String {
+    if !preserve_quotes {
+        return mark_alternate_whitespace(value);
+    }
+    let mut marked = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, ' ' | '\t' | '\n') {
+            marked.push(COMPOUND_EXPANSION_WS_TAG);
         }
         marked.push(ch);
     }
@@ -35,7 +72,30 @@ impl Executor {
         context: SubstitutionQuoteContext,
     ) -> String {
         let heredoc = matches!(context, SubstitutionQuoteContext::HereDocument);
-        self.expand_embedded_parameters_mut_inner(word, context, heredoc, false)
+        self.expand_embedded_parameters_mut_inner(word, context, heredoc, false, false)
+    }
+
+    // Compound array assignment RHS (`a=( ... )`): GNU defers expansion to
+    // the per-word pass (arrayfunc.c:557 expand_compound_array_assignment
+    // tokenizes the raw text; each element is then expanded individually),
+    // so quote characters produced by an element's quote removal are DATA
+    // and are never re-scanned as syntax. Rubash expands the whole `( ... )`
+    // body in one pass and re-splits it, which would read a dequoted `"`
+    // back as a delimiter. This variant keeps the element quote syntax in
+    // the output so the storage tokenizer sees the same quoting GNU's raw
+    // tokenization kept (assoc11.sub: ('"' dquote "'" squote) must store
+    // the keys " and ').
+    pub(in crate::executor) fn expand_compound_assignment_parameters_mut(
+        &mut self,
+        word: &str,
+    ) -> String {
+        self.expand_embedded_parameters_mut_inner(
+            word,
+            SubstitutionQuoteContext::Unquoted,
+            false,
+            false,
+            true,
+        )
     }
 
     // Alternate-operator rhs (`${var-word}` word half) expansion: the same
@@ -58,6 +118,7 @@ impl Executor {
             SubstitutionQuoteContext::Unquoted,
             false,
             true,
+            false,
         )
     }
 
@@ -72,6 +133,7 @@ impl Executor {
             SubstitutionQuoteContext::Unquoted,
             true,
             false,
+            false,
         )
     }
 
@@ -81,6 +143,7 @@ impl Executor {
         context: SubstitutionQuoteContext,
         heredoc: bool,
         alternate: bool,
+        preserve_quotes: bool,
     ) -> String {
         self.apply_parameter_assignment_expansions_in_word(word);
         let saved_parameter_state = word_contains_current_shell_command_substitution(word)
@@ -91,9 +154,13 @@ impl Executor {
             context,
             heredoc,
             alternate,
+            preserve_quotes,
         );
         let expanded = if word.contains("$(") || word.contains('`') {
-            if matches!(context, SubstitutionQuoteContext::HereDocument) {
+            if preserve_quotes || matches!(context, SubstitutionQuoteContext::HereDocument) {
+                // Compound RHS keeps escape syntax for the storage
+                // tokenizer; stripping it here would turn escaped data
+                // quotes back into syntax (assoc compound elements).
                 expanded
             } else {
                 unescape_remaining_shell_escapes(&expanded)
@@ -126,6 +193,7 @@ impl Executor {
         context: SubstitutionQuoteContext,
         heredoc: bool,
         alternate: bool,
+        preserve_quotes: bool,
     ) -> String {
         let mut output = String::new();
         let mut chars = word.chars().peekable();
@@ -176,7 +244,10 @@ impl Executor {
                 if matches!(context, SubstitutionQuoteContext::Unquoted) {
                     in_double = !in_double;
                 }
-                output.push('"');
+                // Compound RHS: emit the data-double-quote carrier the
+                // storage tokenizer recognizes instead of a bare quote
+                // that would reopen a quoted span during the re-split.
+                output.push(if preserve_quotes { '\u{e102}' } else { '"' });
                 continue;
             }
 
@@ -202,6 +273,12 @@ impl Executor {
             if !heredoc && matches!(context, SubstitutionQuoteContext::Unquoted) && ch == '"' {
                 let closing = in_double;
                 in_double = !in_double;
+                // Compound RHS: keep the element's quote syntax so the
+                // storage tokenizer splits on GNU's raw tokens.
+                if preserve_quotes {
+                    output.push('"');
+                    continue;
+                }
                 // A double-quoted span whose expansion produced nothing is a
                 // quoted null: "" and $xxx"" become CTLNUL (subst.c
                 // 11841-11847 "What we have is \"\""). Alternate mode only:
@@ -224,6 +301,20 @@ impl Executor {
                 && ch == '\''
                 && !in_double
             {
+                if preserve_quotes {
+                    // Compound RHS: a single-quoted element is literal text
+                    // (GNU tokenizes it before any expansion); keep the
+                    // quote characters so the storage tokenizer sees one
+                    // word exactly like GNU's raw token stream.
+                    output.push('\'');
+                    for quoted_ch in chars.by_ref() {
+                        output.push(quoted_ch);
+                        if quoted_ch == '\'' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 let span_start = output.len();
                 let mut closed = false;
                 for quoted_ch in chars.by_ref() {
@@ -268,6 +359,12 @@ impl Executor {
                     }
                     Some('$') | Some('"') => {
                         let next = chars.next().unwrap();
+                        if preserve_quotes {
+                            // Keep the escape pair verbatim so the storage
+                            // tokenizer sees escaped data rather than a
+                            // quote/dollar that reopens syntax.
+                            output.push('\\');
+                        }
                         output.push(next);
                         continue;
                     }
@@ -278,6 +375,13 @@ impl Executor {
                     }
                     Some('\'') => {
                         chars.next();
+                        if preserve_quotes && !in_double {
+                            // Keep \' verbatim: the data quote must not
+                            // reopen a single-quoted span in the re-split.
+                            output.push('\\');
+                            output.push('\'');
+                            continue;
+                        }
                         if in_double {
                             // GNU dquote rule: a backslash before an
                             // ordinary character is literal data.
@@ -308,6 +412,31 @@ impl Executor {
                     }
                     None => {}
                 }
+            }
+
+            if ch == '\\' && preserve_quotes {
+                // Compound RHS: GNU keeps every escape pair in the token
+                // text until quote removal (parse.y:5368-5397
+                // read_token_word; dequote happens in subst.c:4807
+                // dequote_word). The storage tokenizer + unquote pass are
+                // the same two phases, so copying `\` + next verbatim is
+                // the exact port: \\ stays an escaped backslash instead of
+                // collapsing to a \ that would glue the next word (assoc11
+                // `\\ 5`), and \" / \' / \$ stay data instead of reopening
+                // quote or expansion syntax. Newline joins are the only
+                // pair GNU removes at read time.
+                match chars.peek().copied() {
+                    Some('\n') | Some('\r') => {
+                        chars.next();
+                    }
+                    Some(next) => {
+                        chars.next();
+                        output.push('\\');
+                        output.push(next);
+                    }
+                    None => output.push('\\'),
+                }
+                continue;
             }
 
             if ch == '\\' {
@@ -397,8 +526,8 @@ impl Executor {
                         .expand_command_substitution_mut_typed_with_context(&source, context)
                         .text_lossy();
                     let protected = protect_command_substitution_output(&expanded);
-                    if alternate && in_double {
-                        let value = mark_alternate_whitespace(&protected);
+                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                        let value = mark_expansion_whitespace(&protected, preserve_quotes);
                         if matches!(context, SubstitutionQuoteContext::HereDocument) {
                             output.push_str(&value.replace('\x15', "\x14"));
                         } else {
@@ -436,12 +565,22 @@ impl Executor {
                 }
                 Some('@') => {
                     chars.next();
-                    output.push_str(&self.positional_params.join(" "));
+                    let value = self.positional_params.join(" ");
+                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    } else {
+                        output.push_str(&value);
+                    }
                 }
                 Some('*') => {
                     chars.next();
                     // Bash joins `$*` with the first IFS character (not a space).
-                    output.push_str(&self.positional_params_star_joined());
+                    let value = self.positional_params_star_joined();
+                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    } else {
+                        output.push_str(&value);
+                    }
                 }
                 Some('#') => {
                     chars.next();
@@ -454,7 +593,11 @@ impl Executor {
                 Some('{') => {
                     chars.next();
                     if let Some(value) = self.expand_current_shell_braced_substitution(&mut chars) {
-                        output.push_str(&value);
+                        if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                            output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                        } else {
+                            output.push_str(&value);
+                        }
                     } else if matches!(context, SubstitutionQuoteContext::DoubleQuoted)
                         && self.posix_mode_enabled()
                     {
@@ -472,8 +615,8 @@ impl Executor {
                                         context,
                                     )
                                 });
-                            if alternate && in_double {
-                                output.push_str(&mark_alternate_whitespace(&value));
+                            if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                                output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                             } else {
                                 output.push_str(&value);
                             }
@@ -486,8 +629,8 @@ impl Executor {
                                         context,
                                     )
                                 });
-                            if alternate && in_double {
-                                output.push_str(&mark_alternate_whitespace(&value));
+                            if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                                output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                             } else {
                                 output.push_str(&value);
                             }
@@ -502,8 +645,8 @@ impl Executor {
                                 executor
                                     .expand_word_mut_with_context(&format!("${{{name}}}"), context)
                             });
-                        if alternate && in_double {
-                            output.push_str(&mark_alternate_whitespace(&value));
+                        if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                            output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
                             output.push_str(&value);
                         }
@@ -517,7 +660,12 @@ impl Executor {
                             collect_dollar_paren_arithmetic_expansion(&mut chars);
                         if matched {
                             if let Some(value) = self.eval_arithmetic_expansion_value(&expression) {
-                                output.push_str(&value.to_string());
+                                let value = value.to_string();
+                                if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                                    output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                                } else {
+                                    output.push_str(&value);
+                                }
                             } else {
                                 let actual_fatal =
                                     self.arithmetic_last_error_category.take().is_some();
@@ -558,8 +706,8 @@ impl Executor {
                                             context,
                                         ),
                                     );
-                                    if alternate && in_double {
-                                        output.push_str(&mark_alternate_whitespace(&value));
+                                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                                     } else {
                                         output.push_str(&value);
                                     }
@@ -576,8 +724,8 @@ impl Executor {
                     let value = protect_command_substitution_output(
                         &self.expand_command_substitution_mut_with_context(&source, context),
                     );
-                    if alternate && in_double {
-                        output.push_str(&mark_alternate_whitespace(&value));
+                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                     } else {
                         output.push_str(&value);
                     }
@@ -588,7 +736,12 @@ impl Executor {
                         collect_dollar_bracket_arithmetic_expansion(&mut chars);
                     if matched {
                         if let Some(value) = self.eval_arithmetic_expansion_value(&expression) {
-                            output.push_str(&value.to_string());
+                            let value = value.to_string();
+                            if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                                output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                            } else {
+                                output.push_str(&value);
+                            }
                         }
                     } else {
                         output.push_str("$[");
@@ -600,18 +753,22 @@ impl Executor {
                     let index = first.to_digit(10).unwrap_or(0) as usize;
                     if index == 0 {
                         let value = self.script_name_value();
-                        if alternate && in_double {
-                            output.push_str(&mark_alternate_whitespace(&value));
+                        if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                            output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
                             output.push_str(&value);
                         }
                     } else {
-                        output.push_str(
-                            self.positional_params
-                                .get(index - 1)
-                                .map(String::as_str)
-                                .unwrap_or(""),
-                        );
+                        let value = self
+                            .positional_params
+                            .get(index - 1)
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                            output.push_str(&mark_expansion_whitespace(value, preserve_quotes));
+                        } else {
+                            output.push_str(value);
+                        }
                     }
                 }
                 Some(first) if is_shell_name_start(first) => {
@@ -633,8 +790,8 @@ impl Executor {
                         })
                     {
                         let value = shell_safe_value(&value);
-                        if alternate && in_double {
-                            output.push_str(&mark_alternate_whitespace(&value));
+                        if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                            output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
                             output.push_str(&value);
                         }

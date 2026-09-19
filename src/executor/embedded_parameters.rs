@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::embedded_mutations::mark_expansion_whitespace;
 
 thread_local! {
     static EXPAND_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -9,6 +10,27 @@ const MAX_EXPAND_DEPTH: usize = 50;
 impl Executor {
     pub(in crate::executor) fn expand_embedded_parameters(&self, word: &str) -> String {
         self.expand_embedded_parameters_with_context(word, false)
+    }
+
+    // Compound array assignment RHS (`a=( ... )`): the same preserve-quotes
+    // contract as expand_compound_assignment_parameters_mut — GNU
+    // arrayfunc.c:581 parse_string_to_word_list tokenizes the raw body
+    // first, so element quote syntax must survive expansion for the
+    // storage tokenizer, and expansion-produced whitespace in an unquoted
+    // region is \x1c-tagged (assoc keeps it glued, indexed re-splits).
+    pub(in crate::executor) fn expand_embedded_parameters_compound(&self, word: &str) -> String {
+        self.expand_embedded_parameters_compound_inner(word)
+    }
+
+    fn expand_embedded_parameters_compound_inner(&self, word: &str) -> String {
+        let depth = EXPAND_DEPTH.with(|d| d.get());
+        if depth >= MAX_EXPAND_DEPTH {
+            return word.to_string();
+        }
+        EXPAND_DEPTH.with(|d| d.set(depth + 1));
+        let result = self.expand_embedded_parameters_inner(word, false, false, true);
+        EXPAND_DEPTH.with(|d| d.set(depth));
+        result
     }
 
     // Variant for `${var-word}` style alternate words: whitespace that was
@@ -37,7 +59,7 @@ impl Executor {
             return word.to_string();
         }
         EXPAND_DEPTH.with(|d| d.set(depth + 1));
-        let result = self.expand_embedded_parameters_inner(word, heredoc, protect_ifs);
+        let result = self.expand_embedded_parameters_inner(word, heredoc, protect_ifs, false);
         EXPAND_DEPTH.with(|d| d.set(depth));
         result
     }
@@ -47,6 +69,7 @@ impl Executor {
         word: &str,
         heredoc: bool,
         protect_ifs: bool,
+        preserve_quotes: bool,
     ) -> String {
         // TODO(subst.c/subst.h): This is a narrow parameter-expansion subset.
         // GNU Bash handles quoting state, operators like ${name:-word},
@@ -105,6 +128,24 @@ impl Executor {
             // case falls through to the default push below. Heredoc text
             // treats quotes as data.
             if ch == '\\' && !heredoc {
+                if preserve_quotes {
+                    // Compound RHS: keep the escape pair verbatim so the
+                    // storage tokenizer + unquote pass apply GNU's
+                    // tokenize-then-dequote order (parse.y:5368-5397,
+                    // subst.c:4807). Newline joins are dropped at read time.
+                    match chars.peek().copied() {
+                        Some('\n') | Some('\r') => {
+                            chars.next();
+                        }
+                        Some(next) => {
+                            chars.next();
+                            output.push('\\');
+                            output.push(next);
+                        }
+                        None => output.push('\\'),
+                    }
+                    continue;
+                }
                 match chars.peek() {
                     Some('\'') if !in_double => {
                         chars.next();
@@ -126,10 +167,26 @@ impl Executor {
             // treats quotes as data.
             if !heredoc && ch == '"' {
                 in_double = !in_double;
+                if preserve_quotes {
+                    output.push('"');
+                }
                 continue;
             }
 
             if !heredoc && ch == '\'' && !in_double {
+                if preserve_quotes {
+                    // A single-quoted element is literal text in GNU's raw
+                    // token stream; keep the quote characters so the
+                    // storage tokenizer sees the same word boundaries.
+                    output.push('\'');
+                    for quoted_ch in chars.by_ref() {
+                        output.push(quoted_ch);
+                        if quoted_ch == '\'' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 for quoted_ch in chars.by_ref() {
                     if quoted_ch == '\'' {
                         break;
@@ -144,7 +201,12 @@ impl Executor {
 
             if ch == '\\' && chars.peek() == Some(&'`') {
                 chars.next();
-                output.push('\x1a');
+                if preserve_quotes {
+                    output.push('\\');
+                    output.push('`');
+                } else {
+                    output.push('\x1a');
+                }
                 continue;
             }
 
@@ -189,11 +251,16 @@ impl Executor {
                     source.push(source_ch);
                 }
                 if closed {
-                    output.push_str(&protect_command_substitution_output(
+                    let value = protect_command_substitution_output(
                         &self.expand_command_substitution(&decode_backtick_substitution_source(
                             &source,
                         )),
-                    ));
+                    );
+                    if preserve_quotes && !in_double {
+                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    } else {
+                        output.push_str(&value);
+                    }
                 } else {
                     output.push('`');
                     output
@@ -222,11 +289,21 @@ impl Executor {
                 }
                 Some('@') => {
                     chars.next();
-                    output.push_str(&self.positional_params.join(" "));
+                    let value = self.positional_params.join(" ");
+                    if preserve_quotes && !in_double {
+                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    } else {
+                        output.push_str(&value);
+                    }
                 }
                 Some('*') => {
                     chars.next();
-                    output.push_str(&self.positional_params_star_joined());
+                    let value = self.positional_params_star_joined();
+                    if preserve_quotes && !in_double {
+                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    } else {
+                        output.push_str(&value);
+                    }
                 }
                 Some('#') => {
                     chars.next();
@@ -239,7 +316,12 @@ impl Executor {
                 Some('{') => {
                     chars.next();
                     let name = collect_braced_parameter_name(&mut chars);
-                    output.push_str(&self.expand_word(&format!("${{{name}}}")));
+                    let value = self.expand_word(&format!("${{{name}}}"));
+                    if preserve_quotes && !in_double {
+                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    } else {
+                        output.push_str(&value);
+                    }
                 }
                 Some('(') => {
                     chars.next();
@@ -268,7 +350,12 @@ impl Executor {
                         let (value, actual_category) =
                             eval_conditional_arith_value_categorized(&expression, &self.env_vars);
                         if let Some(value) = value {
-                            output.push_str(&value.to_string());
+                            let value = value.to_string();
+                            if preserve_quotes && !in_double {
+                                output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                            } else {
+                                output.push_str(&value);
+                            }
                         } else {
                             self.arithmetic_last_error_category.set(actual_category);
                             // Bash reports arithmetic expansion errors
@@ -355,9 +442,14 @@ impl Executor {
                             _ => source.push(source_ch),
                         }
                     }
-                    output.push_str(&protect_command_substitution_output(
+                    let value = protect_command_substitution_output(
                         &self.expand_command_substitution(&source),
-                    ));
+                    );
+                    if preserve_quotes && !in_double {
+                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    } else {
+                        output.push_str(&value);
+                    }
                 }
                 Some('[') => {
                     chars.next();
@@ -386,7 +478,12 @@ impl Executor {
                         if let Some(value) =
                             eval_conditional_arith_value(&expression, &self.env_vars)
                         {
-                            output.push_str(&value.to_string());
+                            let value = value.to_string();
+                            if preserve_quotes && !in_double {
+                                output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                            } else {
+                                output.push_str(&value);
+                            }
                         }
                     } else {
                         output.push_str("$[");
@@ -399,12 +496,16 @@ impl Executor {
                     if index == 0 {
                         output.push_str(&self.script_name_value());
                     } else {
-                        output.push_str(
-                            self.positional_params
-                                .get(index - 1)
-                                .map(String::as_str)
-                                .unwrap_or(""),
-                        );
+                        let value = self
+                            .positional_params
+                            .get(index - 1)
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        if preserve_quotes && !in_double {
+                            output.push_str(&mark_expansion_whitespace(value, preserve_quotes));
+                        } else {
+                            output.push_str(value);
+                        }
                     }
                 }
                 Some(first) if is_shell_name_start(first) => {
@@ -423,6 +524,8 @@ impl Executor {
                         let value = shell_safe_value(&value);
                         if heredoc {
                             output.push_str(&protect_command_substitution_output(&value));
+                        } else if preserve_quotes && !in_double {
+                            output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
                             output.push_str(&value);
                         }

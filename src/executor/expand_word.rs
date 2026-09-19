@@ -233,7 +233,15 @@ impl Executor {
             };
             return format!("{name}={marker}{expanded}");
         }
-        let expanded = self.expand_embedded_parameters(value);
+        // GNU arrayfunc.c:557 expand_compound_array_assignment tokenizes the
+        // raw parenthesized text first; the preserve variant keeps element
+        // quote syntax so the storage tokenizer sees GNU's raw words
+        // (assoc11.sub quote elements, d=(x $(echo 'y z') w) assoc glue).
+        let expanded = if compound_assignment {
+            self.expand_embedded_parameters_compound(value)
+        } else {
+            self.expand_embedded_parameters(value)
+        };
         let expanded = if quoted {
             expanded.replace('\x11', "")
         } else {

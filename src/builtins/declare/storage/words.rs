@@ -47,6 +47,16 @@ impl Iterator for StorageWordIter<'_> {
                 escaped = true;
                 continue;
             }
+            // Expansion-produced whitespace tagged by the compound walker
+            // (embedded_mutations expansion_ws_marked): glue the marker and
+            // its whitespace into the word so assoc kv-pairs keep them;
+            // indexed callers re-split on the marker. The \x1c
+            // IFS-protection sentinel takes the same glued form here.
+            if ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG {
+                word.push(ch);
+                escaped = true;
+                continue;
+            }
             if ch == '\'' && !in_double {
                 in_single = !in_single;
                 word.push(ch);
@@ -102,7 +112,9 @@ pub(in crate::builtins::declare) fn unquote_storage_value(value: &str) -> String
         if escaped {
             decoded.push('\\');
         }
-        return decoded;
+        // \x1c is the expansion-whitespace tag (expansion_ws_marked): the
+        // whitespace it precedes is data, the tag itself is not.
+        return decoded.replace('\x1c', "").replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "");
     };
 
     let mut unquoted = String::new();
@@ -120,7 +132,7 @@ pub(in crate::builtins::declare) fn unquote_storage_value(value: &str) -> String
     if escaped {
         unquoted.push('\\');
     }
-    unquoted
+    unquoted.replace('\x1c', "").replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
 }
 
 fn unquote_ansi_c_storage(value: &str) -> String {
@@ -142,6 +154,31 @@ fn unquote_ansi_c_storage(value: &str) -> String {
         }
     }
     output
+}
+
+/// GNU arrayfunc.c:610 expand_words_no_vars field-splits every indexed
+/// compound element's expansion, so the \x1c-tagged expansion whitespace
+/// (embedded_mutations expansion_ws_marked) is a split boundary for
+/// indexed arrays even though the same bytes stay glued for associative
+/// words. Empty fields drop like GNU's field splitting.
+pub(in crate::builtins::declare) fn split_indexed_tagged_token(token: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut chars = token.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if (ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG) && matches!(chars.peek(), Some(' ' | '\t' | '\n')) {
+            chars.next();
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 pub(in crate::builtins::declare) fn parse_array_tokens(value: &str) -> Vec<String> {

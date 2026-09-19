@@ -230,9 +230,10 @@ fn assoc_token_scan_state(token: &str) -> (usize, bool, bool) {
                     after_subscript = true;
                 }
             }
-            '[' if !in_single && !in_double && !subscript_open && !after_subscript => {
-                subscript_open = true;
-            }
+            // A `[` only opens a subscript at word start
+            // (arrayfunc.c assign_compound_array_list): a bare `[` inside a
+            // k/v-pair word is data, not an unclosed subscript — `foo[bar`
+            // must not glue the following words into one key (assoc11.sub).
             _ => {}
         }
     }
@@ -477,6 +478,32 @@ pub(in crate::executor) fn split_storage_words(value: &str) -> impl Iterator<Ite
     }
 }
 
+/// GNU arrayfunc.c:610 expand_words_no_vars field-splits every indexed
+/// compound element's expansion, so the \x1c-tagged expansion whitespace
+/// (embedded_mutations expansion_ws_marked) is a split boundary for
+/// indexed arrays even though the same bytes stay glued for associative
+/// words (arrayfunc.c:652/865 expand_assignment_string_to_string never
+/// field-splits). Empty fields drop like GNU's field splitting.
+pub(in crate::executor) fn split_indexed_tagged_token(token: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut chars = token.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if (ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG) && matches!(chars.peek(), Some(' ' | '\t' | '\n')) {
+            chars.next();
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
 struct StorageWordIter<'a> {
     input: &'a str,
     offset: usize,
@@ -544,6 +571,19 @@ impl Iterator for StorageWordIter<'_> {
                 }
                 continue;
             }
+            // Expansion-produced whitespace the compound walker tagged
+            // (embedded_mutations expansion_ws_marked, GNU arrayfunc.c:652
+            // expand_assignment_string_to_string never field-splits): glue
+            // the marker and its whitespace into the word so assoc kv-pairs
+            // keep them; the indexed callers re-split on the marker. The
+            // \x1c IFS-protection sentinel takes the same glued form here.
+            if ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG {
+                word.push(ch);
+                if let Some((_, next)) = chars.next() {
+                    word.push(next);
+                }
+                continue;
+            }
             // Mirror the declare storage splitter (declare/storage/words.rs):
             // whitespace inside EITHER quote family does not split a
             // compound-assignment word ('a b' stores one element, assoc12
@@ -596,6 +636,11 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
             .replace('\x1a', "`")
             .replace('\x17', "'")
             .replace('\x14', "\\")
+            // The \x1c expansion-whitespace tag (embedded_mutations
+            // expansion_ws_marked) marks the whitespace itself as data;
+            // strip the tag and keep the character it protected.
+            .replace('\x1c', "")
+            .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
             .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
             .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
     }
@@ -680,7 +725,9 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
         // Do NOT restore E010/E011 markers here: they tag data quotes
         // from ANSI-C decoding that must survive remove_shell_quotes.
         // The markers are restored to actual quotes at output time.
-        return decoded;
+        // \x1c is the expansion-whitespace tag (expansion_ws_marked): the
+        // whitespace it precedes is data, the tag itself is not.
+        return decoded.replace('\x1c', "").replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "");
     };
 
     let mut unquoted = String::new();
