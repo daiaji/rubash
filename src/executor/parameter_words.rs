@@ -361,6 +361,13 @@ impl Executor {
             return self.expand_embedded_parameters_mut_with_context(word, context);
         }
 
+        // This `\x1d`-quoted word IS one `${}` fragment: record site [0]
+        // so the `:=`/`-=` operator set-checks dedup subscript side
+        // effects against the pre-scan (SUB_RES_XPASS). An active site
+        // means the enclosing fragment already named it — keep it.
+        let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active())
+            .then(|| crate::executor::expand_braced_indices::SubSiteGuard::new(0));
+
         if let Some((var_name, default)) =
             super::expand_braced_ops::split_once_outside_subscript_str(name, ":-")
         {
@@ -664,10 +671,20 @@ impl Executor {
         // quote context — they are applied later, when the inner command's
         // own words expand (`"x $(printf '%s ' ${v=a\ b})"` assigns `a b`).
         let quoted_word = word.starts_with('\x1d');
+        // When this word IS the `${}` fragment currently being evaluated
+        // (a `${name}` body re-entered through expand_word_mut), its single
+        // `${` occurrence inherits the enclosing fragment's site rather
+        // than re-keying on the synthetic string (SUB_RES_XPASS docs).
+        let inherit_site = braced_parameter_spans_whole_word(word)
+            && crate::executor::expand_braced_indices::sub_site_active();
         // The prefix scanned for quote/CS context always runs from the word
         // start, so state skipped-over bodies (e.g. inside a command
         // substitution) still counts toward the next body's context.
         let mut consumed = 0usize;
+        // Top-level `${` ordinal — the same fragments in the same order as
+        // the expansion walker's `${` arms see them (command-substitution
+        // bodies do not reach either scan's arm).
+        let mut frag_index = 0usize;
         while let Some(rel) = word[consumed..].find("${") {
             let start = consumed + rel;
             let (in_double, inside_cs) = scan_word_prefix_quote_state(&word[..start], quoted_word);
@@ -681,6 +698,12 @@ impl Executor {
                 continue;
             }
             let inner = &word[body_start..body_start + end];
+            let _site_guard = (!inherit_site).then(|| {
+                let guard =
+                    crate::executor::expand_braced_indices::SubSiteGuard::new(frag_index);
+                frag_index += 1;
+                guard
+            });
             self.apply_parameter_assignment_expansion_with_context(inner, in_double);
             consumed = body_start + end + 1;
         }
@@ -714,6 +737,14 @@ impl Executor {
                 return;
             }
             let value = self.expand_assignment_alternate_mut(value, double_quoted);
+            // GNU parameter_brace_assign resolves the subscript AGAIN for
+            // the assignment target (array_expand_index on the
+            // assign_array_element path), distinct from the set-test's
+            // array_variable_part evaluation — so `${b[i++]:=z}` stores
+            // at the SECOND index. The marker path keeps this evaluation
+            // out of the set-test's cross-pass memo.
+            let _assign_site =
+                crate::executor::expand_braced_indices::SubSiteGuard::new(usize::MAX);
             if self.apply_array_element_parameter_assignment(name, value.clone()) {
                 return;
             }
@@ -736,6 +767,9 @@ impl Executor {
                 return;
             }
             let value = self.expand_assignment_alternate_mut(value, double_quoted);
+            // Same assign-target re-evaluation as `:=` above.
+            let _assign_site =
+                crate::executor::expand_braced_indices::SubSiteGuard::new(usize::MAX);
             if self.apply_array_element_parameter_assignment(name, value.clone()) {
                 return;
             }

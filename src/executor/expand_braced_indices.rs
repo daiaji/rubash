@@ -122,6 +122,179 @@ pub(in crate::executor) fn aepv_memo_store(expression: &str, value: Option<Strin
     });
 }
 
+/// Site of one `${}` occurrence: (word-context id, fragment path). The
+/// path is the sequence of `${` ordinals at each scan level — the first
+/// top-level `${` is [0], a `${}` nested inside it at index k is [0,k] —
+/// so two identical `${}` fragments, a nested `${}` inside a body, and a
+/// different word all key differently. GNU param_expand resolves a
+/// subscript once per `${}` expansion (arrayfunc.c:1353
+/// array_expand_index -> evalexp); this site key identifies that
+/// occurrence across the layered validate/pre-scan/real passes, which all
+/// scan the same fragments in the same order.
+type SubSite = (u64, Vec<usize>);
+
+thread_local! {
+    static SUB_RES_XPASS: std::cell::RefCell<Vec<HashMap<(SubSite, String), String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static SUB_IDX_XPASS: std::cell::RefCell<
+        Vec<HashMap<(SubSite, String), crate::executor::subscript_expansion::IndexedSubscript>>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
+    /// Word-context id for site keys — one per command-word expansion (and
+    /// per non-command word entry such as an assignment RHS), so sibling
+    /// words and re-executions of the same text never share entries.
+    static CURRENT_WORD_CTX: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static NEXT_WORD_CTX: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// Fragment path of the `${` currently being evaluated (see SubSite).
+    static CURRENT_FRAG_PATH: std::cell::RefCell<Option<Vec<usize>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Allocate a fresh word-context id for site keys.
+pub(in crate::executor) fn next_word_ctx() -> u64 {
+    NEXT_WORD_CTX.with(|next| {
+        let id = next.get();
+        next.set(id + 1);
+        id
+    })
+}
+
+/// RAII guard installing a word-context id; nested uses restore the
+/// enclosing context on drop.
+pub(in crate::executor) struct WordCtxGuard {
+    saved: u64,
+}
+
+impl WordCtxGuard {
+    /// Install `ctx` unconditionally.
+    pub(in crate::executor) fn new(ctx: u64) -> Self {
+        let saved = CURRENT_WORD_CTX.with(|current| current.replace(ctx));
+        Self { saved }
+    }
+
+    /// Install a fresh context only when none is active — used by word
+    /// expansion entries that may run either top-level or inside an
+    /// already-scoped word (`${}` body expansions keep the parent's).
+    pub(in crate::executor) fn new_if_absent() -> Option<Self> {
+        if CURRENT_WORD_CTX.with(|current| current.get()) != 0 {
+            return None;
+        }
+        Some(Self::new(next_word_ctx()))
+    }
+}
+
+impl Drop for WordCtxGuard {
+    fn drop(&mut self) {
+        CURRENT_WORD_CTX.with(|current| current.set(self.saved));
+    }
+}
+
+/// RAII frame: one cross-pass memo scope per word-expansion entry. The
+/// map lives only while the word is expanded, so a later command (or loop
+/// iteration) re-expanding the same word text cannot hit stale entries.
+pub(in crate::executor) struct SubXpassFrame;
+
+impl SubXpassFrame {
+    pub(in crate::executor) fn new() -> Self {
+        SUB_RES_XPASS.with(|maps| maps.borrow_mut().push(HashMap::new()));
+        SUB_IDX_XPASS.with(|maps| maps.borrow_mut().push(HashMap::new()));
+        Self
+    }
+}
+
+impl Drop for SubXpassFrame {
+    fn drop(&mut self) {
+        SUB_RES_XPASS.with(|maps| {
+            maps.borrow_mut().pop();
+        });
+        SUB_IDX_XPASS.with(|maps| {
+            maps.borrow_mut().pop();
+        });
+    }
+}
+
+/// RAII guard extending the current fragment path with the `${` ordinal
+/// `frag_index` within the scan that found it, for the duration of that
+/// fragment's evaluation.
+pub(in crate::executor) struct SubSiteGuard {
+    saved: Option<Vec<usize>>,
+}
+
+impl SubSiteGuard {
+    pub(in crate::executor) fn new(frag_index: usize) -> Self {
+        let saved = CURRENT_FRAG_PATH.with(|path| {
+            let mut path = path.borrow_mut();
+            let saved = path.clone();
+            match path.as_mut() {
+                Some(current) => current.push(frag_index),
+                None => *path = Some(vec![frag_index]),
+            }
+            saved
+        });
+        Self { saved }
+    }
+}
+
+impl Drop for SubSiteGuard {
+    fn drop(&mut self) {
+        CURRENT_FRAG_PATH.with(|path| {
+            *path.borrow_mut() = self.saved.clone();
+        });
+    }
+}
+
+pub(in crate::executor) fn sub_site_active() -> bool {
+    CURRENT_FRAG_PATH.with(|path| path.borrow().is_some())
+}
+
+pub(in crate::executor) fn sub_site_key(text: &str) -> Option<(SubSite, String)> {
+    let ctx = CURRENT_WORD_CTX.with(|current| current.get());
+    if ctx == 0 {
+        return None;
+    }
+    CURRENT_FRAG_PATH
+        .with(|path| path.borrow().clone())
+        .map(|path| ((ctx, path), text.to_string()))
+}
+
+pub(in crate::executor) fn sub_res_lookup(key: &(SubSite, String)) -> Option<String> {
+    SUB_RES_XPASS.with(|maps| {
+        maps.borrow()
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(key).cloned())
+    })
+}
+
+pub(in crate::executor) fn sub_res_store(key: (SubSite, String), resolved: String) {
+    SUB_RES_XPASS.with(|maps| {
+        if let Some(frame) = maps.borrow_mut().last_mut() {
+            frame.insert(key, resolved);
+        }
+    });
+}
+
+pub(in crate::executor) fn sub_idx_lookup(
+    key: &(SubSite, String),
+) -> Option<crate::executor::subscript_expansion::IndexedSubscript> {
+    SUB_IDX_XPASS.with(|maps| {
+        maps.borrow()
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(key).copied())
+    })
+}
+
+pub(in crate::executor) fn sub_idx_store(
+    key: (SubSite, String),
+    result: crate::executor::subscript_expansion::IndexedSubscript,
+) {
+    SUB_IDX_XPASS.with(|maps| {
+        if let Some(frame) = maps.borrow_mut().last_mut() {
+            frame.insert(key, result);
+        }
+    });
+}
+
 impl Executor {
     /// Apply side-effect writes from arithmetic evaluation in array
     /// subscripts (e.g. `count++` in `${arr[$((count++))]}`) to the real

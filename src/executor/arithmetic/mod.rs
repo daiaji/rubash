@@ -387,6 +387,21 @@ impl Executor {
         &mut self,
         resolved: &str,
     ) -> Option<i128> {
+        // Same resolved text at the same `${}` site already produced its
+        // index (and its side effects) in an earlier pass; GNU's
+        // array_expand_index evaluates it once.
+        let memo_key = crate::executor::expand_braced_indices::sub_site_key(resolved);
+        if let Some(hit) = memo_key
+            .as_ref()
+            .and_then(crate::executor::expand_braced_indices::sub_idx_lookup)
+        {
+            return match hit {
+                crate::executor::subscript_expansion::IndexedSubscript::Index(index) => {
+                    Some(index)
+                }
+                _ => None,
+            };
+        }
         self.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
@@ -422,6 +437,17 @@ impl Executor {
         self.report_arithmetic_readonly_error();
         self.flush_arith_diags(None);
         sync_arith_writes_to_shell_state(self);
+        if let Some(key) = memo_key {
+            crate::executor::expand_braced_indices::sub_idx_store(
+                key,
+                match value {
+                    Some(index) => {
+                        crate::executor::subscript_expansion::IndexedSubscript::Index(index)
+                    }
+                    None => crate::executor::subscript_expansion::IndexedSubscript::Error,
+                },
+            );
+        }
         value
     }
 
@@ -985,6 +1011,26 @@ pub(crate) fn eval_conditional_arith_value_categorized(
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     let mut env_vars = env_vars.clone();
     eval_mutable_arith_result(value, &mut env_vars, None, false)
+}
+
+/// `eval_conditional_arith_value_categorized` plus the write-capture of
+/// `eval_conditional_arith_value_with_writes`: `&self` arithmetic
+/// expansions (`$((i++))` inside a `${}` body or array subscript) still
+/// have GNU-visible side effects, so the deltas are queued for the
+/// mutable caller to apply.
+pub(crate) fn eval_conditional_arith_value_categorized_with_writes(
+    value: &str,
+    env_vars: &HashMap<String, String>,
+) -> (Option<i128>, Vec<(String, String)>, Option<ArithmeticErrorCategory>) {
+    let mut cloned = env_vars.clone();
+    let (result, category) = eval_mutable_arith_result(value, &mut cloned, None, false);
+    let writes = cloned
+        .iter()
+        .filter(|(name, _)| name.as_str() != "__RUBASH_ARITH_SUBSCRIPT_EXPR")
+        .filter(|(name, new_value)| env_vars.get(name.as_str()) != Some(new_value))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    (result, writes, category)
 }
 
 pub(super) fn arithmetic_unbound_variable(

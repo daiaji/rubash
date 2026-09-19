@@ -133,14 +133,47 @@ impl Executor {
     ) -> String {
         match source {
             SubscriptSource::Protected(text) => text.to_string(),
-            SubscriptSource::Raw(raw) => self.expand_subscript_string(raw),
+            SubscriptSource::Raw(raw) => {
+                // expand_subscript_string runs expansion side effects
+                // (`$((i++))`, `$(...)`): dedup repeated resolves of the
+                // same `${}` fragment across the validate/pre-scan/real
+                // passes (SUB_RES_XPASS docs).
+                let Some(key) =
+                    crate::executor::expand_braced_indices::sub_site_key(raw)
+                else {
+                    return self.expand_subscript_string(raw);
+                };
+                if let Some(hit) =
+                    crate::executor::expand_braced_indices::sub_res_lookup(&key)
+                {
+                    return hit;
+                }
+                let resolved = self.expand_subscript_string(raw);
+                crate::executor::expand_braced_indices::sub_res_store(key, resolved.clone());
+                resolved
+            }
             SubscriptSource::ExpandedOnce(text) => {
                 if crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once") {
                     // VA_NOEXPAND / ASS_NOEXPAND: the first expansion was the
                     // word expansion; the consumer uses the text verbatim.
                     text.to_string()
                 } else {
-                    self.expand_subscript_string(text)
+                    let Some(key) =
+                        crate::executor::expand_braced_indices::sub_site_key(text)
+                    else {
+                        return self.expand_subscript_string(text);
+                    };
+                    if let Some(hit) =
+                        crate::executor::expand_braced_indices::sub_res_lookup(&key)
+                    {
+                        return hit;
+                    }
+                    let resolved = self.expand_subscript_string(text);
+                    crate::executor::expand_braced_indices::sub_res_store(
+                        key,
+                        resolved.clone(),
+                    );
+                    resolved
                 }
             }
         }
@@ -162,13 +195,26 @@ impl Executor {
         if resolved.is_empty() {
             return IndexedSubscript::Empty;
         }
-        match self.eval_indexed_subscript_expression(&resolved) {
+        // The same `${}` fragment is re-checked by layered passes; GNU's
+        // single array_expand_index evaluates the resolved text once.
+        let memo_key = crate::executor::expand_braced_indices::sub_site_key(&resolved);
+        if let Some(hit) = memo_key
+            .as_ref()
+            .and_then(crate::executor::expand_braced_indices::sub_idx_lookup)
+        {
+            return hit;
+        }
+        let result = match self.eval_indexed_subscript_expression(&resolved) {
             Some(index) => IndexedSubscript::Index(index),
             None => {
                 self.report_indexed_subscript_error(&resolved);
                 IndexedSubscript::Error
             }
+        };
+        if let Some(key) = memo_key {
+            crate::executor::expand_braced_indices::sub_idx_store(key, result);
         }
+        result
     }
 
     /// `&self` variant of [`Executor::eval_indexed_subscript`] for the
@@ -186,6 +232,15 @@ impl Executor {
         if resolved.is_empty() {
             return IndexedSubscript::Empty;
         }
+        // Same single-evaluation dedup as eval_indexed_subscript: the
+        // layered `${}` passes re-resolve the identical site+text.
+        let memo_key = crate::executor::expand_braced_indices::sub_site_key(&resolved);
+        if let Some(hit) = memo_key
+            .as_ref()
+            .and_then(crate::executor::expand_braced_indices::sub_idx_lookup)
+        {
+            return hit;
+        }
         let overlaid =
             crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
                 &self.env_vars,
@@ -195,7 +250,7 @@ impl Executor {
             crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
                 .with(|pending| pending.borrow_mut().extend(writes));
         }
-        match result {
+        let result = match result {
             Some(index) => IndexedSubscript::Index(index),
             None => {
                 self.report_indexed_subscript_error(&resolved);
@@ -213,7 +268,11 @@ impl Executor {
                 self.arithmetic_fatal_error.set(true);
                 IndexedSubscript::Error
             }
+        };
+        if let Some(key) = memo_key {
+            crate::executor::expand_braced_indices::sub_idx_store(key, result);
         }
+        result
     }
 
     /// GNU `test -v name[sub]` / `[ -v name[sub] ]` / `printf -v name[sub]` /

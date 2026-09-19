@@ -525,6 +525,14 @@ impl Executor {
     }
 
     fn expand_assignment_value_inner(&mut self, name: &str, value: &str) -> String {
+        // One cross-pass subscript-eval memo scope per assignment value —
+        // `${a[i++]:=x}` on an RHS is one GNU evaluation across the
+        // pre-scan and the expansion below. Its own word context keeps
+        // the RHS's fragment sites distinct from the command words'.
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new(
+            crate::executor::expand_braced_indices::next_word_ctx(),
+        );
         // The verbatim single-element fast path is only for storage-shaped
         // values without expansions: a compound value containing a
         // parameter expansion (e.g. (${!xx})) must reach the compound

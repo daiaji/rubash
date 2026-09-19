@@ -11,6 +11,7 @@ mod upstream_scripts;
 use arithmetic::{
     arithmetic_division_by_zero_token, arithmetic_unbound_variable, eval_arith_value,
     eval_conditional_arith_value, eval_conditional_arith_value_categorized,
+    eval_conditional_arith_value_categorized_with_writes,
     eval_conditional_arith_value_with_writes,
 };
 

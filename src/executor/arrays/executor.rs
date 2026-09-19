@@ -147,29 +147,51 @@ impl Executor {
             .strip_prefix("$((")
             .is_some_and(|rest| rest.strip_suffix("))").is_some())
         {
-            let expr = key
-                .strip_prefix("$((")
-                .unwrap()
-                .strip_suffix("))")
-                .unwrap()
-                .trim();
-            // Still expand special parameters ($#, $-) inside the expression.
-            let expr = expr
-                .replace("$#", &self.positional_params.len().to_string())
-                .replace("$-", "0");
-            let overlaid =
-                crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
-                    &self.env_vars,
-                );
-            let (result, writes) = eval_conditional_arith_value_with_writes(&expr, &overlaid);
-            if !writes.is_empty() {
-                crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES.with(|w| {
-                    w.borrow_mut().extend(writes);
-                });
-            }
-            match result {
-                Some(v) => v.to_string(),
-                None => return None,
+            // The resolved subscript text dedups across the layered `${}`
+            // passes (SUB_RES_XPASS): the `:=` pre-scan, the assignment
+            // apply, and the real expansion all resolve this same raw key.
+            let memo_key =
+                crate::executor::expand_braced_indices::sub_site_key(key);
+            if let Some(hit) = memo_key
+                .as_ref()
+                .and_then(crate::executor::expand_braced_indices::sub_res_lookup)
+            {
+                hit
+            } else {
+                let expr = key
+                    .strip_prefix("$((")
+                    .unwrap()
+                    .strip_suffix("))")
+                    .unwrap()
+                    .trim();
+                // Still expand special parameters ($#, $-) inside the expression.
+                let expr = expr
+                    .replace("$#", &self.positional_params.len().to_string())
+                    .replace("$-", "0");
+                let overlaid =
+                    crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
+                        &self.env_vars,
+                    );
+                let (result, writes) =
+                    eval_conditional_arith_value_with_writes(&expr, &overlaid);
+                if !writes.is_empty() {
+                    crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES.with(|w| {
+                        w.borrow_mut().extend(writes);
+                    });
+                }
+                match result {
+                    Some(v) => {
+                        let resolved = v.to_string();
+                        if let Some(key) = memo_key {
+                            crate::executor::expand_braced_indices::sub_res_store(
+                                key,
+                                resolved.clone(),
+                            );
+                        }
+                        resolved
+                    }
+                    None => return None,
+                }
             }
         } else {
             strip_matching_quotes(&self.expand_arithmetic_special_parameters(key)).to_string()

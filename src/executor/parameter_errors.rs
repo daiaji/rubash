@@ -182,19 +182,27 @@ impl Executor {
             };
             let inner = &after_start[..end];
             if let Some((name, require_non_empty)) = parse_parameter_assignment_operator(inner) {
-                if self.parameter_assignment_required(name, require_non_empty) {
-                    if name.parse::<usize>().is_ok_and(|index| index > 0) {
+                // GNU only reports when the assignment is actually
+                // attempted against an unassignable target — check the
+                // (subscript-free) target first so `${a[$((i++))]:=x}` on
+                // a normal array does not evaluate the subscript here at
+                // all; param_expand's single array_expand_index does it
+                // once during the real expansion.
+                let is_positional = name.parse::<usize>().is_ok_and(|index| index > 0);
+                let target = parse_array_subscript(name)
+                    .map(|(array_name, _)| array_name.to_string())
+                    .unwrap_or_else(|| {
+                        self.nameref_target_name(name)
+                            .unwrap_or_else(|| name.to_string())
+                    });
+                let readonly = is_marked_var(&self.env_vars, READONLY_VARS, &target);
+                if (is_positional || readonly)
+                    && self.parameter_assignment_required(name, require_non_empty)
+                {
+                    if is_positional {
                         return Some((format!("${name}"), "cannot assign in this way"));
                     }
-                    let target = parse_array_subscript(name)
-                        .map(|(array_name, _)| array_name.to_string())
-                        .unwrap_or_else(|| {
-                            self.nameref_target_name(name)
-                                .unwrap_or_else(|| name.to_string())
-                        });
-                    if is_marked_var(&self.env_vars, READONLY_VARS, &target) {
-                        return Some((target, "readonly variable"));
-                    }
+                    return Some((target, "readonly variable"));
                 }
             } else if let Some((name, require_non_empty)) = parse_special_assignment_operator(inner)
             {

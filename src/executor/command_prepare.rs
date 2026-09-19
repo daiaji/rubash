@@ -568,6 +568,14 @@ impl Executor {
         word: &str,
         raw: Option<&str>,
     ) -> Vec<String> {
+        // One cross-pass subscript-eval memo scope per command word —
+        // covers this pre-scan and the real expansion below so one `${}`
+        // fragment's subscript side effects run once (GNU param_expand).
+        // The word-context id keys the fragment sites for this word.
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new(
+            crate::executor::expand_braced_indices::next_word_ctx(),
+        );
         // Assignment operators inside parameter expansions take effect at
         // the point where their word is expanded. Applying them to every
         // command word up front changes Bash's left-to-right semantics.

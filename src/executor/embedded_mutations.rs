@@ -195,6 +195,9 @@ impl Executor {
         let mut output = String::new();
         let mut chars = word.chars().peekable();
         let mut in_double = false;
+        // Top-level `${` ordinal for the cross-pass subscript-eval memo —
+        // matches the pre-scan counter (SUB_RES_XPASS).
+        let mut frag_index = 0usize;
         // Output length when the current double-quoted span opened, for the
         // quoted-null carrier below (alternate mode only).
         let mut dquote_open_len: Option<usize> = None;
@@ -594,6 +597,25 @@ impl Executor {
                     // subscript's side effects run once (AEPV_MEMO).
                     let _memo_frame =
                         crate::executor::expand_braced_indices::AepvMemoFrame::new();
+                    // Record this fragment's site (word pointer + `$`
+                    // offset) so layered re-checks of the same `${}`
+                    // dedup subscript side effects (SUB_RES_XPASS). When
+                    // the walked word IS the `${}` fragment being
+                    // evaluated (a `${name}` body re-walked inside the
+                    // enclosing fragment's site), it inherits that site
+                    // instead of re-keying on the synthetic string.
+                    let whole_braced =
+                        crate::executor::parameter_ops::braced_parameter_spans_whole_word(
+                            word,
+                        ) && crate::executor::expand_braced_indices::sub_site_active();
+                    let this_frag = frag_index;
+                    frag_index += 1;
+                    let _site_guard = (!whole_braced)
+                        .then(|| {
+                            crate::executor::expand_braced_indices::SubSiteGuard::new(
+                                this_frag,
+                            )
+                        });
                     if let Some(value) = self.expand_current_shell_braced_substitution(&mut chars) {
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));

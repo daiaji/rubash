@@ -45,6 +45,8 @@ fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
 
 impl Executor {
     pub(crate) fn expand_word(&self, word: &str) -> String {
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
         if let Some(value) = self.expand_marked_or_special_word(word) {
             return value;
         }
@@ -61,6 +63,15 @@ impl Executor {
             .strip_prefix("${")
             .and_then(|rest| rest.strip_suffix('}'))
         {
+            // When this word IS the `${}` fragment being expanded (no
+            // enclosing fragment site), record site (word, 0) so the
+            // `:=`/`-=` layered re-checks dedup subscript side effects
+            // (SUB_RES_XPASS). An active site means the `${` walker arm
+            // already named this fragment — keep it.
+            let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active())
+                .then(|| {
+                    crate::executor::expand_braced_indices::SubSiteGuard::new(0)
+                });
             return self.expand_braced_parameter_word(word, name);
         }
 

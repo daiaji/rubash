@@ -32,6 +32,13 @@ impl Executor {
         word: &str,
         context: SubstitutionQuoteContext,
     ) -> String {
+        // One cross-pass subscript-eval memo scope per word expansion:
+        // the `:=` pre-scan, assignment apply, and real expansion of the
+        // same `${}` fragment share its single GNU evaluation. `${}` body
+        // expansions reaching here inside an enclosing word keep that
+        // word's context so their nested sites stay under its path.
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
         self.apply_parameter_assignment_expansions_in_word(word);
 
         if let Some(word) = word.strip_prefix('\x1b') {
