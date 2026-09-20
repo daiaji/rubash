@@ -126,6 +126,24 @@ POSIX conformance suite 等一律不用，POSIX 与 GNU 存在分歧，对齐标
 脚本——判定标准仍是与 GNU 5.3.0 输出一致，不是"能跑通"）；④ 补齐第四节数的
 套件缺口（解析器族无专属覆盖）。
 
+## 3.6 双层测试口径（引擎层 + 产品层）
+
+**真正的 shell 层是 niubash**（`D:/repo/niubash-*`，crate `niubash`，依赖
+`rubash = { git = ".../rubash.git", branch = "master" }` + winuxcmd），用户
+摸到的是它。因此：
+
+1. **引擎层**：rubash 二进制跑 83 套件 true-baseline（现行口径）。
+2. **产品层**：niubash 二进制跑同一 83 套件 + niubash 专属回归（其 issue 系列的
+   固化测试）。发布前产品层必须过，因为 CLI 解析、readline、默认值、AI 粘合层
+   完全可能在引擎零差之上引入自己的分歧（实例：niubash#129 脚本模式无条件
+   expand_aliases 是产品层语义 bug，不是引擎的）。
+3. **分层纪律**：任何语义修复落在 rubash 引擎，niubash 保持薄壳——niubash
+   里出现语义补丁即是架构异味，应下沉引擎。
+4. 注意：AGENTS.md "不要用 niubash 做测量"指的是**不要拿它当工具 shell 跑
+   harness**（它 mangle glob/引号），不是"不测它"——它本身是被测对象。
+5. 时序约束：niubash 依赖 rubash master git 分支，因此产品层基线只能在引擎
+   合并后刷新；分支开发期以引擎层基线为准，合并后补产品层。
+
 ## 四、热点文件提示（改动需extra谨慎）
 
 `executor/mod.rs`(677 次)、`command_prepare.rs`(123)、`command_substitution.rs`(98)、
