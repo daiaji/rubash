@@ -227,6 +227,28 @@ stdio 载体路径的接线，需定向探针护航。
 5. 时序约束：niubash 依赖 rubash master git 分支，因此产品层基线只能在引擎
    合并后刷新；分支开发期以引擎层基线为准，合并后补产品层。
 
+### 3.8 引擎去 winux 化（embedding hygiene，2026-09-20 决策）
+
+**动机**：不是为第三方嵌入（大概率没有别家用），而是**引擎里的 winuxsh 痕迹
+刺眼**——产品关切不该污染引擎层，且 `WINUXSH_ROOT` 泄漏进测试环境会作废整轮
+基线（AGENTS.md 已有记录）。**例外**：`bin/bash.rs` 的 bash shim 保留——它
+就是给 AI 调用方用的入口，属有意设计，feature-gate 标注清楚即可。
+
+**清理项**（小批量，随任意批次顺手做）：
+
+1. `public_accessors.rs:110`：删除引擎主动导出 `WINUXSH_ROOT` 的逻辑——env
+   注入是宿主（niubash）的职责，照 `set_elevation_handler` 的 host-injection
+   模式走公开 API。
+2. `init.rs:7` 的 `WINUXSH_SHELL_PATH_STYLE` 特判：改为宿主注入的路径风格
+   配置（或并入现有 posix 判定点）。
+3. `path.rs:96` 环境清单里的 `WINUXSH_ROOT`：随 1 一并移除。
+4. `bin/bash.rs` shim：保留，文件头注明用途（AI invoker 入口，转发到
+   winuxsh.exe/宿主 shell），支持 feature-gate 编译排除。
+
+**相关决策**：winuxcmd 维持 PATH 级集成，不做 FFI（进程内绑定破坏 GNU 的
+"外部命令=独立进程"模型边界，维护成本换不来语义收益）；引擎对 winuxcmd 的
+引用仅允许存在于注释。
+
 ## 四、热点文件提示（改动需extra谨慎）
 
 `executor/mod.rs`(677 次)、`command_prepare.rs`(123)、`command_substitution.rs`(98)、
