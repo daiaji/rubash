@@ -1,7 +1,7 @@
 # Rubash ↔ GNU Bash 兼容性权威状态（单一事实来源）
 
-> 最后核对日期：2026-09-19（全量 true-baseline 重跑，83 套件，GNU 5.3.0 契约，
-> master `652c1042`；逐套件台账见 `docs/audit-baseline-2026-09-19.md`）
+> 最后核对日期：2026-09-20（合并后全量 true-baseline 重跑，83 套件，GNU 5.3.0 契约，
+> 分支 `fix/array6-patsub-quotes`；逐套件台账见 `target/issue-suites/results/postmerge-baseline-ledger.txt`）
 > 核对方法：用 `./target/debug/rubash.exe` 直接跑 GNU 官方测试文件
 > `third_party/bash/tests/<name>.tests`，对比 GNU bash 的真实输出。
 > 基线约定（2026-09-09 起生效）：语义比对一律用 WSL GNU Bash 5.3.0
@@ -15,11 +15,15 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-19，master `652c1042`）：45 零差 / 38 有 DIFF / 总 1247 行**
+> **最新台账（2026-09-20，合并后 `fix/array6-patsub-quotes`）：49 零差 / 34 有 DIFF / 总 848 行**
+> （DIFF 1-50：27 套件；51-250：7 套件；251+：0。较合并前基线 849 行净减 1，
+> 逐套件对比无任何套件变差；nameref 6→1。零差套件名单见 README）
+>
+> 上一台账（2026-09-19，master `652c1042`）：45 零差 / 38 有 DIFF / 总 1247 行
 > （较 2026-09-18 基线 1833 行净减 586；nameref 281→7、errors 129→3、arith 53→0、
 > type 39→6、shopt/trap 归零；详见 `docs/audit-baseline-2026-09-19.md`）
 >
-> 上一台账（2026-09-16）：43 零差 / 40 有 DIFF / 总 2702 行
+> 更前一台账（2026-09-16）：43 零差 / 40 有 DIFF / 总 2702 行
 > （其中 intl=1209 为 ANSI-C `$'...'` 载体字节架构缺口，排除 intl 后余 39 套件共 1493 行；
 > 详见第二十二节）
 
@@ -1380,3 +1384,85 @@ B' | while read o; do echo -e '1
 - 内建/复合命令侧"非赢家 fd-0 `<` 仍执行 open"未建模：
   `cat <<A <missing` 外部路径已对齐（open 失败中止），内建 cat
   快路径仍直接给 heredoc 体——属重定向逐条应用的架构项。
+
+## 第二十八节：2026-09-20 master 合并 + 数组下标单遍展开批次（fix/array6-patsub-quotes）
+
+**合并**：`fix/array6-patsub-quotes` 合并 origin/master（assoc/array 批次 +
+shopt 宽度修复）；PST_ASSIGNOK 门控去重——master 的 command_execute.rs
+版本保留（更贴 execute_cmd.c 结构），token_actions.rs 版本移除。
+
+**合并后修复批次**（GNU C 出处见各提交）：
+
+- **数组/assoc 下标单遍展开**——GNU `expand_array_subscript`
+  （subst.c:11107）对下标只展开一遍，产物字节经 abstab 反斜杠转义
+  （`[` `]` `$` `` ` `` `~` `\` `'` `"`）防止二次触发；`array_expand_index`
+  （arrayfunc.c:1356）收 RAW 文本、`expand_arith_string` 是唯一展开遍。
+  Rubash 把已展开文本再过一遍词展开，`a[$key]`（key 含 `$(...)`）二次
+  执行命令替换。修复点：`array_assignment_exec`（LHS 下标喂 raw）、
+  `conditional`（`[[` 算术比较操作数经 `expand_cond_arith_operand`
+  镜像 cond_expand_word(op,3) Q_ARITH）、`arithmetic_aliases`
+  （arith_display_expand 对展开产物施加 abstab 转义用于 evalexp
+  错误 token）、`arithmetic/lvalue`（assoc 键反斜杠解码，expr_streval
+  同源）、`arithmetic/mod`（assoc_subscript_end 公开）。
+- **`expand_subscript_string` ANSI-C 解码**——`$'...'` 下标在 raw 文本里
+  仍是源形态，补 `decode_ansi_c_spans`（subst.c:11063 expand_string 的
+  ansicstr 臂）；`a[$'\x01']` 键恢复正确。
+- **`[[ -v assoc[@] ]]`**——`@`/`*` 对关联数组是字面键（test.def
+  test_variable）；全数组短路只适用索引数组。
+- **W_ARRAYREF 载体消费**——`\x02` 前缀是词旗标不是操作数文本
+  （execute_cmd.c:4366 fix_arrayref_words）；`read` 名字校验、`wait -p`
+  绑定、`unset` 操作数、`printf -v` 名称校验各消费点补齐。
+- **`unset n[0]` nameref 解析**——find_variable 跟随 nameref
+  （builtins/set.def:924），`n -> v` 时删 `v[0]` 而非 `n[0]`。
+- **`unset arr[@]` BASH_COMPAT≤51**——compat 级 ≤51 时 unset 传
+  VA_ALLOWALL，unbind_array_element 删整个变量（arrayfunc.c:1153-1162、
+  unset.def:975-977）；`shell_compatibility_level_value` 解析
+  BASH_COMPAT NN/N.N（variables.c set_compatibility_level）。
+- **`printf -v a[@]`**——valid_array_reference 纯语法判定（arrayfunc.c），
+  `@` 的 `bad array subscript` 在绑定期报（builtins/common.c:949
+  builtin_bind_variable），不再提前报 `not a valid identifier`。
+- **标量 `(...)` RHS 字面绑定**——标量目标的括号文本按字面存
+  （bind_variable_value），不带 W_COMPASSIGN 的 `declare c='(1 2)'`
+  不再被拆成 `\x10` 标记元素（arrayfunc.c:557）。
+- **brace 展开跳过 `$` 体**——`word_contains_brace_group` 跳过
+  `${...}`/`$(...)` 体（GNU braces.c 不下探展开体），修
+  `a${u-{x,y}}z` 与 `("${x[@]}" "y")` 去引号回归。
+- **`${!indir}`/`$ref` nameref 穿透**——parameter_brace_expand_indir
+  把间接目标再过 parameter_brace_expand_word（subst.c:7955），
+  find_variable 跟随 nameref：`indir=ref`、`declare -n ref=arr` 时
+  `${!indir}` 取 arr[0]；`$ref`/`${!name}` 指向 `arr[@]`/`arr[*]` 时是
+  词表源（nameref18.sub）。
+- **卫生**——`__RB_DBG_DECLARE` 探针移除；`read_builtin` 裸 NUL 字面量
+  改 `'\u{0}'` 转义；README 合并冲突残骸修复。
+
+**合并后全量基线**（83 套件，`postmerge-baseline-ledger.txt`）：
+
+| 指标 | 合并前 | 合并后 | Δ |
+|---|---|---|---|
+| 零差套件 | 49 | **49** | 0 |
+| DIFF 1-50 | 27 | 27 | 0 |
+| DIFF 51-250 | 7 | 7 | 0 |
+| DIFF 251+ | 0 | 0 | 0 |
+| 总 diff 行 | 849 | **848** | −1 |
+
+逐套件对比：82/83 持平，nameref 6→1（改善，唯一残留为 coproc `_PID`
+回收时序——GNU 在 SIGCHLD reap 时即 unset，Windows 子进程退出延迟使
+RB 在下一边界才摘，属竞态噪声）；**history 104→108 为 GNU 侧超时抖动**
+——history.tests 的 `${THIS_SH} -i` 交互子测试在本环境 GNU 侧 40s 被
+timeout -k 杀（rc=137，90s 加长同样杀），gnu.out 截断点每次不同，diff
+计数随截断位置浮动；非 RB 语义回归（本批改动全在下标/数组/nameref
+域，不触 interactive history 回显）。
+
+**合并中途出现的回归已全部修回持平**：array 0→38→0、assoc 0→26→0、
+quotearray 0→49→0、nameref 6→11→1、new-exp 0→4→0。根因是合并侧
+`` ARRAYREF_FLAG 载体词旗标在多个消费点未剥离（read 名字校验、
+wait -p、unset 操作数）+ 标量 `(...)` RHS 误走复合赋值拆分 + 下标
+二次展开；均按上文 GNU C 出处修复，非特判补丁。
+
+`heredoc` 5、`lastpipe` 5、`attr` 40、`mapfile` 60（harness 未拷
+`mapfile.data` 夹具，GNU 侧同样报 No such file）等残留均为预存簇
+或环境性，见第二十七节。
+
+**边界规则执行**：本批未新增任何哨兵字节/PUA 码点/命名标记串；仅做了
+既有载体的消费点补齐（`\x02` ARRAYREF_FLAG 在 read/wait/unset/printf-v
+的剥离）与碰撞修复，符合 typed-carrier 迁移边界约定。
