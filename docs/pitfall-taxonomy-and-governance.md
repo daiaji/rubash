@@ -246,10 +246,10 @@ root 定位），**不允许直接删**；做法是**改名迁移**，且只在�
 | 痕迹 | 位置 | 处置 |
 |---|---|---|
 | `WINUXSH_ROOT` 导出+读取 | public_accessors.rs:110、path.rs:96/1197、pwd.rs:202 | 上文改名迁移 |
-| `WINUXCMD`/`WINUXCMD_PATH` env | path.rs:98-99（与 ROOT 同一张表） | 随上表一并改名迁移 |
+| `WINUXCMD`/`WINUXCMD_PATH` env | path.rs:98-99（与 ROOT 同一张表） | **概念升级为可注入 coreutils provider**：引擎只认中性的 coreutils 注入点（如 `COREUTILS_PATH`/`SHELL_COREUTILS_DIR`），宿主注入任何 coreutils 集合——现阶段注入的是 winuxcmd，跨平台时可直接注 GNU coreutils。旧名转兼容别名随迁移期淘汰。产品名 winuxcmd 本身不改 |
 | `WINUXSH_SHELL_PATH_STYLE` | init.rs:7、builtins/cd/paths.rs:113 | 改宿主注入配置（如 `__RUBASH_PATH_STYLE`） |
 | `WINUXSH_HIST_IGNORE_DUPS/_SPACE` | zsh_options.rs:111/117 | 改名迁移（zsh→bash 迁移期兼容选项） |
-| `~user` 读 winuxcmd passwd 数据 | expand/tilde/tilde.rs:67-70 | **功能依赖**：tilde 补全依赖 winuxcmd 的用户库——登记为引擎 hook（host 注入 passwd provider），不能只改名 |
+| `~user` 读 winuxcmd passwd 数据 | expand/tilde/tilde.rs:67-70 | **功能依赖**：改挂 coreutils provider 的 passwd 数据接口——provider 换成 GNU coreutils 时用 /etc/passwd，零引擎改动 |
 | path.rs 内嵌 winux/winuxcmd 路径处理串 | 479/512/521/524/1288/1841/1849/2152 | 逐个审：平台路径翻译逻辑（正当）但命名去 winux 化 |
 | 注释引用 winuxcmd | command_substitution_pipelines.rs:605、pipeline_exec.rs:757/984、path.rs:27、init.rs:250 | 允许存在（注释），措辞顺手中性化 |
 | bash shim | bin/bash.rs | 保留（AI invoker 入口，feature-gate + 注明用途） |
@@ -264,8 +264,10 @@ root 定位），**不允许直接删**；做法是**改名迁移**，且只在�
 4. 迁移期满删兼容别名。
 
 **相关决策**：winuxcmd 维持 PATH 级集成，不做 FFI（进程内绑定破坏 GNU 的
-"外部命令=独立进程"模型边界，维护成本换不来语义收益）；引擎对 winuxcmd 的
-引用仅允许存在于注释。
+"外部命令=独立进程"模型边界，维护成本换不来语义收益）；**概念上引擎只认
+"coreutils provider"**——中性注入点 + passwd 数据接口，winuxcmd 是现阶段的
+提供者，跨平台时换注 GNU coreutils 即可，产品名 winuxcmd 本身不改；引擎对
+winuxcmd 的引用仅允许存在于注释。
 
 ## 四、热点文件提示（改动需extra谨慎）
 
