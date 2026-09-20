@@ -170,6 +170,25 @@ POSIX conformance suite 等一律不用，POSIX 与 GNU 存在分歧，对齐标
 **优先级修订**：第一层（ShellState）提升为最高——alias/function 泄漏是现行
 bug 且不依赖其他层；fd 层规模上修；线程化必须在句柄层之后。
 
+**前人方案对比（2026-09-20 调研）与自研可行性**：
+
+| 前人方案 | 思路 | 对我们的结论 |
+|---|---|---|
+| Cygwin/MSYS2 fork 模拟 | 硬模拟 fork 机制 | 拒绝——慢且脆，Git Bash 语义怪癖的来源 |
+| MSR《A fork() in the road》HotOS'19 | shell 不需要 fork 拷贝语义，spawn 式更贴近真实用法 | 直接背书本 ADR 方向 |
+| libuv (Node) uv_spawn | stdio 管道 + 受控句柄继承 | 与句柄层 POC 同思路，实现细节可参考 |
+| Rust std | 历史上 bInheritHandles=TRUE + 进程级互斥锁；#73281 提案 HANDLE_LIST；新版开放 `raw_attribute` 自定义 ProcThreadAttributeList | **句柄层实现优先用 std `raw_attribute`**（上游维护），POC 的裸 Win32 代码可减半 |
+| fish/nushell/elvish | 避开 fork，内部任务模型 | 语义优先路线的同类实践 |
+
+**自研可行性判断**：可行，且有一个关键技术支点——**Windows 的
+`DuplicateHandle` 复制出的两个 HANDLE 指向同一 FILE_OBJECT，天然共享文件
+偏移量**。这意味着 POSIX `dup()` 的"偏移量共享"语义在 Win32 上是原生免费的：
+实现一个引擎内 FdTable（槽位数组 + open/dup/close/子壳时整表 DuplicateHandle），
+六个实测分歧里的偏移量共享、关闭隔离、子壳穿透三类就随语义自然修复，不需要
+hack。spawn 侧用 std `raw_attribute` 白名单传递。预估核心 FdTable 数百行 +
+接入 redirect/spawn 路径，属 1–2 周工程；风险点在内建读 fd（read/mapfile）与
+stdio 载体路径的接线，需定向探针护航。
+
 ### 3.7 双层测试口径（引擎层 + 产品层）
 
 **真正的 shell 层是 niubash**（`D:/repo/niubash-*`，crate `niubash`，依赖
