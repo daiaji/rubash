@@ -227,28 +227,27 @@ stdio 载体路径的接线，需定向探针护航。
 5. 时序约束：niubash 依赖 rubash master git 分支，因此产品层基线只能在引擎
    合并后刷新；分支开发期以引擎层基线为准，合并后补产品层。
 
-### 3.8 引擎去 winux 化（embedding hygiene，2026-09-20 决策）
+### 3.8 引擎去 winux 化（embedding hygiene，2026-09-20 决策；低优先级）
 
 **动机**：不是为第三方嵌入（大概率没有别家用），而是**引擎里的 winuxsh 痕迹
 刺眼**——产品关切不该污染引擎层，且 `WINUXSH_ROOT` 泄漏进测试环境会作废整轮
 基线（AGENTS.md 已有记录）。**例外**：`bin/bash.rs` 的 bash shim 保留——它
 就是给 AI 调用方用的入口，属有意设计，feature-gate 标注清楚即可。
 
-**清理项**（修正版——`WINUXSH_ROOT` 有真实消费者（path.rs 根解析/路径翻译、
-pwd.rs、niu 三处 deprecated bridge），**硬删会功能回退**；正确路径是"收编为
-内部名 + 迁移期"，不是直接删）：
+**优先级：低。** `WINUXSH_ROOT` 被 niubash 大量使用（引擎 path.rs 根解析/
+路径翻译、pwd.rs，以及 niu 侧 completion/syntax_highlighting/shell 多处读取
+root 定位），**不允许直接删**；做法是**改名迁移**，且只在任意批次顺手携带，
+不单独立项、不占架构项排期。
 
-1. 引擎内部读取统一到 `__RUBASH_SHELL_ROOT`：path.rs:1197 的三别名表
-   （`__RUBASH_SHELL_ROOT`/`WINUXSH_ROOT`/`RUBASH_ROOT`）收敛为一个内部名，
-   pwd.rs/path.rs 全部改读内部名。
-2. `WINUXSH_ROOT` 导出从引擎移到宿主：`set_shell_root` 只设 `__RUBASH_SHELL_ROOT`；
-   niubash 若仍需要该变量（自己的 deprecated bridge 在读），由 niubash 注入，
-   并在 niu 清理批次里删掉三处 bridge 读取（completion/path.rs:231、
-   shell.rs:4972、syntax_highlighting.rs:586——主名已是 SHELL_ROOT）。
-3. `init.rs:7` 的 `WINUXSH_SHELL_PATH_STYLE` 特判：改为宿主注入的路径风格
-   配置（或并入现有 posix 判定点）。
-4. `bin/bash.rs` shim：保留，文件头注明用途（AI invoker 入口，转发到
-   winuxsh.exe/宿主 shell），支持 feature-gate 编译排除。
+**改名迁移步骤**（每步独立可验证，零功能变化）：
+
+1. 定新名（如 `NIU_SHELL_ROOT` 或中性 `SHELL_ROOT_DIR`），由宿主注入；
+   引擎 `set_shell_root` 的导出改挂新名，`WINUXSH_ROOT` 转为兼容别名继续
+   导出一个迁移期。
+2. 引擎内部读取（path.rs 三别名表收敛、pwd.rs）切换到新名。
+3. niubash 侧的读取点（completion/path.rs:231、shell.rs:4972、
+   syntax_highlighting.rs:586 的 "deprecated rubash bridge"）同步切换。
+4. 迁移期满删兼容别名。
 
 **相关决策**：winuxcmd 维持 PATH 级集成，不做 FFI（进程内绑定破坏 GNU 的
 "外部命令=独立进程"模型边界，维护成本换不来语义收益）；引擎对 winuxcmd 的
