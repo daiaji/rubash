@@ -93,3 +93,40 @@ bash 未定义的 UI 面自由分叉，但消费的引擎原语必须经公开 A
    补偿 pass**（cfaa9125 已使引擎原生正确），跑双侧基线确认。
 4. A4/A5/A6 按治理文档 3.6 分层纪律排期下沉；markers.rs 建成后 A5 自然消解。
 5. `niu -Z` 措辞/退出码对齐 GNU EX_BADUSAGE。
+
+## H. 追加审计：产品层手写 marker/heredoc 逻辑（2026-09-20 第二轮，含三方实测）
+
+对象：niubash-multiline @4289da5 对照引擎 HEAD。逐点核对了 10 处手写逻辑。
+
+### 实锤 bug（niu 正在产生错误输出）
+
+**`x=${v#pat}` fast path 转义模式错误**（shell.rs:2753-2872 全家，约 180 行）：
+`t='a?b'; x=${t#\?}` → GNU/rubash 引擎均输出 `a?b`，**niu 输出 `?b`**；
+`w='*b'; x=${w#\*}` → GNU/引擎 `b`，niu `*b`。根因：`decode_simple_parameter_pattern`
+把 `\*`/`\?` 剥成 glob 元字符、`simple_glob_matches` 只支持裸 `*`/`?`。引擎 HEAD
+已原生正确——整个 fast path 应**立即删除**。
+
+### 处置清单
+
+- **立即删**：`execute_parameter_pattern_assignment_simple_ast` 全家 + 三个辅助函数。
+- **合并后删**（先 eprintln 证伪"曾实际修正过"）：`normalize_parameter_pattern_operator_order`
+  （shell.rs:2892-2997，未找到引擎切错的输入，且缺 `$'...'` 感知有反向污染风险）；
+  `shell.rs:3559` 的 `\x11` 全量剥除（引擎已在 argv 前剥，提前剥反而销毁保护信息）。
+- **下沉排期**（换引擎公开 API）：repl.rs:833 的 `__RUBASH_HD1__`/裸 `\x1f` heredoc
+  完整性判定（引擎导出公开函数）；shell.rs:4135 的 `\x1c` alias 镜像（改引擎
+  accessor，废"重解析自己刚敲的行"）；stdin bridge（shell.rs:2709，疑似死路径，
+  若保留必须先修定界符碰撞/未引号展开注入/非 UTF-8 三个炸点）；completion 的
+  自写分词换 `rubash::lexer::tokenize`。
+- **正当保留**：fast-path 判废字段、env 注入、产品 UI。
+
+### 已验证安全
+
+- repl.rs heredoc 完整性判定与引擎逐字节一致（`\x05` 是 executor 层产物，不在
+  tokenize 输出，与 repl pass 无交集——B1 碰撞是引擎内部问题，产品层不背）。
+- 后台 `&` 句柄手术已在当前 master 下沉引擎（rubash f0703c0a），旧审计的
+  main.rs:69/99 定位过期。
+
+### 引擎版漂移补充
+
+niu 锁定的 0fd42049 距引擎 HEAD 36 commits：**cfaa9125（quoted name=$(...）
+非 assignment）正是niu 这些补偿 pass 失效的原因**——升级引擎后立即删补偿即可。
