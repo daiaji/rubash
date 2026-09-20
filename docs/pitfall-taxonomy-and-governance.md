@@ -113,3 +113,48 @@ rubash 用带内哨兵（C0 字节 \x11–\x1f、PUA 码点 E000–E10C、命名
 5. 禁止内建绕过重定向引擎直写 std handle。
 6. 新增可变 shell 状态必须进 ShellState（或明确记入子壳隔离清单）。
 7. 新增 POSIX 分支必须集中在唯一的 posix 判定点，不许散落。
+
+## 六、问题热点索引（issue/PR 交叉版，2026-09-20）
+
+数据来源：rubash 全量 118 issues + 28 PRs、WinuxCmd/niubash 关联 issue、
+git log 交叉核对。按"反复出问题"频次排序。
+
+| # | 热点主题 | issue/PR 证据 | 家族 | 套件 | 主要源文件 |
+|---|---|---|---|---|---|
+| 1 | 词层 fast path / comsub 捷径漏语义（黑名单守卫不断被打穿） | #68 #69 #70 #116 #117、PR#101/102/116；niubash#119 | S1+S5 | 全套 | command_substitution*.rs、parameter_core.rs |
+| 2 | 数组/关联数组复合赋值、下标、declare 回显 | #24 #77(open) #79 #109 #111；niubash#72 #78 | S2 | assoc/array/quotearray | builtins/declare*、arrays |
+| 3 | 载体字节泄漏到用户可见层 | #64 #95 #96 #97 #109、PR#104/114；niubash#92 #103 #124 | M 类 | quotearray/posixexp/varenv | lexer/quotes.rs、eval_source_for_reparse |
+| 4 | comsub 捕获/重解析 | #69 #70、PR#6/7/9/102/104/115；niubash#76 #120 | S5 | heredoc/comsub、bashdb | command_substitution.rs |
+| 5 | varenv/nameref/tempenv | #24 #78 #86；audit C2–C15 批次 | S7 | nameref11/varenv | varenv、nameref |
+| 6 | 解析器：同行 `#` 尾注释 / CRLF / `{` 未闭合（三仓库各报一次） | #118(PR#119)、#31；niubash#106 #130 | S1 邻域 | **无专属套件（缺口）** | lexer/（continuation.rs captain-exclusive） |
+| 7 | 重定向/fd/dev 别名 | #89(G17)；niubash#118 #122 | S3+S9 | redir | spawn/redir |
+| 8 | Windows 路径/argv 修辞 | #31 #59 #60、PR#103(#1/#5)；niubash#61 #62 #83 #88 | S10 | 环境绑定 | external_argument_path |
+| 9 | 子壳隔离（同一问题两半分两次修） | niubash#70 #100 | S6 | 靠 niubash 回归 | compound_exec.rs、ast_exec.rs |
+| 10 | 算术/错误消息/errexit | #67 #73 #74 #83 #88、PR#110 | S8+S11 | arith | arith、expr 错误模型 |
+| 11 | trap/shopt/nullglob | #85 #91(G19)、niubash#121 | S9 | trap | exec/trap |
+
+## 七、13 家族未覆盖的新问题域（issue 证据）
+
+1. **CLI/调用选项**：bundled 短选项、`-c -l`（niubash#107、PR#112）——提了两次。
+2. **位置参数暴露**：`$0/$1/$@`、`${arr[@]+"${arr[@]}"}` 解析（niubash#15 #73）。
+3. **alias 语义**：脚本模式 expand_aliases 无条件开启、alias 覆盖函数（niubash#129、#22/#23）。
+4. **交互/readline/PS1/completion**：niubash#53 #54 #75 #91 #117；bashdb 集成同域。
+5. **后台任务/进程生命周期**：`&` 无法脱离、stdout 早关 panic（niubash#122 #125）——比 S9 更具体的"进程脱离/句柄释放"主题。
+6. **性能/冷启动**：负 lookup 60–85ms、`-c` 550ms 固定开销（#71、niubash#79、PR#10–14）。
+7. **多字节/编码边界**：中文路径 char_boundary panic、ACP 解码（niubash#84 #86 #88 #92）。
+8. **环境注入/隔离**：THIS_SH 子进程 env scrub、temp env 不可见于嵌套（niubash#38）。
+
+## 八、未关闭与映射缺口（需复核）
+
+**open：** #62（gnu-baseline 归因账本）、#77（declare -A/-ai 回显，assoc.tests 409/361）、
+#117（词级捷径白名单化母 issue）。niubash#104（winget，特性请求）。
+
+**issue→提交映射缺口（建议复验）：**
+- **#66 嵌套花括号展开**：已关闭但找不到修复提交——最明确缺口，需复验是否真修。
+- **#64 awk -F '\t'**：评论称 "fixed in working tree" 但无对应提交；确认回归测试
+  `external_pipeline_preserves_quoted_awk_field_separator_argument` 在 master。
+- **#98 (G26)**：关闭留言不给哈希，无法追溯。
+- **niubash#118 只修 1/3**：ce89fa85 只覆盖 /dev/std* 别名；内部 cd 改道、ssh 无输出
+  两项无 rubash 提交记录。
+- **niubash#92 multibyte panic**：PR#104 是 follow-up，本体修复无独立提交。
+- 反向缺口为零：所有声称修复的提交，issue 侧均已关闭。
