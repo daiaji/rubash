@@ -1382,7 +1382,7 @@ pub(super) fn arith_subscript_text(raw: &str) -> String {
 /// Byte index just past the `]` that closes the subscript opened at `open`
 /// (`bytes[open] == b'['`), honoring single/double quotes and `\` escapes so a
 /// `]` inside a quoted key does not terminate the subscript.
-fn assoc_subscript_end(bytes: &[u8], open: usize) -> usize {
+pub(crate) fn assoc_subscript_end(bytes: &[u8], open: usize) -> usize {
     let mut depth = 0usize;
     let mut single = false;
     let mut double = false;

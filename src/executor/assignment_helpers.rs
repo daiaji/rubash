@@ -195,20 +195,7 @@ pub(crate) fn assoc_empty_key_words(value: &str) -> Vec<String> {
             let key = pair.first()?;
             unquote_storage_value(key)
                 .is_empty()
-                .then(|| {
-                    // GNU's word list rebuilt each element with quote_string.
-                    let dequoted = unquote_storage_value(key);
-                    let mut quoted = String::from("'");
-                    for ch in dequoted.chars() {
-                        if ch == '\'' {
-                            quoted.push_str("'\\''");
-                        } else {
-                            quoted.push(ch);
-                        }
-                    }
-                    quoted.push('\'');
-                    quoted
-                })
+                .then(|| key.to_string())
         })
         .collect()
 }

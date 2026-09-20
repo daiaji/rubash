@@ -96,6 +96,18 @@ impl Executor {
         if let Some(literal) = wholly_single_quoted_literal(raw) {
             return literal;
         }
+        // GNU subst.c:11063 expand_subscript_string -> expand_string ->
+        // expand_word_internal: the `$'...'` arm ANSI-C decodes the span
+        // (ansicstr, lib/sh/strtrans.c:130). Raw subscript text that bypassed
+        // the lexer still carries `$'...'` source form; decode it to the
+        // carrier-marked data form the embedded walker already consumes.
+        let raw_owned;
+        let raw = if raw.contains("$'") {
+            raw_owned = decode_ansi_c_spans(raw);
+            raw_owned.as_str()
+        } else {
+            raw
+        };
         // Quote removal belongs to the LEXER token -- `\X` loses its backslash
         // there -- while the parameter/command/arithmetic walker below only
         // reads data. Resolve the escapes first so the walker never mistakes a
@@ -158,28 +170,25 @@ impl Executor {
                     // word expansion; the consumer uses the text verbatim.
                     text.to_string()
                 } else {
-                    // GNU expand_word_internal never re-lexes single quotes —
-                    // sq handling is lex-time only, so a `'` byte reaching the
-                    // deferred expand_subscript_string pass is always data
-                    // (subst.c:11063 -> expand_word_internal -> dequote_list,
-                    // subst.c:4807: only CTLESC pairs dequote). Mark it with
-                    // the \x17 data carrier so the walker below emits it
-                    // verbatim instead of consuming it as an sq opener —
-                    // `unset -v dict["$k"]` with k=`'` removes key `'`
-                    // (assoc9.sub del loop).
-                    let text = mark_expanded_once_data_squotes(text);
-                    let text = mark_expanded_once_data_dquotes(&text);
+                    // expand_subscript_string re-parses the subscript text:
+                    // operand-resident quotes are SYNTAX (`unset
+                    // 'assoc["@"]'` unsets key `@`), while quote characters
+                    // produced by expansions inside the pass stay data
+                    // (subst.c:11063 -> expand_word_internal: produced text
+                    // is not re-lexed). Marking the whole operand's quotes
+                    // as data here is wrong — it breaks the deferred-quote
+                    // semantics the builtin paths rely on.
                     let Some(key) =
-                        crate::executor::expand_braced_indices::sub_site_key(&text)
+                        crate::executor::expand_braced_indices::sub_site_key(text)
                     else {
-                        return self.expand_subscript_string(&text);
+                        return self.expand_subscript_string(text);
                     };
                     if let Some(hit) =
                         crate::executor::expand_braced_indices::sub_res_lookup(&key)
                     {
                         return hit;
                     }
-                    let resolved = self.expand_subscript_string(&text);
+                    let resolved = self.expand_subscript_string(text);
                     crate::executor::expand_braced_indices::sub_res_store(
                         key,
                         resolved.clone(),
@@ -364,10 +373,16 @@ impl Executor {
         let Some((name, subscript)) = parse_array_subscript(operand) else {
             return Ok(operand.to_string());
         };
-        if !is_shell_name(name) || matches!(subscript, "@" | "*") {
+        if !is_shell_name(name) {
             return Ok(operand.to_string());
         }
         let assoc = is_marked_var(&self.env_vars, ASSOC_VARS, name);
+        // GNU test.def/test_variable: for an ASSOCIATIVE array `@`/`*` are
+        // ordinary literal keys (`[[ -v assoc[@] ]]` tests key `@`); only an
+        // indexed array's `@`/`*` mean the whole array.
+        if !assoc && matches!(subscript, "@" | "*") {
+            return Ok(operand.to_string());
+        }
         // TEST_ARRAYEXP implies the raw token ended with `]` (flag-1 needs
         // it as terminator), so the cooked text ends with `]` too and a
         // non-empty subscript is the whole validity question. Without it,
@@ -485,6 +500,11 @@ impl Executor {
         noexpand: bool,
         oneword: bool,
     ) -> Result<String, ()> {
+        // W_ARRAYREF arrives in-band as an ARRAYREF_FLAG prefix on the
+        // operand text (execute_cmd.c:4366 fix_arrayref_words); callers
+        // already derived the VA_ONEWORD half via word_is_arrayref, so strip
+        // the carrier byte before name/subscript parsing.
+        let operand = crate::builtins::arrayref::take_arrayref_flag(operand).1;
         let Some((name, subscript)) = parse_array_subscript(operand) else {
             return Ok(operand.to_string());
         };
@@ -981,6 +1001,67 @@ pub(super) fn scan_compound_subscript(
 /// parse_string_to_word_list re-parse sees as real quoting/expansion
 /// syntax (arrayfunc.c:580). `\x1f` -> `$`, `\x18` -> `"`, `\x1a` ->
 /// backtick, `\x14` -> `\`, `\x17` -> `'`.
+/// Decode each `$'...'` span in raw subscript text (GNU subst.c:11063
+/// expand_subscript_string -> expand_word_internal's ANSI-C arm). The decoded
+/// bytes pass through escape_decoded_ansi_c_quotes so quotes and `$` in the
+/// result stay DATA for the embedded-parameter walker.
+fn decode_ansi_c_spans(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0usize;
+    let mut in_single = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\\' && !in_single && index + 1 < chars.len() {
+            // A backslash pair outside quotes is literal syntax here; keep it
+            // for mask_subscript_escapes.
+            output.push(ch);
+            output.push(chars[index + 1]);
+            index += 2;
+            continue;
+        }
+        if ch == '\'' {
+            in_single = !in_single;
+            output.push(ch);
+            index += 1;
+            continue;
+        }
+        if !in_single
+            && ch == '$'
+            && chars.get(index + 1) == Some(&'\'')
+        {
+            // `$'...'`: the close quote is the first unescaped `'`.
+            let mut inner_end = index + 2;
+            let mut inner = String::new();
+            let mut closed = false;
+            while inner_end < chars.len() {
+                let c = chars[inner_end];
+                if c == '\\' && inner_end + 1 < chars.len() {
+                    inner.push(c);
+                    inner.push(chars[inner_end + 1]);
+                    inner_end += 2;
+                    continue;
+                }
+                if c == '\'' {
+                    closed = true;
+                    break;
+                }
+                inner.push(c);
+                inner_end += 1;
+            }
+            if closed {
+                let decoded = crate::lexer::decode_ansi_c_quoted(&inner);
+                output.push_str(&crate::lexer::escape_decoded_ansi_c_quotes(&decoded));
+                index = inner_end + 1;
+                continue;
+            }
+        }
+        output.push(ch);
+        index += 1;
+    }
+    output
+}
+
 fn decode_deferred_compound_body(inner: &str) -> String {
     inner
         .chars()

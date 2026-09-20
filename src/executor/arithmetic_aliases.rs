@@ -328,6 +328,44 @@ impl Executor {
         let mut output = String::with_capacity(expression.len());
         let mut chars = expression.chars().peekable();
         while let Some(ch) = chars.next() {
+            if ch == '[' {
+                // GNU subst.c:11107 expand_array_subscript (reached only
+                // under Q_ARITH): the subscript is expanded once and every
+                // expansion product byte that could restart an expansion or
+                // delimit a subscript is backslash-quoted (abstab:
+                // `[` `]` `$` `` ` `` `~` `\` `'` `"`). evalexp's error
+                // token then echoes the escaped text — `assoc[x\],b\[
+                // \$(...)]++`, not the bare product.
+                let mut inner = String::new();
+                let mut closed = false;
+                for inner_ch in chars.by_ref() {
+                    if inner_ch == ']' {
+                        closed = true;
+                        break;
+                    }
+                    inner.push(inner_ch);
+                }
+                if !closed {
+                    // No terminator: skipsubscript fails and the `[` stays
+                    // plain text in evalexp's input (subst.c:11133-11141).
+                    output.push('[');
+                    output.push_str(&inner);
+                    continue;
+                }
+                let expanded_inner = self.arith_display_expand(&inner);
+                output.push('[');
+                for inner_ch in expanded_inner.chars() {
+                    if matches!(
+                        inner_ch,
+                        '[' | ']' | '$' | '`' | '~' | '\\' | '\'' | '"'
+                    ) {
+                        output.push('\\');
+                    }
+                    output.push(inner_ch);
+                }
+                output.push(']');
+                continue;
+            }
             if ch != '$' {
                 output.push(ch);
                 continue;

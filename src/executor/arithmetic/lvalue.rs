@@ -321,6 +321,16 @@ impl ConditionalArithParser<'_> {
         let mut chars = key.chars().peekable();
 
         while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                // GNU expr_streval -> expand_subscript_string dequotes
+                // the key text: a backslash-escaped byte (including the
+                // abstab escapes expand_array_subscript added to
+                // expansion products) is literal data.
+                if let Some(next) = chars.next() {
+                    output.push(next);
+                }
+                continue;
+            }
             if ch != '$' {
                 output.push(ch);
                 continue;

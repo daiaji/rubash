@@ -394,6 +394,17 @@ impl Executor {
                 eval_text = super::arithmetic::arith_subscript_text(raw);
                 eval_text.as_str()
             }
+            // GNU never word-expands the LHS subscript of `name[sub]=v`:
+            // array_expand_index (arrayfunc.c:1356) receives the RAW text
+            // and expand_arith_string is its ONE expansion pass — a `$(...)`
+            // produced by that pass is data to evalexp, never re-scanned
+            // (a[$key] with key=`x],b[$(echo uname >&2)` errors with the
+            // literal token, verified GNU 5.3). Feeding the already-expanded
+            // `index` here ran the produced `$(...)` a second time.
+            Some(raw) => {
+                eval_text = super::arithmetic::arith_subscript_text(raw);
+                eval_text.as_str()
+            }
             _ => index,
         };
         // GNU evaluates the subscript arithmetically even when it is all
@@ -402,7 +413,11 @@ impl Executor {
         if eval_input.trim().is_empty() {
             eval_input = "0";
         }
-        if eval_input.trim() == "*" {
+        // GNU arrayfunc.c:355-360 assign_array_element: ALL_ELEMENT_SUB
+        // rejects both `@` and `*` subscripts on an indexed element
+        // assignment before the arith eval (err_badarraysub prints w —
+        // the whole `name[sub]` word).
+        if matches!(eval_input.trim(), "*" | "@") {
             self.report_bad_array_subscript(&lhs_as_written);
             self.exit_code = 1;
             return true;
