@@ -126,7 +126,28 @@ POSIX conformance suite 等一律不用，POSIX 与 GNU 存在分歧，对齐标
 脚本——判定标准仍是与 GNU 5.3.0 输出一致，不是"能跑通"）；④ 补齐第四节数的
 套件缺口（解析器族无专属覆盖）。
 
-## 3.6 双层测试口径（引擎层 + 产品层）
+### 3.6 POSIX fork/exec 模型的实现策略（架构决策记录，2026-09-20）
+
+**决策**：不追 fork 的机制，只复刻 fork 的语义。GNU 用 fork 是因为 Unix 内核
+给了这个原语；fork 机制本身在 Windows 上的模拟（Cygwin/MSYS 的内存循环拷贝）
+又慢又脆，不值得模仿。要对齐的语义只有四条：①子壳状态完整隔离复制；②独立
+执行流（后台 `&`、coproc）；③exit status/信号投递回传；④fd 表按序复制。
+
+**三层混合实现**（分场景，不追单一机制）：
+
+| 场景 | 机制 | 说明 |
+|---|---|---|
+| 普通 `( )` 子壳 | 串行模拟（现状保留）+ **ShellState 结构化**：全部可变 shell 状态收进一个结构，子壳 = 克隆整个结构 | 类型系统保证新增字段自动被隔离，消灭 S6 的手工清单漏项 |
+| 后台 `&` / coproc | **线程池 + 子进程所有权注册表**（谁 spawn、谁 reap、trap 归谁） | 唯一语义上必须并发的场景；即 AGENTS.md 挂账的"后台任务线程化"深水区，值得立项 |
+| fd 表复制/排序 | **Win32 精确句柄继承**（`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` + Job Objects） | 修 `read v <&3 3<<EOF` 排序、exec fd 中毒等 redir/read 族架构项，不动执行模型 |
+
+**明确排除**：全量线程化 fork（引擎全量线程安全化代价大且普通子壳不需要）、
+子进程序列化 fork（引擎状态不可整体序列化）、WSL 桥接（破坏 Windows 原生定位）。
+
+**验收口径**：每层独立验证——子壳快照完整性用属性测试（随机状态组合下克隆
+隔离性）、并发用 ownership registry 单测、fd 用定向探针对拍 WSL GNU 5.3.0。
+
+### 3.7 双层测试口径（引擎层 + 产品层）
 
 **真正的 shell 层是 niubash**（`D:/repo/niubash-*`，crate `niubash`，依赖
 `rubash = { git = ".../rubash.git", branch = "master" }` + winuxcmd），用户
