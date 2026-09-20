@@ -1648,9 +1648,14 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
                     // GNU wait.def:156-157: validity is decided downstream
                     // by valid_identifier/valid_array_reference under
                     // SET_VFLAGS — array-subscript names are legal and must
-                    // reach the execute path for the real check.
+                    // reach the execute path for the real check. The in-band
+                    // ARRAYREF_FLAG prefix is W_ARRAYREF's carrier
+                    // (execute_cmd.c:4366), consumed by wait_var_arrayref —
+                    // strip it so `A` never becomes the bound base name.
 
-                    assign_var = Some(name.to_string());
+                    assign_var = Some(
+                        crate::builtins::arrayref::take_arrayref_flag(name).1.to_string(),
+                    );
                     assign_var_index = Some(name_index);
                     break;
                 }
@@ -1726,9 +1731,19 @@ fn wait_assign_var(words: &[String]) -> Option<(String, usize)> {
                     if value_start < word.len() {
                         return Some((word[value_start..].to_string(), index));
                     }
+                    // wait.def:156 SET_VFLAGS consumes W_ARRAYREF off the
+                    // raw word; the in-band ARRAYREF_FLAG prefix is a word
+                    // flag, never operand text (execute_cmd.c:4366).
                     return words
                         .get(index + 1)
-                        .map(|name| (name.clone(), index + 1));
+                        .map(|name| {
+                            (
+                                crate::builtins::arrayref::take_arrayref_flag(name)
+                                    .1
+                                    .to_string(),
+                                index + 1,
+                            )
+                        });
                 }
                 _ => return None,
             }
