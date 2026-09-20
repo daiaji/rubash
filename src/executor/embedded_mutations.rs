@@ -125,6 +125,9 @@ impl Executor {
     // mirrors GNU subst.c here-string handling, where the word is expanded
     // without re-parsing quotes.
     pub(in crate::executor) fn expand_here_string_mut(&mut self, word: &str) -> String {
+        if let Some(pre) = preexpanded_stdin_body(word) {
+            return pre.to_string();
+        }
         self.expand_embedded_parameters_mut_inner(
             word,
             SubstitutionQuoteContext::Unquoted,
@@ -752,7 +755,21 @@ impl Executor {
                         continue;
                     }
 
-                    let source = collect_command_substitution_source(&mut chars, &self.aliases);
+                    let (source, closed) =
+                        collect_command_substitution_source_ex(&mut chars, &self.aliases);
+                    if !closed {
+                        // GNU parse.y parse_comsub: an unclosed `$(` reports
+                        // `unexpected EOF` and the expansion fails, aborting
+                        // the command while the script continues (braces.tests
+                        // "${a+'$('\'}").
+                        eprintln!(
+                            "{}command substitution: line 1: unexpected EOF while looking for matching `)'",
+                            self.diagnostic_prefix()
+                        );
+                        self.arithmetic_fatal_error.set(true);
+                        self.arithmetic_expansion_error.set(true);
+                        continue;
+                    }
                     let value = protect_command_substitution_output(
                         &self.expand_command_substitution_mut_with_context(&source, context),
                     );
@@ -1551,7 +1568,19 @@ pub(in crate::executor) fn collect_command_substitution_source(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     aliases: &std::collections::HashMap<String, crate::builtins::alias::Alias>,
 ) -> String {
+    collect_command_substitution_source_ex(chars, aliases).0
+}
+
+/// Returns the collected source plus whether the closing `)` was found.
+/// GNU parse.y parse_comsub reports `unexpected EOF` when the substitution
+/// runs past the input; callers that only need the span keep the plain
+/// variant.
+pub(in crate::executor) fn collect_command_substitution_source_ex(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    aliases: &std::collections::HashMap<String, crate::builtins::alias::Alias>,
+) -> (String, bool) {
     let mut depth = 1usize;
+    let mut closed = false;
     let mut source = String::new();
     let mut single = false;
     let mut double = false;
@@ -1700,6 +1729,7 @@ pub(in crate::executor) fn collect_command_substitution_source(
             ')' if !single && !double && case_depth == 0 => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
+                    closed = true;
                     break;
                 }
                 source.push(source_ch);
@@ -1708,7 +1738,7 @@ pub(in crate::executor) fn collect_command_substitution_source(
         }
     }
 
-    unescape_storage_command_substitution_source(&source)
+    (unescape_storage_command_substitution_source(&source), closed)
 }
 
 fn command_substitution_status(result: Result<(), ExecuteError>, exit_code: i32) -> i32 {

@@ -106,6 +106,10 @@ impl Executor {
         let saved_fatal_error = self.arithmetic_fatal_error.get();
         let saved_nounset_error = self.arithmetic_nounset_error.get();
         let saved_last_category = self.arithmetic_last_error_category.get();
+        // Same subshell boundary for a mid-expansion `bad substitution`
+        // (subst.c:10277): it kills the substitution's command list, never
+        // the enclosing word's command.
+        let saved_bad_substitution = self.parameter_bad_substitution.replace(false);
         self.subshell_depth.set(old_depth + 1);
         // Bash evaluates BASH_COMMAND in a command substitution against the
         // substitution's own command source, rather than the outer word.
@@ -118,6 +122,7 @@ impl Executor {
         self.arithmetic_fatal_error.set(saved_fatal_error);
         self.arithmetic_nounset_error.set(saved_nounset_error);
         self.arithmetic_last_error_category.set(saved_last_category);
+        self.parameter_bad_substitution.set(saved_bad_substitution);
         result
     }
 
@@ -751,6 +756,7 @@ impl Executor {
             buffer_assignment_diagnostics: false,
             pending_assignment_diagnostics: Vec::new(),
             parameter_assignment_failure: Cell::new(false),
+            parameter_bad_substitution: Cell::new(false),
             tempenv_names: Vec::new(),
             tempenv_marks: Vec::new(),
             tempenv_promoted_names: Vec::new(),

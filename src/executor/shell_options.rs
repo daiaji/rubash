@@ -632,8 +632,12 @@ impl Executor {
         }
 
         let word = cmd.here_string.as_ref()?;
-        let mut input = decode_ansi_c_quoted_word(word)
-            .unwrap_or_else(|| self.expand_embedded_parameters_for_heredoc(word));
+        let mut input = if let Some(pre) = preexpanded_stdin_body(word) {
+            pre.to_string()
+        } else {
+            decode_ansi_c_quoted_word(word)
+                .unwrap_or_else(|| self.expand_embedded_parameters_for_heredoc(word))
+        };
         input.push('\n');
         Some(input)
     }

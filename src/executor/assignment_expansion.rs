@@ -984,12 +984,13 @@ impl Executor {
                     .cloned()
                     .unwrap_or_default()
             }
-            // Assignment RHS joins $* / $@ with the first IFS character
-            // (GNU subst.c string_list_dollar_star / string_list_dollar_at
-            // under W_ASSIGNRHS; expand_no_split_dollar_star, Posix interp
-            // 888). IFS unset joins with space, IFS empty joins with
-            // nothing.
-            b'@' | b'*' => self
+            // Assignment RHS: $* joins with the first IFS character
+            // (GNU subst.c:2930 string_list_dollar_star — IFS unset joins
+            // with space, IFS empty joins with nothing), while $@ always
+            // joins with a space (subst.c:3006 string_list_dollar_at —
+            // PF_ASSIGNRHS || ifs == 0 || *ifs == 0 selects ' ').
+            b'@' => self.positional_params.join(" "),
+            b'*' => self
                 .positional_params
                 .join(&self.ifs_first_char_separator()),
             b'#' => self.positional_params.len().to_string(),

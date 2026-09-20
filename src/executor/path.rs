@@ -338,13 +338,25 @@ fn configured_shell_root_winuxsh(env_vars: &HashMap<String, String>) -> Option<P
 
 pub fn should_run_with_shell(path: &Path) -> bool {
     if cfg!(windows) {
-        !matches!(
+        if matches!(
             path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase),
             Some(ext) if matches!(ext.as_str(), "exe" | "com" | "bat" | "cmd")
-        )
-    } else {
-        false
+        ) {
+            return false;
+        }
+        // CreateProcess runs a PE image regardless of its file extension, so
+        // an extension-less binary copy (posixexp.tests `cp ${THIS_SH}
+        // $TMPDIR/sh`, then `$TMPDIR/sh -c ...`) must still exec directly —
+        // mirroring GNU shell_execve, which only reaches the shell fallback
+        // when execve itself refuses.
+        if path.extension().is_none()
+            && std::fs::read(path).is_ok_and(|sample| sample.starts_with(b"MZ"))
+        {
+            return false;
+        }
+        return true;
     }
+    false
 }
 
 #[allow(dead_code)]

@@ -40,7 +40,16 @@ impl Executor {
             }
         }
 
-        let indirect_name = name.strip_prefix('!')?;
+        let indirect_name = match self.indirect_parameter_body(name) {
+            Some(body) => body,
+            // posix mode: `!` before `?`/`#` is not indirect
+            // (subst.c:122 VALID_INDIR_PARAM) — `${!?}`/`${!#}` expand the
+            // `!` parameter itself; the error path reports it when unset.
+            None if name.starts_with('!') => {
+                return Some(self.parameter_operator_value("!").unwrap_or_default());
+            }
+            None => return None,
+        };
         // GNU param_expand (subst.c): a `!` immediately followed by an
         // operator character is the `$!` parameter with that operator
         // applied (`${!-ok 27}` -> "ok 27", `${!:-posparams}`), not an

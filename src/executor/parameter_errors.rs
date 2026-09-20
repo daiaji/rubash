@@ -285,8 +285,24 @@ impl Executor {
         self.parameter_error_value(&name)
     }
 
+    /// GNU subst.c:9917 want_indir + subst.c:122 VALID_INDIR_PARAM: a `!`
+    /// prefix introduces indirect expansion only when the next character is
+    /// a valid indirect parameter; `#` and `?` qualify only outside posix
+    /// mode, so `${!?}` under `sh` is the `!` parameter under the `?`
+    /// operator (posixexp2.sub test 6), not indirection through `$?`.
+    pub(in crate::executor) fn indirect_parameter_body<'a>(
+        &self,
+        name: &'a str,
+    ) -> Option<&'a str> {
+        let body = name.strip_prefix('!')?;
+        if self.posix_mode_enabled() && matches!(body.chars().next(), Some('#' | '?')) {
+            return None;
+        }
+        Some(body)
+    }
+
     fn indirect_parameter_operator_value(&self, name: &str) -> Option<Option<String>> {
-        let indirect_name = name.strip_prefix('!')?;
+        let indirect_name = self.indirect_parameter_body(name)?;
         if let Some(target_name) = self.nameref_target_name(indirect_name) {
             return Some(Some(target_name));
         }
@@ -656,7 +672,7 @@ impl Executor {
             // array subscript form, or the prefix@ variable-name listing
             // form; anything else (e.g. a stray trailing '!' in ${!bad!})
             // is a bad substitution in GNU.
-            if let Some(indirect) = inner.strip_prefix('!') {
+            if let Some(indirect) = self.indirect_parameter_body(inner) {
                 if !Self::is_valid_indirect_expression(indirect) {
                     return Some((format!("${{{inner}}}"), "bad substitution".to_string(), 1));
                 }
@@ -801,7 +817,8 @@ impl Executor {
             {
                 return Some((format!("${{{inner}}}"), "bad substitution".to_string(), 1));
             }
-            if let Some((name, message, require_non_empty)) = parse_parameter_error_operator(inner)
+            if let Some((name, message, require_non_empty)) =
+                parse_parameter_error_operator(inner, self.posix_mode_enabled())
             {
                 let value = self.parameter_error_value(name);
                 let is_error = if require_non_empty {
@@ -966,7 +983,7 @@ impl Executor {
         if name.is_empty()
             || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
             || name.starts_with('!')
-            || parse_parameter_error_operator(name).is_some()
+            || parse_parameter_error_operator(name, self.posix_mode_enabled()).is_some()
             || name.contains(":-")
             || name.contains(":=")
             || name.contains(":+")

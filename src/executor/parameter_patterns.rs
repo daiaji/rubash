@@ -234,6 +234,20 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_parameter_pattern_word(&self, pattern: &str) -> String {
+        // GNU parse.y parse_matched_pair: an unclosed quote inside the
+        // ${...} word is an EOF syntax error, so expansion aborts the
+        // command (`${c%' z'}` is fine; `${c%\' z'}` leaves an unclosed '
+        // after the escaped quote and the whole command fails).
+        if let Some(quote) = unclosed_pattern_quote(pattern) {
+            eprintln!(
+                "{}unexpected EOF while looking for matching `{}'",
+                self.diagnostic_prefix(),
+                quote
+            );
+            self.arithmetic_fatal_error.set(true);
+            self.arithmetic_expansion_error.set(true);
+            return String::new();
+        }
         // Decode quotes before embedded expansion so quoted glob
         // metacharacters stay marked, but mask nested braced parameters
         // first so the decoder does not tag glob chars inside an inner
@@ -448,4 +462,26 @@ fn mark_escaped_pattern_anchors(pattern: &str) -> String {
         }
     }
     output
+}
+
+/// Scan a pattern word for a single/double quote that never closes
+/// (backslash escapes its successor). Mirrors the quote tracking GNU's
+/// parse_matched_pair performs while finding the `}` of `${...}`.
+fn unclosed_pattern_quote(pattern: &str) -> Option<char> {
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in pattern.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '\'' if quote.is_none() => quote = Some('\''),
+            '"' if quote.is_none() => quote = Some('"'),
+            c if Some(c) == quote => quote = None,
+            _ => {}
+        }
+    }
+    quote
 }

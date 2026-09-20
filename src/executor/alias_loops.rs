@@ -72,8 +72,11 @@ impl Executor {
             let (Some(fd), Some(body)) = (redirect.fd, redirect.body.clone()) else {
                 continue;
             };
-            let body =
-                strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&body)).to_string();
+            let body = if let Some(pre) = preexpanded_stdin_body(&body) {
+                pre.to_string()
+            } else {
+                strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&body)).to_string()
+            };
             saved_fd_inputs.push((fd, self.fd_table.entries.get(&fd).cloned()));
             self.fd_table
                 .open_input(fd, FdReadEndpoint::text(&body), true);

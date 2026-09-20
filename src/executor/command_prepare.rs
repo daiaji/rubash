@@ -171,7 +171,8 @@ impl Executor {
             return Ok(());
         }
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
-            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             self.exit_code = 1;
             // GNU Bash 5.2 subst.c:10404-10410: `${special=word}` on a
             // special/positional param reports "$N: cannot assign in this
@@ -188,7 +189,8 @@ impl Executor {
         // substitution, so the 5.2-era whole-word `bad substitution`
         // pre-check no longer applies.
         if let Some((name, message, status)) = self.parameter_expansion_error(cmd) {
-            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             self.exit_code = status;
             if status == 1 {
                 // GNU Bash 5.2: bad substitution and `substring expression
@@ -332,7 +334,8 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
-            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             self.exit_code = 1;
             // Same GNU DISCARD class as execute_empty_words_command above:
             // subst.c:10404-10410 expand_wdesc_error (non-fatal) for
@@ -345,7 +348,8 @@ impl Executor {
         // substitution, so the 5.2-era whole-word `bad substitution`
         // pre-check no longer applies.
         if let Some((name, message, status)) = self.parameter_expansion_error(cmd) {
-            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             self.exit_code = status;
             if status == 1 {
                 // GNU 5.2 non-fatal word-expansion errors (bad substitution,
@@ -1467,6 +1471,7 @@ impl Executor {
                     &self.expand_embedded_parameters_mut_with_context(
                         &crate::executor::parameter_words::decode_double_quotes_in_quoted_parameter_word(
                             alternate,
+                            self.posix_mode_enabled(),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                     ),

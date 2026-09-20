@@ -1147,3 +1147,63 @@ comsub 17、procsub 13、jobs 63→59、comsub2 48→44、cond 19——无回归
 
 **已知边界**：`time cmd` 的计时报告未实现（GNU `real/user/sys` 三行，
 语义无关 ExitCode）；`select` 空 stdin 菜单重绘差异为既有项。
+
+## 第二十六节：2026-09-20 posixexp 清零 + heredoc/here-string 预展开载体（fix/array6-patsub-quotes）
+
+**本批修复（GNU C 依据逐一对应）**：
+
+- **`${'x1'%'t'}` bad substitution**（`subst.c:10272-10288`
+  `parameter_brace_expand`）：参数名被非法字符（引号）终止 →
+  `default:` 报 bad substitution。展开期检测
+  （`expand_word.rs braced_name_ends_on_quote` +
+  `parameter_bad_substitution` 旗标），故 `${x-${'x1'%'t'}}` 在 x
+  已设时不报（交替词未求值），与 GNU 条件求值一致；posix 非交互
+  → FORCE_EOF 致命（`-c` rc=127、脚本 rc=1），非 posix → DISCARD
+  命令中止脚本继续（`subst.c:10288`、`shell.c:1471`、`eval.c:104`）。
+- **下标引号跳读**：`braced_name_ends_on_quote` 的 `[...]` 扫描按 GNU
+  `skipsubscript` 跳过 `'...'`/`"..."`/`\x` 区段——`${myarray[']']}`
+  合法，不再误报 bad substitution（assoc5.sub）。
+- **heredoc/here-string 预展开载体 `\x05`**（`redir.c` 展开次序：
+  `do_redirections` 在 `expand_words` 之后、命令执行之前展开 stdin
+  体）：`execute_command` 词展开后预展开 heredoc/here-string，结果
+  以 `PREEXPANDED_STDIN_BODY` 前缀缓存；`expand_heredoc_body*`、
+  `expand_here_string_mut`、`stdin_string_for_command*`、
+  `read_heredoc_fd_input`、`alias_loops`、`trap_exec` 全部识别载体
+  并返回缓存文本——体只展开一次，`${'x1'%'t'}` 在 `cat <<EOF` /
+  `read <<<` 中正确致命且不再二次展开/重复诊断。
+- **posix 下 `${!?}`/`${!#}` 非间接**（`subst.c:122 VALID_INDIR_PARAM`：
+  posix 下 `#`/`?` 不是合法间接参数名）：argv0=`sh` 时 `${!?}` 走
+  `?` 算子（posixexp2.sub test 6）。
+- **posix 算术展开错误致命**（`subst.c:10881-10888` +
+  `shell.c:1471` + `eval.c:104`）：`$((x+))` 在 posix 非交互下
+  FORCE_EOF——`-c` rc=127、脚本 rc=1；非 posix 命令中止脚本继续。
+- **无扩展名 PE 直接 exec**（`shell_execve` 先试 execve 再分类）：
+  `cp ${THIS_SH} $TMPDIR/sh` 的无扩展名副本经 MZ magic 探测直接
+  CreateProcess，使套件 posix 重命名子 shell 链路打通；`Executor::new`
+  的 `THIS_SH` 自动检测保留已导出的合法 `sh`/`sh.exe` 路径。
+- **`${x?}` 诊断走命令重定向状态**（`execute_cmd.c` `expand_words`
+  先于 `do_redirections`）：新增 `write_redirected_command_stderr`，
+  子 shell `(${x?}) 2>&1` 诊断正确进管道。
+- **null IFS 下 `$@` 连接符**（`subst.c:3006 string_list_dollar_at`：
+  `PF_ASSIGNRHS || ifs 未设 || ifs 空 → ' '`）：赋值 RHS 快路 `a=$@`
+  在 `IFS=` 下用空格连接（posixexp3.sub）；`$*` 仍用 `ifs_firstc`。
+- **未闭合 `$(` 报 unexpected EOF 中止命令**（`parse.y parse_comsub`）：
+  `collect_command_substitution_source_ex` 返回闭合标志，
+  `"${a+'$('\'}"` 类报 EOF 错、命令中止、脚本继续（braces）。
+- **dq 上下文 `\'` 保留反斜杠**：`decode_double_quotes_in_quoted_parameter_word`
+  非 posix 分支 `\'` → `\x14\x17`（rhs-exp `\'$selvecs\'` → `\'...\'`），
+  裸 `'` → `\x17`（braces `'x y'` 字面量）。
+- **`#`/`%` 模式词 sq 保护**：`push_quoted_pattern_char` sq 臂对
+  `$`/`` ` ``/`"` 出 `\$` 转义形式（braces `'$('` 不展开）。
+
+**台账**（true-baseline.sh 同口径）：posixexp 7→0、braces 1→0、
+assoc 0、array 0、rhs-exp 0、quotearray 50、comsub2 38→34、
+ifs-posix 1、exp 4（`/src/cmd` 环境路径噪声）、new-exp 60、comsub 17。
+标记载体回归（array/assoc/exp/quotearray 一度 +2~+5）已全部归零。
+
+**已知残留**（预存，非本批引入）：
+- `read v <&3 3<<EOF`：GNU 按序应用重定向（`<&3` 先于 `3<<` → fd3
+  未开报 Bad file descriptor）；RB 的 `heredoc_redirects` 独立存储
+  无法与 `redirects` 交错排序——架构项待修。
+- `${!@}`/`${!*}` 非 posix 下 bad substitution 缺口（`VALID_INDIR_PARAM`
+  对 `@`/`*` 合法但 RB 间接路径未实现）。

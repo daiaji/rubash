@@ -117,7 +117,7 @@ impl Executor {
                     }
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(default),
+                            &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.env_vars.get("IFS").map(String::as_str),
@@ -130,7 +130,7 @@ impl Executor {
                     .unwrap_or_else(|| {
                         unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(default),
+                                &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.env_vars.get("IFS").map(String::as_str),
@@ -147,7 +147,7 @@ impl Executor {
                     if !joined.is_empty() {
                         return unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(alternate),
+                                &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.env_vars.get("IFS").map(String::as_str),
@@ -161,7 +161,7 @@ impl Executor {
                 {
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(alternate),
+                            &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.env_vars.get("IFS").map(String::as_str),
@@ -277,7 +277,7 @@ impl Executor {
                     if non_empty {
                         return unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(alternate),
+                                &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.env_vars.get("IFS").map(String::as_str),
@@ -288,7 +288,7 @@ impl Executor {
                 if self.parameter_operator_value(var_name).is_some() {
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(alternate),
+                            &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.env_vars.get("IFS").map(String::as_str),
@@ -308,7 +308,7 @@ impl Executor {
                     }
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(default),
+                            &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.env_vars.get("IFS").map(String::as_str),
@@ -320,7 +320,7 @@ impl Executor {
                     .unwrap_or_else(|| {
                         unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(default),
+                                &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.env_vars.get("IFS").map(String::as_str),
@@ -439,6 +439,16 @@ impl Executor {
             return self.expand_embedded_parameters_mut_with_context(word, context);
         }
 
+        // GNU subst.c:10272-10288 (parameter_brace_expand): a quote
+        // terminating the parameter name matches no operator arm and lands
+        // on the `bad substitution` default. Mirror of the same check in
+        // expand_braced_parameter_word for the `\x1d`/whole-word entry.
+        if crate::executor::expand_word::braced_name_ends_on_quote(name) {
+            eprintln!("{}{}: bad substitution", self.diagnostic_prefix(), word);
+            self.parameter_bad_substitution.set(true);
+            return String::new();
+        }
+
         // This `\x1d`-quoted word IS one `${}` fragment: record site [0]
         // so the `:=`/`-=` operator set-checks dedup subscript side
         // effects against the pre-scan (SUB_RES_XPASS). An active site
@@ -457,7 +467,7 @@ impl Executor {
                     let default = self.tilde_expand_operator_word(default, context);
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters_mut_with_context(
-                            &decode_double_quotes_in_quoted_parameter_word(&default),
+                            &decode_double_quotes_in_quoted_parameter_word(&default, self.posix_mode_enabled()),
                             context,
                         ),
                         context,
@@ -472,7 +482,7 @@ impl Executor {
                         let default = self.tilde_expand_operator_word(default, context);
                         unescape_parameter_operator_result(
                             &self.expand_embedded_parameters_mut_with_context(
-                                &decode_double_quotes_in_quoted_parameter_word(&default),
+                                &decode_double_quotes_in_quoted_parameter_word(&default, self.posix_mode_enabled()),
                                 context,
                             ),
                             context,
@@ -491,7 +501,7 @@ impl Executor {
                         let alternate = self.tilde_expand_operator_word(alternate, context);
                         return unescape_parameter_operator_result(
                             &self.expand_embedded_parameters_mut_with_context(
-                                &decode_double_quotes_in_quoted_parameter_word(&alternate),
+                                &decode_double_quotes_in_quoted_parameter_word(&alternate, self.posix_mode_enabled()),
                                 context,
                             ),
                             context,
@@ -507,7 +517,7 @@ impl Executor {
                     let alternate = self.tilde_expand_operator_word(alternate, context);
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters_mut_with_context(
-                            &decode_double_quotes_in_quoted_parameter_word(&alternate),
+                            &decode_double_quotes_in_quoted_parameter_word(&alternate, self.posix_mode_enabled()),
                             context,
                         ),
                         context,
@@ -655,7 +665,7 @@ impl Executor {
                 if let Some((_, non_empty)) = self.list_operand_joined_word(var_name) {
                     if non_empty {
                         let alternate = self.tilde_expand_operator_word(alternate, context);
-                        let decoded = decode_double_quotes_in_quoted_parameter_word(&alternate);
+                        let decoded = decode_double_quotes_in_quoted_parameter_word(&alternate, self.posix_mode_enabled());
                         let expanded =
                             self.expand_embedded_parameters_mut_with_context(&decoded, context);
                         return unescape_parameter_operator_result(&expanded, context,
@@ -666,7 +676,7 @@ impl Executor {
                 }
                 if self.parameter_operator_value(var_name).is_some() {
                     let alternate = self.tilde_expand_operator_word(alternate, context);
-                    let decoded = decode_double_quotes_in_quoted_parameter_word(&alternate);
+                    let decoded = decode_double_quotes_in_quoted_parameter_word(&alternate, self.posix_mode_enabled());
                     let expanded =
                         self.expand_embedded_parameters_mut_with_context(&decoded, context);
                     let final_value = unescape_parameter_operator_result(&expanded, context,
@@ -689,7 +699,7 @@ impl Executor {
                     let default = self.tilde_expand_operator_word(default, context);
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters_mut_with_context(
-                            &decode_double_quotes_in_quoted_parameter_word(&default),
+                            &decode_double_quotes_in_quoted_parameter_word(&default, self.posix_mode_enabled()),
                             context,
                         ),
                         context,
@@ -703,7 +713,7 @@ impl Executor {
                         let default = self.tilde_expand_operator_word(default, context);
                         unescape_parameter_operator_result(
                             &self.expand_embedded_parameters_mut_with_context(
-                                &decode_double_quotes_in_quoted_parameter_word(&default),
+                                &decode_double_quotes_in_quoted_parameter_word(&default, self.posix_mode_enabled()),
                                 context,
                             ),
                             context,
@@ -781,7 +791,7 @@ impl Executor {
         }
         // Remove double quotes from the alternate (matching the `+`/`-`
         // operator path which calls decode_double_quotes_in_quoted_parameter_word).
-        let decoded = decode_double_quotes_in_quoted_parameter_word(&protected);
+        let decoded = decode_double_quotes_in_quoted_parameter_word(&protected, self.posix_mode_enabled());
         // Use DoubleQuoted context so single quotes are treated as data
         // (not quote delimiters), matching GNU's expand_string_for_rhs
         // behavior inside double quotes. Use unescape_parameter_operator_result
@@ -1057,6 +1067,7 @@ fn scan_word_prefix_quote_state(prefix: &str, quoted_word: bool) -> (bool, bool)
 
 pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
     word: &str,
+    posix: bool,
 ) -> String {
     let mut output = String::new();
     let chars = word.chars().collect::<Vec<_>>();
@@ -1069,7 +1080,11 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
         // quote that later stages swallowed.
         if chars[index] == '\\'
             && index + 1 < chars.len()
-            && matches!(chars[index + 1], '$' | '`' | '"' | '\\' | '}' | '\n')
+            && (matches!(chars[index + 1], '$' | '`' | '"' | '\\' | '}' | '\n')
+                // GNU parse.y dolbrace is POSIX-only: outside POSIX mode a
+                // `'` inside "${var op word}" is literal data, so \' is an
+                // escape pair producing a literal quote.
+                || (!posix && chars[index + 1] == '\''))
         {
             // `\\` becomes the escaped-backslash marker (\x14) so the
             // expansion walker treats it as data, not as an escape for
@@ -1077,11 +1092,25 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
             // but does NOT escape `$`; rhs-exp: `\\$selvecs` → `\&m68kcoff_vec`).
             if chars[index + 1] == '\\' {
                 output.push('\x14');
+            } else if chars[index + 1] == '\'' {
+                // GNU retains the backslash: `\'` inside a double-quoted
+                // "${var op word}" survives quote removal as literal
+                // backslash+quote (rhs-exp.tests `\'$selvecs\'`).
+                output.push('\x14');
+                output.push('\x17');
             } else {
                 output.push(chars[index]);
                 output.push(chars[index + 1]);
             }
             index += 2;
+            continue;
+        }
+        if chars[index] == '\'' && !posix {
+            // Non-POSIX "${var op word}": ' is literal text, never an sq
+            // opener. Emit it escaped so the expansion pass yields a data
+            // quote and any following $( still expands (braces.tests).
+            output.push('\x17');
+            index += 1;
             continue;
         }
         if chars[index] != '"' {

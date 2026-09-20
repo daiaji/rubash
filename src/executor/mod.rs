@@ -569,6 +569,15 @@ pub struct Executor {
     /// word expansion where it cannot return an error, so it latches here
     /// and execute_prepared_command raises ExpansionFailure(1).
     parameter_assignment_failure: Cell<bool>,
+    /// GNU subst.c:10272-10288 (parameter_brace_expand): a `${...}` whose
+    /// parameter name ends on a character that starts no operator — a quote
+    /// at name position (`${'x'%'t'}`, `${x'y'}`) — hits the `bad
+    /// substitution` default. The error surfaces mid-expansion (nested
+    /// `${}` inside a pattern/alternate word reaches it only when that word
+    /// is actually evaluated), so the expander latches it here and the
+    /// command boundary raises DISCARD — or FORCE_EOF for a noninteractive
+    /// POSIX shell (subst.c:10288).
+    parameter_bad_substitution: Cell<bool>,
     /// GNU variables.c:3536 assign_in_env: names bound through `name=value
     /// cmd` temporary-environment assignments are live at the command's
     /// variable context while it runs — a function-local `declare -n r`

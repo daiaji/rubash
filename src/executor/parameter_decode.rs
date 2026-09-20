@@ -290,7 +290,7 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
             if escaped {
                 quoted.push('\\');
             }
-            push_quoted_pattern_str(&mut output, &decode_ansi_c_escapes(&quoted));
+            push_literal_pattern_str(&mut output, &decode_ansi_c_escapes(&quoted));
             continue;
         }
 
@@ -308,7 +308,7 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
                     {
                         index += 1;
                         if escaped != '\n' {
-                            push_quoted_pattern_char(&mut output, escaped);
+                            push_literal_pattern_char(&mut output, escaped);
                         }
                         continue;
                     }
@@ -327,7 +327,7 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
                 if let Some(close_offset) = chars[index + 1..].iter().position(|ch| *ch == '\'') {
                     let close = index + 1 + close_offset;
                     for ch in &chars[index + 1..close] {
-                        push_quoted_pattern_char(&mut output, *ch);
+                        push_literal_pattern_char(&mut output, *ch);
                     }
                     index = close + 1;
                 } else {
@@ -354,7 +354,7 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
                         {
                             index += 1;
                             if escaped != '\n' {
-                                push_quoted_pattern_char(&mut output, escaped);
+                                push_literal_pattern_char(&mut output, escaped);
                             }
                             continue;
                         }
@@ -372,7 +372,7 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
                     if *ch == '\\' {
                         output.push('\x18');
                     } else {
-                        push_quoted_pattern_char(&mut output, *ch);
+                        push_literal_pattern_char(&mut output, *ch);
                     }
                     index += 2;
                 } else {
@@ -389,6 +389,27 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
         }
     }
     output
+}
+
+/// Literal-context variant of push_quoted_pattern_char: single-quoted,
+/// ANSI-C and backslash-escaped pattern text is inert for expansion (GNU
+/// pat_expand honors the quoting), so `$`, `` ` `` and `"` are emitted in
+/// escaped form -- the embedded expander turns `\$` / \` / `\"` into data
+/// characters instead of opening a substitution or a quote span.
+fn push_literal_pattern_str(output: &mut String, value: &str) {
+    for ch in value.chars() {
+        push_literal_pattern_char(output, ch);
+    }
+}
+
+fn push_literal_pattern_char(output: &mut String, ch: char) {
+    match ch {
+        '\'' | '"' | '$' | '`' => {
+            output.push('\\');
+            output.push(ch);
+        }
+        _ => push_quoted_pattern_char(output, ch),
+    }
 }
 
 fn push_quoted_pattern_str(output: &mut String, value: &str) {

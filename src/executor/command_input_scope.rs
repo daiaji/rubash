@@ -202,6 +202,9 @@ impl Executor {
     /// A dedicated quoted-heredoc marker keeps the body literal without sharing
     /// the compound-assignment transport protocol.
     pub(in crate::executor) fn expand_heredoc_body_mut(&mut self, body: &str) -> String {
+        if let Some(pre) = preexpanded_stdin_body(body) {
+            return pre.to_string();
+        }
         let quoted = body.starts_with(crate::lexer::QUOTED_HEREDOC_MARKER);
         let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));
         if quoted {
@@ -238,6 +241,9 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_heredoc_body(&self, body: &str) -> String {
+        if let Some(pre) = preexpanded_stdin_body(body) {
+            return pre.to_string();
+        }
         let quoted = body.starts_with(crate::lexer::QUOTED_HEREDOC_MARKER);
         let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));
         if quoted {

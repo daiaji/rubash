@@ -273,6 +273,22 @@ pub(in crate::executor) fn strip_quoted_heredoc_marker(body: &str) -> &str {
         .unwrap_or(body)
 }
 
+/// Marks a here-document body or here-string word already expanded by the
+/// command dispatch (execute_command). GNU expands them inside
+/// do_redirections — after word expansion, before the command runs — so
+/// the executor expands them at the same point and stores the result with
+/// this prefix; the stdin paths return it verbatim instead of re-running
+/// embedded substitutions a second time. 0x05 is unused by every other
+/// sentinel layer and cannot appear at the start of a raw heredoc body or
+/// here-string word produced by the parser.
+pub(in crate::executor) const PREEXPANDED_STDIN_BODY: char = '\x05';
+
+/// Returns the pre-expanded text when `body` carries
+/// PREEXPANDED_STDIN_BODY.
+pub(in crate::executor) fn preexpanded_stdin_body(body: &str) -> Option<&str> {
+    body.strip_prefix(PREEXPANDED_STDIN_BODY)
+}
+
 pub(in crate::executor) fn unterminated_heredoc_body_line_count(body: &str) -> usize {
     let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));
     body.lines().count()
