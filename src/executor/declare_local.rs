@@ -480,6 +480,14 @@ impl Executor {
                         .env_vars
                         .get(lhs)
                         .is_some_and(|v| v.starts_with('\x1d'));
+                if !marked && !target_is_array {
+                    // Scalar target + unmarked parenthesized text: GNU binds
+                    // the literal string (bind_variable_value), never
+                    // reparsing it -- `declare c='(1 2)'` stores `(1 2)`
+                    // verbatim. Skipping the element rewrite also keeps the
+                    //  field tags out of the scalar cell.
+                    return Ok(arg.clone());
+                }
                 let (compound, preexpanded) = if marked && sq_raw_inner.is_none() {
                     (compound, false)
                 } else if target_is_array {

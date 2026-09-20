@@ -2089,24 +2089,56 @@ pub(in crate::executor) fn expand_braces_with_optional_raw(
 }
 
 fn word_contains_brace_group(word: &str) -> bool {
+    // GNU braces.c brace_expand: braces inside a `${...}`/`$(...)` body are
+    // expansion syntax, not brace-expansion candidates -- `a${u-{x,y}}z`
+    // renders literally and `declare a=("${x[@]}" "y")` must not be dequoted
+    // by the raw re-expansion path. Skip each `$`-opened body through its
+    // matching close, tracking nested opens.
+    let chars: Vec<char> = word.chars().collect();
     let mut escaped = false;
     let mut open = false;
-    for ch in word.chars() {
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
         if escaped {
             escaped = false;
+            index += 1;
             continue;
         }
         if ch == '\\' {
             escaped = true;
+        } else if ch == '$'
+            && matches!(chars.get(index + 1), Some(&next) if next == '{' || next == '(')
+        {
+            let open_ch = chars[index + 1];
+            let close_ch = if open_ch == '{' { '}' } else { ')' };
+            let mut depth = 1usize;
+            let mut inner = index + 2;
+            let mut inner_escaped = false;
+            while inner < chars.len() && depth > 0 {
+                let inner_ch = chars[inner];
+                if inner_escaped {
+                    inner_escaped = false;
+                } else if inner_ch == '\\' {
+                    inner_escaped = true;
+                } else if inner_ch == open_ch {
+                    depth += 1;
+                } else if inner_ch == close_ch {
+                    depth -= 1;
+                }
+                inner += 1;
+            }
+            index = inner;
+            continue;
         } else if ch == '{' {
             open = true;
         } else if ch == '}' && open {
             return true;
         }
+        index += 1;
     }
     false
 }
-
 pub(in crate::executor) fn restore_pathname_escape_markers(word: &str) -> String {
     let word = crate::expand::tilde::tilde::strip_assignment_quote_marker(word);
     let word = word
