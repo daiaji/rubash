@@ -241,6 +241,20 @@ root 定位），**不允许直接删**；做法是**改名迁移**，且只在�
 
 **改名迁移步骤**（每步独立可验证，零功能变化）：
 
+0. **全量盘点（2026-09-20 grep 全仓）**：11 个源文件含 winux 痕迹，逐个归类——
+
+| 痕迹 | 位置 | 处置 |
+|---|---|---|
+| `WINUXSH_ROOT` 导出+读取 | public_accessors.rs:110、path.rs:96/1197、pwd.rs:202 | 上文改名迁移 |
+| `WINUXCMD`/`WINUXCMD_PATH` env | path.rs:98-99（与 ROOT 同一张表） | 随上表一并改名迁移 |
+| `WINUXSH_SHELL_PATH_STYLE` | init.rs:7、builtins/cd/paths.rs:113 | 改宿主注入配置（如 `__RUBASH_PATH_STYLE`） |
+| `WINUXSH_HIST_IGNORE_DUPS/_SPACE` | zsh_options.rs:111/117 | 改名迁移（zsh→bash 迁移期兼容选项） |
+| `~user` 读 winuxcmd passwd 数据 | expand/tilde/tilde.rs:67-70 | **功能依赖**：tilde 补全依赖 winuxcmd 的用户库——登记为引擎 hook（host 注入 passwd provider），不能只改名 |
+| path.rs 内嵌 winux/winuxcmd 路径处理串 | 479/512/521/524/1288/1841/1849/2152 | 逐个审：平台路径翻译逻辑（正当）但命名去 winux 化 |
+| 注释引用 winuxcmd | command_substitution_pipelines.rs:605、pipeline_exec.rs:757/984、path.rs:27、init.rs:250 | 允许存在（注释），措辞顺手中性化 |
+| bash shim | bin/bash.rs | 保留（AI invoker 入口，feature-gate + 注明用途） |
+| 测试夹具串 | support_names.rs:593、tests/ 若干 | 保留（fixture） |
+
 1. 定新名（如 `NIU_SHELL_ROOT` 或中性 `SHELL_ROOT_DIR`），由宿主注入；
    引擎 `set_shell_root` 的导出改挂新名，`WINUXSH_ROOT` 转为兼容别名继续
    导出一个迁移期。
