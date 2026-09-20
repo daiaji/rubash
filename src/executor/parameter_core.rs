@@ -32,6 +32,13 @@ impl Executor {
         word: &str,
         context: SubstitutionQuoteContext,
     ) -> String {
+        // One cross-pass subscript-eval memo scope per word expansion:
+        // the `:=` pre-scan, assignment apply, and real expansion of the
+        // same `${}` fragment share its single GNU evaluation. `${}` body
+        // expansions reaching here inside an enclosing word keep that
+        // word's context so their nested sites stay under its path.
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
         self.apply_parameter_assignment_expansions_in_word(word);
 
         if let Some(word) = word.strip_prefix('\x1b') {
@@ -44,31 +51,17 @@ impl Executor {
                 .expand_quoted_parameter_word_mut(word, SubstitutionQuoteContext::DoubleQuoted);
         }
 
-        if let Some((raw_name, value)) = word.split_once('=') {
-            let name = self.expand_embedded_parameters_mut(raw_name);
-            let (base_name, _) = assignment_name_and_append(&name);
-            if raw_name.contains('$')
-                && !raw_name.contains(['{', '(', ')', '}'])
-                && is_shell_name(base_name)
-            {
-                let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
-                let value = tilde_expand::strip_assignment_quote_marker(value);
-                if let Some(prepared) = self.expand_escaped_indirect_parameter_literal(value) {
-                    return format!("{name}={}", unescape_remaining_shell_escapes(&prepared));
-                }
-                let expanded = self.expand_embedded_parameters_mut(value);
-                if !quoted
-                    && !expanded.contains('=')
-                    && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
-                    && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
-                        || expanded.starts_with("~/"))
-                {
-                    return format!("{name}={}", self.expand_assignment_tilde(&expanded));
-                }
-
-                return format!("{name}={expanded}");
-            }
-        }
+        // GNU general.c:480 assignment(): whether a word is an assignment is
+        // decided on the raw token — legal_variable_starter, then
+        // legal_variable_chars, then an optional bracketed subscript. A `$`
+        // outside a subscript bracket (`$x=v`, `a$b=v`, `A:$((i++)) i=v`) is
+        // never an assignment name, so the word expands once as an ordinary
+        // word. Expanding the name portion here to test it applied expansion
+        // side effects ($((i++)), $(...) writes) for non-assignment words and
+        // then discarded the result, so the word expanded twice below.
+        // Static assignment words still route through split_assignment_word;
+        // `name[$i]=v` reaches the same element-assignment result via the
+        // single generic expansion.
 
         if let Some((name, value)) = split_assignment_word(word) {
             // GNU general.c:480 assignment() only marks an UNQUOTED token
@@ -462,7 +455,15 @@ impl Executor {
             })
             .unwrap_or(value)
             .trim();
-        let expression = self.expand_arithmetic_special_parameters(expression);
+        // GNU subst.c:11395-11404 expand_array_subscript (under Q_ARITH):
+        // a `name[sub]` inside the offset/length expands its subscript once
+        // and backslash-quotes the products (abstab), so `A[$k]` with
+        // k=`$(echo %)` keys on the literal `$(echo %)`. Encoding the assoc
+        // key FIRST matters: if the $-passes below ran on `A[$k2]` first,
+        // the raw `$(echo %)` product would sit inside the brackets and the
+        // encoder would execute it a second time.
+        let expression = self.expand_substring_assoc_subscripts(&expression);
+        let expression = self.expand_arithmetic_special_parameters(&expression);
         // Expand nested parameter expansions in the offset/length expression
         // first: `${v:${w:-4}}` has offset `${w:-4}` which must become `4`
         // before arithmetic evaluation (Bash evaluates the slice offset as
@@ -479,6 +480,58 @@ impl Executor {
             *self.arithmetic_last_error_expression.borrow_mut() = expression.to_string();
         }
         isize::try_from(evaluated?).ok()
+    }
+
+    /// `&self` counterpart of
+    /// [`Executor::expand_arithmetic_assoc_subscripts`] for the substring
+    /// offset/length scan: finds `name[sub]` references to associative
+    /// variables and replaces the subscript with the opaque encoded key
+    /// after one `expand_subscript_string` pass.
+    fn expand_substring_assoc_subscripts(&self, expression: &str) -> String {
+        let bytes = expression.as_bytes();
+        if !bytes.contains(&b'[') {
+            return expression.to_string();
+        }
+        let mut output = String::with_capacity(expression.len());
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let ch = bytes[index];
+            if !(ch.is_ascii_alphabetic() || ch == b'_') {
+                let next = expression[index..].chars().next().unwrap_or_default();
+                output.push(next);
+                index += next.len_utf8();
+                continue;
+            }
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            let name = &expression[start..index];
+            if index < bytes.len()
+                && bytes[index] == b'['
+                && is_marked_var(&self.env_vars, ASSOC_VARS, name)
+            {
+                if let Some(close) = expression[index..].find(']').map(|p| index + p) {
+                    let raw = &expression[index + 1..close];
+                    if !raw.is_empty() {
+                        let key = self.expand_subscript_string(raw);
+                        output.push_str(name);
+                        output.push('[');
+                        output.push_str(
+                            &crate::executor::arithmetic::encode_arithmetic_assoc_key(&key),
+                        );
+                        output.push(']');
+                        index = close + 1;
+                        continue;
+                    }
+                }
+            }
+            output.push_str(name);
+        }
+        output
     }
 
     pub(in crate::executor) fn parse_parameter_substring_mut<'a>(
@@ -575,7 +628,11 @@ impl Executor {
             })
             .unwrap_or(value)
             .trim();
-        let expression = self.expand_arithmetic_special_parameters(expression);
+        // Same expand_array_subscript protection as the &self variant:
+        // encode `name[sub]` assoc subscripts before the $-passes, so
+        // expansion products inside the subscript stay verbatim keys.
+        let expression = self.expand_arithmetic_assoc_subscripts(&expression, false);
+        let expression = self.expand_arithmetic_special_parameters(&expression);
         let expression = self.expand_embedded_parameters_mut(&expression);
         let evaluated = self.eval_arithmetic_expansion_value(&expression);
         if evaluated.is_none() {

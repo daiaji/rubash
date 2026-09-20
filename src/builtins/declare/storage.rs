@@ -214,36 +214,19 @@ pub(super) fn quote_double(value: &str) -> String {
 
 // ---- GNU declare -p display quoting (assoc.c assoc_to_assign) -------------
 
-/// strtrans.c ansic_shouldquote: `$'...'` quoting is needed when the string
-/// contains a non-printing character. With a UTF-8 locale, printable
-/// non-ASCII characters stay literal (ansic_wshouldquote passes them).
+/// strtrans.c ansic_shouldquote (341-361): `$'...'` quoting is needed
+/// when the string holds a non-printing byte. Delegates to the executor's
+/// byte-stream implementation so raw-byte markers decode before the test
+/// (a stored 0xA2 is a PUA wide char that `char::is_control` would pass).
 fn gnu_ansic_shouldquote(value: &str) -> bool {
-    value.chars().any(|ch| ch.is_control())
+    crate::executor::ansic_shouldquote(value)
 }
 
-/// strtrans.c ansic_quote: render the `$'...'` form. Named escapes for the
-/// C specials, `\\` and `\'` verbatim, other non-printing characters as
-/// three-digit octal escapes.
+/// strtrans.c ansic_quote (230-308): the `$'...'` form over the raw byte
+/// stream — named escapes, `\\`/`\'` escaped, printable bytes literal,
+/// every other byte a three-digit octal escape.
 fn gnu_ansic_quote(value: &str) -> String {
-    let mut out = String::from("$'");
-    for ch in value.chars() {
-        match ch {
-            '\u{1b}' => out.push_str("\\E"),
-            '\u{7}' => out.push_str("\\a"),
-            '\u{b}' => out.push_str("\\v"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
-            c if !c.is_control() => out.push(c),
-            c => out.push_str(&format!("\\{:03o}", c as u32)),
-        }
-    }
-    out.push('\'');
-    out
+    crate::executor::ansic_quote(value)
 }
 
 /// shquote.c sh_contains_shell_metas: shell metacharacters force quoting of

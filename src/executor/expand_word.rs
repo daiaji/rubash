@@ -45,6 +45,8 @@ fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
 
 impl Executor {
     pub(crate) fn expand_word(&self, word: &str) -> String {
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
         if let Some(value) = self.expand_marked_or_special_word(word) {
             return value;
         }
@@ -61,6 +63,15 @@ impl Executor {
             .strip_prefix("${")
             .and_then(|rest| rest.strip_suffix('}'))
         {
+            // When this word IS the `${}` fragment being expanded (no
+            // enclosing fragment site), record site (word, 0) so the
+            // `:=`/`-=` layered re-checks dedup subscript side effects
+            // (SUB_RES_XPASS). An active site means the `${` walker arm
+            // already named this fragment — keep it.
+            let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active())
+                .then(|| {
+                    crate::executor::expand_braced_indices::SubSiteGuard::new(0)
+                });
             return self.expand_braced_parameter_word(word, name);
         }
 
@@ -93,9 +104,23 @@ impl Executor {
         if !braced_parameter_spans_whole_word(word) {
             return self.expand_embedded_parameters(word);
         }
-
         if let Some(resolved) = resolve_dollar_quoted_parameter_name(name) {
             return self.expand_braced_parameter_word(word, &resolved);
+        }
+
+        // GNU subst.c:10272-10288 (parameter_brace_expand): the parameter
+        // name is terminated by the first character that cannot be part of
+        // it; when that character starts no operator the switch default
+        // raises "bad substitution". A quote at name position
+        // (`${'x1'%'t'}`, `${x'y'}`) hits it — quotes are only legal in the
+        // word part, after a real operator. Detected here (not in the
+        // command pre-scan) because a nested `${}` inside a pattern or
+        // alternate word reaches expansion only when that word is actually
+        // evaluated (`${x-${'x1'%'t'}}` with x set is silent in GNU).
+        if braced_name_ends_on_quote(name) {
+            eprintln!("{}{}: bad substitution", self.diagnostic_prefix(), bad_substitution_display(word));
+            self.parameter_bad_substitution.set(true);
+            return String::new();
         }
 
         if let Some(value) = self.expand_braced_special_or_indirect_parameter(name, true) {
@@ -152,43 +177,12 @@ impl Executor {
     }
 
     fn expand_assignment_word(&self, word: &str) -> Option<String> {
-        if let Some((raw_name, value)) = word.split_once('=') {
-            let name = self.expand_embedded_parameters(raw_name);
-            let (base_name, _) = assignment_name_and_append(&name);
-            if raw_name.contains('$')
-                && !raw_name.contains(['{', '(', ')', '}'])
-                && is_shell_name(base_name)
-            {
-                return Some(self.expand_parameterized_assignment_word(&name, value));
-            }
-        }
-
+        // GNU general.c:480 assignment(): assignment-ness is decided on the
+        // raw token before expansion (see the matching removal in
+        // expand_word_mut_with_context); expanding the name portion here
+        // applied side effects for words that are not assignments at all.
         let (name, value) = split_assignment_word(word)?;
         Some(self.expand_plain_assignment_word(name, value))
-    }
-
-    fn expand_parameterized_assignment_word(&self, name: &str, value: &str) -> String {
-        let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
-        let value = tilde_expand::strip_assignment_quote_marker(value);
-        if let Some(prepared) = self.expand_escaped_indirect_parameter_literal(value) {
-            return format!("{name}={}", unescape_remaining_shell_escapes(&prepared));
-        }
-        let expanded = self.expand_embedded_parameters(value);
-        let expanded = if quoted {
-            expanded.replace('\x11', "")
-        } else {
-            expanded
-        };
-        if !quoted
-            && !expanded.contains('=')
-            && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
-            && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
-                || expanded.starts_with("~/"))
-        {
-            return format!("{name}={}", self.expand_assignment_tilde(&expanded));
-        }
-
-        format!("{name}={expanded}")
     }
 
     fn expand_plain_assignment_word(&self, name: &str, value: &str) -> String {
@@ -347,4 +341,78 @@ impl Executor {
 
         None
     }
+}
+
+/// GNU subst.c:10272-10288 — parameter_brace_expand extracts the parameter
+/// name and switches on the character that terminated it; a `'`/`"` there
+/// matches no operator arm and lands on the `bad substitution` default.
+/// The name head is an identifier run or a leading special-parameter char,
+/// followed by an optional `[...]` subscript (quotes inside a subscript are
+/// legal — `a[' ']` is an associative-style key, not a name terminator).
+pub(in crate::executor) fn braced_name_ends_on_quote(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i += 1;
+    }
+    if i == 0 {
+        if matches!(
+            bytes.first(),
+            Some(b'!' | b'@' | b'*' | b'#' | b'?' | b'$' | b'-')
+        ) {
+            i = 1;
+        }
+    }
+    if i < bytes.len() && bytes[i] == b'[' {
+        // GNU skipsubscript (subst.c): a `]` quoted by single quotes, double
+        // quotes or a backslash does not terminate the subscript.
+        let mut depth = 0usize;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                b'\'' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'\'' {
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'\\' => i += 1,
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    // \x17/\x18 are the SQ/DQ data sentinels: an operator word quote-
+    // decoded before re-expansion (decode_double_quotes_in_quoted_
+    // parameter_word, "${x-${'u'%'v'}}") reaches here with quote evidence
+    // erased; a sentinel at name position can only come from a source
+    // quote, which lands on the same bad-substitution default.
+    i < bytes.len() && matches!(bytes[i], b'\'' | b'"' | 0x17 | 0x18)
+}
+
+/// Renders a `${...}` word for the bad-substitution diagnostic: operator
+/// words quote-decoded before re-expansion carry data sentinels that
+/// must read back as the source characters like GNU's diagnostic.
+pub(in crate::executor) fn bad_substitution_display(word: &str) -> String {
+    word.replace('\u{17}', "'")
+        .replace('\u{18}', "\"")
+        .replace('\u{14}', "\\")
+        .replace('\u{1f}', "$")
+        .replace('\u{1a}', "`")
 }

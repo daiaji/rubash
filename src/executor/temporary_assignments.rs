@@ -813,15 +813,18 @@ impl Executor {
                 is_marked_var(&self.env_vars, ASSOC_VARS, base_name),
                 true,
             ) {
-                Some(rewritten) => rewritten,
-                None => {
-                    // GNU arrayfunc.c assign_array_var_from_string: the
-                    // target converts to an array BEFORE the element loop
-                    // runs, so a failed element subscript leaves a new
-                    // target bound as `()` (array32.sub `b=( [$bad]=hi )`
-                    // -> `declare -a b=()`), while an existing or
-                    // declared-but-unset target keeps its prior state —
-                    // same invariant as fail_compound_array_assignment.
+                Ok(rewritten) => rewritten,
+                Err(partial) => {
+                    // GNU assign_compound_array_list breaks on the failing
+                    // element but keeps every element processed before it
+                    // and materializes the array — store the partial list
+                    // rather than abandoning the assignment. GNU
+                    // arrayfunc.c assign_array_var_from_string converts the
+                    // target to an array BEFORE the element loop runs, so a
+                    // failed element on a new target still leaves it bound
+                    // as `()` (array32.sub `b=( [$bad]=hi )`), while an
+                    // existing or declared-but-unset target keeps its prior
+                    // state.
                     if !self.env_vars.contains_key(base_name)
                         && !is_marked_var(&self.env_vars, DECLARED_UNSET_VARS, base_name)
                     {
@@ -831,6 +834,26 @@ impl Executor {
                         );
                         mark_env_name(&mut self.env_vars, ARRAY_VARS, base_name);
                     }
+                    let current = self
+                        .env_vars
+                        .get(base_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let integer = is_marked_var(&self.env_vars, INTEGER_VARS, base_name);
+                    let stored = if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
+                        append_assoc_value(&current, &partial, integer, &self.env_vars)
+                    } else {
+                        append_array_value(
+                            &current,
+                            &partial,
+                            integer,
+                            self.env_vars.get("IFS").map(String::as_str),
+                            &self.env_vars,
+                        )
+                        .unwrap_or(current)
+                    };
+                    self.env_vars.insert(base_name.to_string(), stored);
+
                     self.exit_code = 1;
                     return false;
                 }
@@ -886,6 +909,7 @@ impl Executor {
             && is_marked_var(&self.env_vars, ASSOC_VARS, base_name)
         {
             let bare_elements = assoc_bare_elements(&value);
+            let empty_keys = assoc_empty_key_words(&value);
             // GNU assign_compound_array_list (arrayfunc.c:838-843): a bare
             // element in an assoc compound assignment reports an error and
             // breaks the loop, but elements already processed ARE stored.
@@ -904,6 +928,19 @@ impl Executor {
                     self.assignment_diagnostic_prefix(),
                     base_name,
                     bare
+                );
+                self.emit_assignment_diag(line);
+            }
+            // GNU assign_assoc_from_kvlist (arrayfunc.c:644-650): a kvpair
+            // word whose expanded key is empty reports `<word>: bad array
+            // subscript` but does NOT set any_failed — the pair is skipped
+            // and the assignment still succeeds.
+            for word in &empty_keys {
+                let line = format!(
+                    "{}{}: bad array subscript
+",
+                    self.assignment_diagnostic_prefix(),
+                    word
                 );
                 self.emit_assignment_diag(line);
             }

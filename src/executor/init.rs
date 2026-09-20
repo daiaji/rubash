@@ -170,6 +170,7 @@ impl Executor {
             buffer_assignment_diagnostics: false,
             pending_assignment_diagnostics: Vec::new(),
             parameter_assignment_failure: Cell::new(false),
+            parameter_bad_substitution: Cell::new(false),
             tempenv_names: Vec::new(),
             tempenv_marks: Vec::new(),
             tempenv_promoted_names: Vec::new(),
@@ -183,6 +184,7 @@ impl Executor {
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             last_command_substitution_status: Cell::new(None),
+            comsub_stdin_writeback: Cell::new(None),
             last_heredoc_warning_source: RefCell::new(None),
             comsub_leading_newlines: Cell::new(0),
             current_shell_substitution_exit: Cell::new(None),
@@ -253,12 +255,29 @@ impl Executor {
         // harness - keeping it would silently run test children under the
         // old shim instead of rubash (found via func.tests: func5 children
         // executed niu.exe semantics and truncated the family output).
-        env_vars.insert(
-            "THIS_SH".to_string(),
-            std::env::current_exe()
-                .map(|path| path.to_string_lossy().replace('\\', "/").to_string())
-                .unwrap_or_else(|_| "rubash".to_string()),
-        );
+        // Exception: a suite that copies THIS_SH to an `sh`-named file
+        // (`cp ${THIS_SH} $TMPDIR/sh`; posixexp.tests) relies on the argv[0]
+        // basename to select posix mode for child invocations. Keeping the
+        // inherited name preserves that signal — the copy is still the
+        // rubash binary, and a nonexistent target keeps the auto-detected
+        // path so a stale winuxsh export cannot hijack children.
+        let inherited_sh = env_vars.get("THIS_SH").is_some_and(|value| {
+            let basename = value
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(value.as_str());
+            let stem = basename.strip_suffix(".exe").unwrap_or(basename);
+            stem.eq_ignore_ascii_case("sh")
+                && crate::executor::path::shell_path_to_windows(value, env_vars).is_file()
+        });
+        if !inherited_sh {
+            env_vars.insert(
+                "THIS_SH".to_string(),
+                std::env::current_exe()
+                    .map(|path| path.to_string_lossy().replace('\\', "/").to_string())
+                    .unwrap_or_else(|_| "rubash".to_string()),
+            );
+        }
         // GNU variables.c:952-963 initialize_shell_variables: an imported
         // OLDPWD is kept only when it names a directory
         // (OLDPWD_CHECK_DIRECTORY, config-top.h:183); otherwise Bash binds a

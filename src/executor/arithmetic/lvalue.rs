@@ -1,4 +1,4 @@
-use super::{ArithLValue, ConditionalArithParser};
+use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser};
 use crate::executor::arithmetic::{assignment_operator_at, skip_arith_ws};
 use crate::executor::{
     is_marked_var, is_shell_name, is_shell_name_char, is_shell_name_start, strip_matching_quotes,
@@ -47,7 +47,8 @@ impl ConditionalArithParser<'_> {
         let resolved_name = self.resolved_lvalue_name(&name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
             // Associative arrays use the key verbatim; no deferred evaluation.
-            match self.parse_assoc_subscript()? {
+
+            match self.parse_assoc_subscript(&resolved_name)? {
                 ParsedAssocSubscript::Key(key) => {
                     return Some(ArithLValue::Assoc {
                         name: resolved_name,
@@ -60,6 +61,7 @@ impl ConditionalArithParser<'_> {
                     });
                 }
             }
+
         }
 
         if self.peek() == Some(b']') {
@@ -157,7 +159,8 @@ impl ConditionalArithParser<'_> {
 
         let resolved_name = self.resolved_lvalue_name(&name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
-            match self.parse_assoc_subscript()? {
+
+            match self.parse_assoc_subscript(&resolved_name)? {
                 ParsedAssocSubscript::Key(key) => {
                     return Some(ArithLValue::Assoc {
                         name: resolved_name,
@@ -170,6 +173,7 @@ impl ConditionalArithParser<'_> {
                     });
                 }
             }
+
         }
 
         if self.peek() == Some(b']') {
@@ -217,6 +221,7 @@ impl ConditionalArithParser<'_> {
         name.to_string()
     }
 
+
     /// The `name[...]` text GNU prints for an invalid subscript reference
     /// (`a[80's]: bad array subscript`, `` `a[80's]': not a valid
     /// identifier ``) — the STR token text: name through the first `]`,
@@ -237,7 +242,8 @@ impl ConditionalArithParser<'_> {
     /// `name[...]` token invalid — `AssocSubscript::Invalid` carries the
     /// lvalue text GNU prints in `bad array subscript` /
     /// `not a valid identifier` diagnostics.
-    pub(super) fn parse_assoc_subscript(&mut self) -> Option<ParsedAssocSubscript> {
+    pub(super) fn parse_assoc_subscript(&mut self, name: &str) -> Option<ParsedAssocSubscript> {
+
         let start = self.pos;
         let mut depth = 0usize;
         let mut single = false;
@@ -252,6 +258,7 @@ impl ConditionalArithParser<'_> {
                 b'[' if !single && !double => {
                     depth += 1;
                 }
+
                 b']' if !single && !double => {
                     if depth == 0 {
                         // The raw subscript is data: GNU expand_subscript_string
@@ -265,15 +272,27 @@ impl ConditionalArithParser<'_> {
                         // A pre-expanded key (the Executor-side
                         // expand_subscript_string pass) is already the final
                         // string: use it verbatim and never expand it again.
-                        if let Some(literal) =
-                            super::super::decode_arithmetic_assoc_key(&key)
+                        let key = match super::super::decode_arithmetic_assoc_key(&key)
                         {
-                            return Some(ParsedAssocSubscript::Key(literal));
+                            Some(literal) => literal,
+                            None => self.expand_assoc_subscript_key(&key),
+                        };
+                        if key.is_empty() {
+                            // GNU array_variable_part (arrayfunc.c): an
+                            // assoc subscript whose expand_subscript_string
+                            // result is empty is a bad subscript — diagnosed
+                            // once here and once in get_array_value, so the
+                            // read reports it twice (`A[$k]` with k unset ->
+                            // `A[]: bad array subscript` x2), then the
+                            // element reads as 0.
+                            self.diags
+                                .push(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+                            self.diags
+                                .push(ArithEvalDiag::BadSubscript(format!("{name}[]")));
                         }
-                        return Some(ParsedAssocSubscript::Key(
-                            self.expand_assoc_subscript_key(&key),
-                        ));
+                        return Some(ParsedAssocSubscript::Key(key));
                     }
+
                     depth -= 1;
                 }
                 _ => {}
@@ -302,6 +321,16 @@ impl ConditionalArithParser<'_> {
         let mut chars = key.chars().peekable();
 
         while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                // GNU expr_streval -> expand_subscript_string dequotes
+                // the key text: a backslash-escaped byte (including the
+                // abstab escapes expand_array_subscript added to
+                // expansion products) is literal data.
+                if let Some(next) = chars.next() {
+                    output.push(next);
+                }
+                continue;
+            }
             if ch != '$' {
                 output.push(ch);
                 continue;

@@ -30,7 +30,8 @@ impl Executor {
         let _t_heredoc = PhaseTimer::new(&super::exec_profile::P_HEREDOC);
         self.report_command_heredoc_errors(cmd)?;
         if let Some((name, message, status)) = self.parameter_heredoc_expansion_error(cmd) {
-            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_default_stderr(line.as_bytes())?;
             self.exit_code = status;
             return Ok(());
         }
@@ -175,51 +176,6 @@ impl Executor {
             );
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));
-        }
-
-        // GNU parse.y: `name=(list)` is a WORD only in assignment position
-        // (an env-prefix run of assignment words) or as an operand of a
-        // declaration builtin (declare/typeset/local/readonly/export accept
-        // `name=(...)` arguments). Anywhere else `(` is an unexpected token
-        // and the whole input aborts: `printf "%s\n" -a a=(a 'b  c')` →
-        // `syntax error near unexpected token `('` (array1.sub:1). The
-        // lexer keeps `name=(...)` atomic behind COMPOUND_ASSIGNMENT_MARKER
-        // for the declare path, so illegal positions surface here as a
-        // marker word whose preceding words are not all assignments.
-        if let Some(marker_index) = cmd
-            .words
-            .iter()
-            .position(|word| word.contains(COMPOUND_ASSIGNMENT_MARKER))
-        {
-            // GNU parse.y:5795-5810: PST_ASSIGNOK is set after an
-            // ASSIGNMENT_BUILTIN (mkbuiltins.c:157-161: alias, declare,
-            // export, local, readonly, typeset), after `eval`/`let`
-            // (STREQ special-case), and through `command` chains
-            // (PST_CMDBLTIN — `command declare a=(x)` stays legal).
-            let assignment_builtin = cmd
-                .words
-                .iter()
-                .find(|word| word.as_str() != "command")
-                .is_some_and(|word| {
-                    matches!(
-                        word.as_str(),
-                        "alias" | "declare" | "export" | "local" | "readonly" | "typeset"
-                            | "eval" | "let"
-                    )
-                });
-            let assignment_prefix = (0..marker_index).all(|index| {
-                split_assignment_word(&cmd.words[index]).is_some()
-                    || command_word_is_array_element_assignment(cmd, index)
-            });
-            if !assignment_builtin && !assignment_prefix {
-                self.mark_parse_error();
-                eprintln!(
-                    "{}syntax error near unexpected token `('",
-                    self.parser_diagnostic_prefix()
-                );
-                self.exit_code = 2;
-                return Err(ExecuteError::ExitCode(2));
-            }
         }
 
         if cmd.function_command.is_none()
@@ -401,48 +357,16 @@ impl Executor {
             }
             return Ok(());
         }
-        let cmd = alias_expanded;
-        // A fatal word-expansion arithmetic failure in a bare command
-        // (e.g. bare `$((1/0))` with no other words) abandons the rest
-        // of the current command list (GNU Bash 5.2.37 evidence).
-        // GNU probe (2026-09-01, WSL bash 5.2.21): `echo hi $((1/0)); echo
-        // after` never prints "after" and `set -u; printf "%s\n"
-        // "$((missing + 1))" extra; echo after` exits 127 — a fatal
-        // evaluation error aborts the command list regardless of how many
-        // other words the command has.
-        if self.arithmetic_expansion_error.get() {
-            self.arithmetic_expansion_error.set(false);
-            let was_fatal = self.arithmetic_fatal_error.replace(false);
-            let nounset = self.arithmetic_nounset_error.replace(false);
-            if nounset {
-                // GNU expr.c expr_streval: an unbound variable under `set -u`
-                // raises FORCE_EOF and terminates the noninteractive shell.
-                // This mirrors the plain-parameter nounset path
-                // (command_prepare.rs), which also exits the script; other
-                // arithmetic evaluation errors keep the nonfatal
-                // ExpansionFailure line-skip semantics (GNU probe d2:
-                // `echo $((1/0)); echo after` still prints "after").
-                self.exit_code = 127;
-                return Err(ExecuteError::ExitCode(127));
-            }
-            if was_fatal {
-                self.exit_code = 1;
-                return Err(ExecuteError::ExpansionFailure(1));
-            }
-            self.exit_code = 1;
-        }
-
-        // GNU subst.c: a failing `${var:=word}`/`${var=word}` assignment is an
-        // expand_word_error; noninteractive shells jump to top level with
-        // DISCARD, abandoning the current command list while the script
-        // continues.
-        if self.parameter_assignment_failure.replace(false) {
-            // GNU reports expansion failures with EX_BADUSAGE (2), matching
-            // `${var?msg}` / bad-substitution status, not the builtin-failure
-            // status 1.
-            self.exit_code = 2;
-            return Err(ExecuteError::ExpansionFailure(2));
-        }
+        let mut cmd = alias_expanded;
+        self.abort_on_expansion_errors()?;
+        // GNU redir.c do_redirections: here-document bodies and the
+        // here-string word are expanded after the command words and before
+        // the command runs; an expansion error there aborts the command
+        // with the same expand_word_error classification. Expand once here
+        // and mark the results so the stdin paths return them verbatim
+        // instead of re-running embedded substitutions.
+        self.preexpand_command_stdin(&mut cmd);
+        self.abort_on_expansion_errors()?;
 
         if alias_expansion_changed_words
             && !original_words_had_command_substitution
@@ -624,6 +548,148 @@ impl Executor {
             }
         }
         None
+    }
+
+    /// Latched expansion-error flags, checked after word expansion and
+    /// again after the stdin-body pre-expansion (GNU do_redirections
+    /// order). A fatal word-expansion arithmetic failure in a bare command
+    /// (e.g. bare `$((1/0))` with no other words) abandons the rest of the
+    /// current command list (GNU Bash 5.2.37 evidence).
+    fn abort_on_expansion_errors(&mut self) -> Result<(), ExecuteError> {
+        if self.arithmetic_expansion_error.get() {
+            self.arithmetic_expansion_error.set(false);
+            let was_fatal = self.arithmetic_fatal_error.replace(false);
+            let nounset = self.arithmetic_nounset_error.replace(false);
+            if nounset {
+                // GNU expr.c expr_streval: an unbound variable under `set -u`
+                // raises FORCE_EOF and terminates the noninteractive shell.
+                // This mirrors the plain-parameter nounset path
+                // (command_prepare.rs), which also exits the script; other
+                // arithmetic evaluation errors keep the nonfatal
+                // ExpansionFailure line-skip semantics (GNU probe d2:
+                // `echo $((1/0)); echo after` still prints "after").
+                self.exit_code = 127;
+                return Err(ExecuteError::ExitCode(127));
+            }
+            // GNU subst.c:10881-10888: an expok==0 result from $((...)) word
+            // expansion is expand_wdesc_fatal when posixly_correct &&
+            // !interactive_shell, which subst.c:4296 turns into
+            // exp_jump_to_top_level(FORCE_EOF). shell.c:1471 run_one_command
+            // maps FORCE_EOF to status 127 for `-c`; eval.c:104-109
+            // (reader_loop) sets EOF_Reached so a script-mode shell exits
+            // with last_command_exit_value (EXECUTION_FAILURE=1).
+            if self.posix_mode_enabled()
+                && self.env_vars.get("__RUBASH_INTERACTIVE").map(String::as_str)
+                    != Some("1")
+            {
+                let code = if self.env_vars.get("__RUBASH_IS_C").is_some() {
+                    127
+                } else {
+                    1
+                };
+                self.exit_code = code;
+                return Err(ExecuteError::ExitCode(code));
+            }
+            if was_fatal {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            self.exit_code = 1;
+        }
+
+        // GNU subst.c:10277-10288: a `bad substitution` raised while
+        // expanding a word (including a nested `${}` inside a pattern or
+        // alternate word that was actually evaluated) is an
+        // expand_word_error — DISCARD for ordinary noninteractive shells,
+        // FORCE_EOF when posixly_correct. shell.c:1471 maps FORCE_EOF to
+        // 127 under `-c`; eval.c:104-109 ends script input so the shell
+        // exits with last_command_exit_value (EXECUTION_FAILURE=1).
+        if self.parameter_bad_substitution.replace(false) {
+            if self.posix_mode_enabled()
+                && self
+                    .env_vars
+                    .get("__RUBASH_INTERACTIVE")
+                    .map(String::as_str)
+                    != Some("1")
+            {
+                let code = if self.env_vars.get("__RUBASH_IS_C").is_some() {
+                    127
+                } else {
+                    1
+                };
+                self.exit_code = code;
+                return Err(ExecuteError::ExitCode(code));
+            }
+            self.exit_code = 1;
+            return Err(ExecuteError::ExpansionFailure(1));
+        }
+
+        // GNU subst.c: a failing `${var:=word}`/`${var=word}` assignment is an
+        // expand_word_error; noninteractive shells jump to top level with
+        // DISCARD, abandoning the current command list while the script
+        // continues.
+        if self.parameter_assignment_failure.replace(false) {
+            // GNU reports expansion failures with EX_BADUSAGE (2), matching
+            // `${var?msg}` / bad-substitution status, not the builtin-failure
+            // status 1.
+            self.exit_code = 2;
+            return Err(ExecuteError::ExpansionFailure(2));
+        }
+        Ok(())
+    }
+
+    /// Expand here-document bodies and the here-string word of a simple
+    /// command at the GNU do_redirections point (after word expansion,
+    /// before the command runs). The expanded text is stored back with the
+    /// PREEXPANDED_STDIN_BODY marker so the stdin paths return it verbatim
+    /// instead of expanding — and re-running embedded substitutions — a
+    /// second time. Quoted-delimiter bodies and `\x1d` ANSI-C bodies are
+    /// left untouched: they take their own verbatim/decode paths.
+    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) {
+        // The parser stores an unnumbered `<<EOF` body in BOTH `heredoc` and
+        // `heredoc_redirects` (fd == None); it is one redirection, so expand
+        // it once and share the marked result between the two fields —
+        // otherwise embedded substitutions like `${ incr; }` would run
+        // twice (comsub23.sub `after here-doc: 1`).
+        let shared_raw = cmd.heredoc.clone();
+        if let Some(body) = cmd.heredoc.take() {
+            cmd.heredoc = Some(if Self::stdin_body_needs_expansion(&body) {
+                format!(
+                    "{PREEXPANDED_STDIN_BODY}{}",
+                    self.expand_heredoc_body_mut(&body)
+                )
+            } else {
+                body
+            });
+        }
+        for redirect in &mut cmd.heredoc_redirects {
+            if let Some(body) = redirect.body.take() {
+                if redirect.fd.is_none() && shared_raw.as_deref() == Some(body.as_str()) {
+                    redirect.body = cmd.heredoc.clone();
+                    continue;
+                }
+                redirect.body = Some(if Self::stdin_body_needs_expansion(&body) {
+                    format!(
+                        "{PREEXPANDED_STDIN_BODY}{}",
+                        self.expand_heredoc_body_mut(&body)
+                    )
+                } else {
+                    body
+                });
+            }
+        }
+        if let Some(word) = cmd.here_string.take() {
+            cmd.here_string = Some(format!(
+                "{PREEXPANDED_STDIN_BODY}{}",
+                self.expand_here_string_mut(&word)
+            ));
+        }
+    }
+
+    fn stdin_body_needs_expansion(body: &str) -> bool {
+        !body.starts_with(crate::lexer::QUOTED_HEREDOC_MARKER)
+            && !body.starts_with('\x1d')
+            && !body.starts_with(PREEXPANDED_STDIN_BODY)
     }
 }
 

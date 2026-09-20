@@ -262,6 +262,7 @@ impl Executor {
         // replaced by an opaque literal (see expand_arithmetic_assoc_subscripts)
         // so the ordinary expansion below cannot expand them a second time and
         // the parser stores the key verbatim.
+
         // GNU expr.c:1171 expr_streval: `tflag = (array_expand_once &&
         // already_expanded) ? AV_NOEXPAND : 0` — `let`/`[[` operands arrive
         // EXP_EXPANDED, `(( ))` does not, so only the former switches the
@@ -269,6 +270,7 @@ impl Executor {
         let assoc_noexpand = !expand
             && crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once");
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression, assoc_noexpand);
+
         let expression = if expand {
             normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(&with_assoc_keys))
         } else {
@@ -393,6 +395,21 @@ impl Executor {
         &mut self,
         resolved: &str,
     ) -> Option<i128> {
+        // Same resolved text at the same `${}` site already produced its
+        // index (and its side effects) in an earlier pass; GNU's
+        // array_expand_index evaluates it once.
+        let memo_key = crate::executor::expand_braced_indices::sub_site_key(resolved);
+        if let Some(hit) = memo_key
+            .as_ref()
+            .and_then(crate::executor::expand_braced_indices::sub_idx_lookup)
+        {
+            return match hit {
+                crate::executor::subscript_expansion::IndexedSubscript::Index(index) => {
+                    Some(index)
+                }
+                _ => None,
+            };
+        }
         self.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
@@ -414,11 +431,13 @@ impl Executor {
             } else {
                 self.expand_arithmetic_subscript_mut(resolved)
             };
+
         // GNU arrayfunc.c:1376 evalexp(t, eflag): eflag=0 for compat>51 —
         // the nested assoc subscript scan stays flag-0 even under
         // array_expand_once (AV_NOEXPAND applied to the OUTER subscript's
         // expand_arith_string, not this inner evaluation).
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(&reexpanded, false);
+
         let expression = normalize_arithmetic_quotes(&with_assoc_keys);
         *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
@@ -432,6 +451,17 @@ impl Executor {
         self.report_arithmetic_readonly_error();
         self.flush_arith_diags(None);
         sync_arith_writes_to_shell_state(self);
+        if let Some(key) = memo_key {
+            crate::executor::expand_braced_indices::sub_idx_store(
+                key,
+                match value {
+                    Some(index) => {
+                        crate::executor::subscript_expansion::IndexedSubscript::Index(index)
+                    }
+                    None => crate::executor::subscript_expansion::IndexedSubscript::Error,
+                },
+            );
+        }
         value
     }
 
@@ -490,9 +520,11 @@ impl Executor {
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
         self.env_vars.remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
+
         // $(( )) runs its own expansion pass inside evalexp — the operand is
         // not EXP_EXPANDED, so the assoc subscript scan stays flag-0
         // (expr.c:1171).
+
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression, false);
         let expression =
             normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(&with_assoc_keys));
@@ -594,6 +626,7 @@ impl Executor {
     /// hex encoding of the expanded key. The parser reads it back untouched
     /// (`lvalue::parse_assoc_subscript`), which is what keeps
     /// `A['$v']` → `$v` and `k='$w'; A[$k]` → `$w` from expanding twice.
+
     /// `noexpand` models GNU's VA_NOEXPAND (expr.c:1171 `tflag` /
     /// expr.c:361-378 expr_skipsubscript): when the caller's operand is
     /// already word-expanded (`let`/`[[` — EXP_EXPANDED) and
@@ -601,7 +634,12 @@ impl Executor {
     /// (quotes are plain data) and the text between brackets is the
     /// associative key verbatim — `let "++a[$b]"` keys on `80's` and
     /// `let '++a[$b]'` keys on `$b`.
-    fn expand_arithmetic_assoc_subscripts(&mut self, expression: &str, noexpand: bool) -> String {
+    pub(in crate::executor) fn expand_arithmetic_assoc_subscripts(
+        &mut self,
+        expression: &str,
+        noexpand: bool,
+    ) -> String {
+
         let bytes = expression.as_bytes();
         let mut output = String::with_capacity(expression.len());
         let mut index = 0usize;
@@ -654,16 +692,36 @@ impl Executor {
                 };
                 if end > index + 1 && bytes.get(end - 1) == Some(&b']') {
                     let raw = &expression[index + 1..end - 1];
+                    if raw.starts_with(ARITH_ASSOC_KEY_MARKER) {
+                        // Caller already ran this pass (e.g. the substring
+                        // offset path pre-encodes before delegating to
+                        // eval_arithmetic_expansion_value, which encodes
+                        // again): re-encoding the marker text would make the
+                        // decoded key the encoded string itself, so the
+                        // lookup misses. The pass must be idempotent.
+                        output.push_str(name);
+                        output.push('[');
+                        output.push_str(raw);
+                        output.push(']');
+                        index = end;
+                        continue;
+                    }
+                    // GNU expr.c:1171 expr_streval: under array_expand_once
+                    // an EXP_EXPANDED operand (`let`/`[[` args, already
+                    // word-expanded) takes AV_NOEXPAND — the subscript text
+                    // is used verbatim, so `a[" "]` keys on `" "` with the
+                    // quote characters kept as data (array25.sub 6/8).
                     let key = if noexpand {
                         // The already-expanded text is the key verbatim;
                         // only the lexer's data-quote/dollar markers come
                         // back to their characters (eval_indexed_subscript_
                         // expression's ExpandedOnce branch does the same).
-                        raw.replace('\x1f', "$")
-                            .replace('\x1a', "`")
-                            .replace('\x14', "\\")
-                            .replace('\x17', "'")
-                            .replace('\x18', "\"")
+                        raw.replace('', "$")
+                            .replace('', "`")
+                            .replace('', "\\")
+                            .replace('', "'")
+                            .replace('', "\"")
+
                     } else {
                         self.expand_assoc_subscript_once(raw)
                     };
@@ -728,8 +786,11 @@ impl Executor {
                 if end > index + 1 && bytes.get(end - 1) == Some(&b']') {
                     let raw = &expression[index + 1..end - 1];
                     // A literally-empty `a[]` is a bad subscript, not an
-                    // expansion — leave it for the parser.
-                    if !raw.is_empty() {
+                    // expansion — leave it for the parser. An already
+                    // marker-encoded subscript is the caller's finished
+                    // product — pass it through so a second pass stays
+                    // idempotent (same rule as the assoc scanner above).
+                    if !raw.is_empty() && !raw.starts_with(ARITH_ASSOC_KEY_MARKER) {
                         let expanded = self.expand_arithmetic_expression_mut(raw);
                         output.push_str(name);
                         output.push('[');
@@ -774,7 +835,14 @@ impl Executor {
         {
             return literal;
         }
-        self.expand_word_mut_with_context(raw, SubstitutionQuoteContext::Unquoted)
+        // GNU expand_word_internal never re-lexes `'` — sq is lex-time only,
+        // so a `'` reaching expand_subscript_string here is always data
+        // produced by the earlier expansion (`let "++a[$b]"` with
+        // b=`80's`). Mark it with the \x17 carrier so the word expansion
+        // emits it verbatim instead of consuming it as an sq opener —
+        // without this the key stored `80s` (assoc9.sub `let "++a[$b]"`).
+        let raw = crate::executor::subscript_expansion::mark_expanded_once_data_squotes(raw);
+        self.expand_word_mut_with_context(&raw, SubstitutionQuoteContext::Unquoted)
     }
 
     pub(super) fn expand_arithmetic_special_parameters(&self, expression: &str) -> String {
@@ -792,10 +860,43 @@ impl Executor {
         // (`\"`) must also survive as literal `"` — the walker strips bare
         // `"` via toggle mode, so `\"` → `\` + removed quote. \x18 is the
         // walker's literal-double-quote marker.
-        let protected = expression
-            .replace("\\\"", "\x18")
-            .replace('\'', "\x17")
-            .replace("\\$", "\x1f");
+        // Quotes INSIDE a ${...}/$(...)/`...` span are not arith-text data —
+        // they belong to the nested substitution's own expansion, where
+        // expand_subscript_string strips them (assoc16.sub:
+        // $(( ${A['lit']} )) keys on `lit`, not `'lit'`).
+        let bytes = expression.as_bytes();
+        let mut protected = String::with_capacity(expression.len());
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let ch = bytes[index];
+            if ch == b'`'
+                || (ch == b'$' && matches!(bytes.get(index + 1), Some(b'(') | Some(b'{')))
+            {
+                let end = assoc_skip_substitution(bytes, index);
+                protected.push_str(&expression[index..end]);
+                index = end;
+                continue;
+            }
+            match ch {
+                b'\\' if bytes.get(index + 1) == Some(&b'"') => {
+                    protected.push('\x18');
+                    index += 2;
+                }
+                b'\\' if bytes.get(index + 1) == Some(&b'$') => {
+                    protected.push('\x1f');
+                    index += 2;
+                }
+                b'\'' => {
+                    protected.push('\x17');
+                    index += 1;
+                }
+                _ => {
+                    let next = expression[index..].chars().next().unwrap_or_default();
+                    protected.push(next);
+                    index += next.len_utf8();
+                }
+            }
+        }
         self.expand_embedded_parameters(&protected)
             .replace("\x1f", "$")
     }
@@ -1030,6 +1131,26 @@ pub(crate) fn eval_conditional_arith_value_categorized(
     eval_mutable_arith_result(value, &mut env_vars, None, false)
 }
 
+/// `eval_conditional_arith_value_categorized` plus the write-capture of
+/// `eval_conditional_arith_value_with_writes`: `&self` arithmetic
+/// expansions (`$((i++))` inside a `${}` body or array subscript) still
+/// have GNU-visible side effects, so the deltas are queued for the
+/// mutable caller to apply.
+pub(crate) fn eval_conditional_arith_value_categorized_with_writes(
+    value: &str,
+    env_vars: &HashMap<String, String>,
+) -> (Option<i128>, Vec<(String, String)>, Option<ArithmeticErrorCategory>) {
+    let mut cloned = env_vars.clone();
+    let (result, category) = eval_mutable_arith_result(value, &mut cloned, None, false);
+    let writes = cloned
+        .iter()
+        .filter(|(name, _)| name.as_str() != "__RUBASH_ARITH_SUBSCRIPT_EXPR")
+        .filter(|(name, new_value)| env_vars.get(name.as_str()) != Some(new_value))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    (result, writes, category)
+}
+
 pub(super) fn arithmetic_unbound_variable(
     expression: &str,
     env_vars: &HashMap<String, String>,
@@ -1209,10 +1330,59 @@ pub(super) fn strip_arith_double_quotes(input: &str) -> String {
     output
 }
 
+/// GNU expand_arith_string output form for an indexed-array subscript that
+/// carried no expansion of its own: single quotes stay literal (evalexp
+/// reports `'x'` as "operand expected"), while double quotes and backslash
+/// escapes are removed (`a[" "]` resolves to 0, `a[' ']` errors). Used when
+/// the cooked index equals the dequoted raw — i.e. the subscript expanded
+/// to itself — so rebuilding the arith-context text from the raw spelling
+/// cannot re-run substitutions (`a[$(echo INJ)]=v` still executes once).
+pub(super) fn arith_subscript_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                out.push('\'');
+                for inner in chars.by_ref() {
+                    out.push(inner);
+                    if inner == '\'' {
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                while let Some(inner) = chars.next() {
+                    match inner {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(next) = chars.next() {
+                                out.push(next);
+                            } else {
+                                out.push('\\');
+                            }
+                        }
+                        _ => out.push(inner),
+                    }
+                }
+            }
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                } else {
+                    out.push('\\');
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Byte index just past the `]` that closes the subscript opened at `open`
 /// (`bytes[open] == b'['`), honoring single/double quotes and `\` escapes so a
 /// `]` inside a quoted key does not terminate the subscript.
-fn assoc_subscript_end(bytes: &[u8], open: usize) -> usize {
+pub(crate) fn assoc_subscript_end(bytes: &[u8], open: usize) -> usize {
     let mut depth = 0usize;
     let mut single = false;
     let mut double = false;

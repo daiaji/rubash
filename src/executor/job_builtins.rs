@@ -128,6 +128,7 @@ impl Executor {
         // variable unbound before any waiting happens, in every wait form —
         // an invalid identifier or a readonly name fails immediately, and a
         // name that never gets bound stays unset.
+
         if let Some((name, name_index)) = wait_assign_var(&cmd.words[1..]) {
             let expand_once =
                 crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once");
@@ -158,6 +159,7 @@ impl Executor {
                     expand_once,
                     expand_once && w_arrayref,
                     &self.env_vars,
+
                 )
             {
                 let mut stderr = Vec::new();
@@ -286,7 +288,9 @@ impl Executor {
                 // waited for (pstat.pid; NO_PID when the last operand
                 // failed, leaving the pre-unbound variable unset).
                 let wait_var = wait_assign_var(&cmd.words[1..])
+
                     .map(|(name, _index)| (name, self.wait_var_arrayref()));
+
                 let status =
                     self.wait_for_background_operands(&operands, cmd, wait_var.as_ref())?;
                 return Ok(status);
@@ -732,14 +736,27 @@ impl Executor {
             }
             let state_text = state_text_opt.unwrap_or_else(|| "Unknown".to_string());
 
+            // GNU jobs.c:2207 pretty_print_job: the job flag column is `+`
+            // for the current job, `-` for the previous job, and a space
+            // otherwise; a second space follows for the standard format and
+            // the state field pads to LONGEST_SIGNAL_DESC (27, jobs.h:43).
+            let marker = match self.job_table.pid_to_job.get(&pid) {
+                Some(job_id) if self.job_table.current_job() == Some(*job_id) => '+',
+                Some(job_id) if self.job_table.previous_job() == Some(*job_id) => '-',
+                _ => ' ',
+            };
+
             if options.pids_only {
-                output.push_str(&format!("{pid}\n"));
+                output.push_str(&format!("{pid}
+"));
             } else if options.long {
                 output.push_str(&format!(
-                    "[{job_number}]  {pid} {state_text:<22} {source} &\n"
+                    "[{job_number}]{marker}  {pid} {state_text:<27}{source} &
+"
                 ));
             } else {
-                output.push_str(&format!("[{job_number}]  {state_text:<22} {source} &\n"));
+                output.push_str(&format!("[{job_number}]{marker}  {state_text:<27}{source} &
+"));
             }
             if options.changed_only {
                 self.last_notified_job_ids.insert(job_number);
@@ -1627,11 +1644,18 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
                         index += 1;
                         (words.get(index)?.as_str(), index)
                     };
+
                     // GNU wait.def:156-157: validity is decided downstream
                     // by valid_identifier/valid_array_reference under
                     // SET_VFLAGS — array-subscript names are legal and must
-                    // reach the execute path for the real check.
-                    assign_var = Some(name.to_string());
+                    // reach the execute path for the real check. The in-band
+                    // ARRAYREF_FLAG prefix is W_ARRAYREF's carrier
+                    // (execute_cmd.c:4366), consumed by wait_var_arrayref —
+                    // strip it so `A` never becomes the bound base name.
+
+                    assign_var = Some(
+                        crate::builtins::arrayref::take_arrayref_flag(name).1.to_string(),
+                    );
                     assign_var_index = Some(name_index);
                     break;
                 }
@@ -1678,7 +1702,14 @@ fn wait_background_operands(words: &[String]) -> Option<Vec<String>> {
         index += 1;
     }
 
-    Some(words[index..].to_vec())
+    // Jobspec operands keep no W_ARRAYREF consumer — strip the in-band
+    // flag so `wait: A[]]: ...` diagnostics print clean text.
+    Some(
+        words[index..]
+            .iter()
+            .map(|word| crate::builtins::arrayref::take_arrayref_flag(word).1.to_string())
+            .collect(),
+    )
 }
 
 /// The `-p` variable name from a wait command's option cluster, mirroring
@@ -1700,9 +1731,19 @@ fn wait_assign_var(words: &[String]) -> Option<(String, usize)> {
                     if value_start < word.len() {
                         return Some((word[value_start..].to_string(), index));
                     }
+                    // wait.def:156 SET_VFLAGS consumes W_ARRAYREF off the
+                    // raw word; the in-band ARRAYREF_FLAG prefix is a word
+                    // flag, never operand text (execute_cmd.c:4366).
                     return words
                         .get(index + 1)
-                        .map(|name| (name.clone(), index + 1));
+                        .map(|name| {
+                            (
+                                crate::builtins::arrayref::take_arrayref_flag(name)
+                                    .1
+                                    .to_string(),
+                                index + 1,
+                            )
+                        });
                 }
                 _ => return None,
             }

@@ -14,6 +14,7 @@ pub(super) use storage::{
     normalize_array_expanded_value, parse_array_integer_subscript, parse_array_numeric_subscript,
     parse_array_subscript, quote_array_value, resolve_indexed_array_subscript, store_indexed_array,
 };
+pub(crate) use storage::{ansic_quote, ansic_shouldquote};
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -21,7 +22,7 @@ use super::{
     apply_parameter_case_mod, assoc_value_at, eval_arith_value, eval_conditional_arith_value,
     is_marked_var, is_shell_name, parse_indirect_pattern_removal, parse_parameter_case_mod,
     parse_parameter_replacement, parse_parameter_transform, remove_parameter_pattern,
-    split_indexed_tagged_token, split_storage_words, strip_matching_quotes, unquote_storage_value,
+    split_indexed_tagged_token, split_storage_words, unquote_storage_value,
     Executor, ParameterTransform, ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
 use crate::lexer::remove_shell_quotes;
@@ -522,12 +523,14 @@ pub(super) fn field_split_positional_values_with_ifs(
         .enumerate()
         .flat_map(|(index, value)| {
             let is_last = index + 1 == value_count;
+            // GNU subst.c: an unquoted `$@`/`$*` expansion produces one word
+            // per positional parameter, then field-splits each. An empty
+            // parameter yields no fields (subst.c list_string discards
+            // empty words from unquoted expansions), so drop it entirely
+            // rather than keeping a spurious empty field (new-exp `${@%%[!/]*}`
+            // where `.` becomes empty after pattern removal).
             let mut fields = if value.is_empty() {
-                if is_last {
-                    Vec::new()
-                } else {
-                    vec![value]
-                }
+                Vec::new()
             } else if let Some(ifs) = ifs.filter(|ifs| ifs.chars().any(|ch| !ch.is_whitespace())) {
                 if ifs.chars().any(is_ifs_whitespace) {
                     split_mixed_ifs(&value, ifs)
@@ -927,7 +930,7 @@ fn dequote_compound_element_rhs(rhs: &str) -> String {
 /// `'` closes at index 2 and the rest is unquoted text. Inside `'` quotes
 /// a backslash is literal; inside `"` it escapes the next char
 /// (subst.c string_extract_double_quoted).
-fn token_is_fully_quoted(token: &str) -> bool {
+pub(super) fn token_is_fully_quoted(token: &str) -> bool {
     let mut chars = token.char_indices().peekable();
     let Some((_, quote @ ('\'' | '"'))) = chars.next() else {
         return false;

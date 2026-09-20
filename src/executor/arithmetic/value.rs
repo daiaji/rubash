@@ -6,7 +6,8 @@ use crate::executor::arithmetic::{
 use crate::executor::{
     array_value_at, assoc_entries, assoc_value_at, current_epoch_seconds,
     env_derived_dynamic_parameter_value, format_assoc_storage, format_indexed_array_storage,
-    indexed_array_entries, is_marked_var, is_noassign_bash_array, is_shell_name, mark_env_name,
+    indexed_array_entries, is_marked_var, is_noassign_bash_array, is_shell_name,
+    is_shell_name_char, mark_env_name,
     next_random_from_state, next_srandom_from_state, parse_array_subscript,
     resolve_indexed_array_subscript, set_process_env, unmark_env_name, ARRAY_VARS, ASSOC_128_VARS,
     ASSOC_VARS, NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH,
@@ -88,7 +89,18 @@ impl ConditionalArithParser<'_> {
                 {
                     subscript.to_string()
                 } else {
-                    strip_arith_double_quotes(subscript)
+                    let resolved = strip_arith_double_quotes(subscript);
+                    // GNU array_expand_index (arrayfunc.c:1356-1391) runs the
+                    // subscript text through expand_arith_string before
+                    // evalexp, so `$name`/`${name}`/`$((...))` inside a
+                    // variable value's subscript (`x='b[$d]'; $((x))`)
+                    // expands once here (array17.sub). The \x1e-marked path
+                    // above already received this pass at the top-level
+                    // expression; nested frames reach raw text only. Command
+                    // substitution cannot run without an Executor context,
+                    // so `$(...)`/backquotes are left for evalexp to reject
+                    // (the same failure shape as before).
+                    self.expand_subscript_dollar_text(&resolved)
                 }
             }
         };
@@ -106,6 +118,102 @@ impl ConditionalArithParser<'_> {
             );
         }
         value
+    }
+
+    /// expand_arith_string's parameter/arithmetic expansion over subscript
+    /// text that reached evalexp unexpanded (variable-value recursion):
+    /// `$name`, `${name}` and `$((...))` resolve against env_vars; anything
+    /// else (`$(...)`, backquotes, `$@`, escapes) is left verbatim.
+    fn expand_subscript_dollar_text(&mut self, text: &str) -> String {
+        if !text.contains('$') {
+            return text.to_string();
+        }
+        let bytes = text.as_bytes();
+        let mut output = String::with_capacity(text.len());
+        let mut index = 0usize;
+        while index < bytes.len() {
+            if bytes[index] != b'$' {
+                let ch = text[index..].chars().next().unwrap_or_default();
+                output.push(ch);
+                index += ch.len_utf8();
+                continue;
+            }
+            match bytes.get(index + 1) {
+                // $((...)) evaluates in place.
+                Some(b'(') if bytes.get(index + 2) == Some(&b'(') => {
+                    let mut depth = 0usize;
+                    let mut end = index + 1;
+                    while end < bytes.len() {
+                        if bytes[end] == b'(' {
+                            depth += 1;
+                        } else if bytes[end] == b')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        end += 1;
+                    }
+                    let inner = text[index + 3..end.saturating_sub(1)].to_string();
+                    let (value, _cat) = eval_mutable_arith_value_with_random(
+                        &inner,
+                        self.env_vars,
+                        self.random_state,
+                    );
+                    match value {
+                        Some(value) => {
+                            output.push_str(&value.to_string());
+                            index = end + 1;
+                        }
+                        None => {
+                            output.push('$');
+                            index += 1;
+                        }
+                    }
+                }
+                Some(b'{') => {
+                    let rest = &text[index + 2..];
+                    let close = rest.find('}');
+                    match close {
+                        Some(close)
+                            if rest[..close]
+                                .chars()
+                                .all(|ch| is_shell_name_char(ch)) =>
+                        {
+                            let value = self
+                                .env_vars
+                                .get(&rest[..close])
+                                .cloned()
+                                .unwrap_or_default();
+                            output.push_str(&value);
+                            index += 2 + close + 1;
+                        }
+                        _ => {
+                            output.push('$');
+                            index += 1;
+                        }
+                    }
+                }
+                Some(&next) if next.is_ascii_alphabetic() || next == b'_' => {
+                    let mut end = index + 1;
+                    while end < bytes.len() && is_shell_name_char(bytes[end] as char) {
+                        end += 1;
+                    }
+                    let value = self
+                        .env_vars
+                        .get(&text[index + 1..end])
+                        .cloned()
+                        .unwrap_or_default();
+                    output.push_str(&value);
+                    index = end;
+                }
+                _ => {
+                    output.push('$');
+                    index += 1;
+                }
+            }
+        }
+        output
     }
 
     /// GNU expr.c:269-272 pushexp: evaluation depth reaching

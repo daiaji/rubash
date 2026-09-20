@@ -171,7 +171,8 @@ impl Executor {
             return Ok(());
         }
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
-            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             self.exit_code = 1;
             // GNU Bash 5.2 subst.c:10404-10410: `${special=word}` on a
             // special/positional param reports "$N: cannot assign in this
@@ -188,7 +189,12 @@ impl Executor {
         // substitution, so the 5.2-era whole-word `bad substitution`
         // pre-check no longer applies.
         if let Some((name, message, status)) = self.parameter_expansion_error(cmd) {
-            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_redirected_command_stderr(cmd, line.as_bytes())?;
+            if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExitCode(1));
+            }
             self.exit_code = status;
             if status == 1 {
                 // GNU Bash 5.2: bad substitution and `substring expression
@@ -220,6 +226,32 @@ impl Executor {
         let mut status = 0;
         for (name, value) in &cmd.assignments {
             let assignment_result = self.expand_assignment_value_result(name, value);
+            // GNU subst.c:10277-10288: a bad substitution raised while
+            // expanding the assignment RHS is an expand_word_error. The
+            // flag is checked after word expansion in execute_command, but
+            // an assignment-only command expands its RHS here — without
+            // consuming the flag it leaks into the *next* command's check
+            // and discards an innocent command (v=${x-${'u'%'v'}} ate the
+            // following `echo`).
+            if self.parameter_bad_substitution.replace(false) {
+                if self.posix_mode_enabled()
+                    && self
+                        .env_vars
+                        .get("__RUBASH_INTERACTIVE")
+                        .map(String::as_str)
+                        != Some("1")
+                {
+                    let code = if self.env_vars.get("__RUBASH_IS_C").is_some() {
+                        127
+                    } else {
+                        1
+                    };
+                    self.exit_code = code;
+                    return Err(ExecuteError::ExitCode(code));
+                }
+                self.exit_code = 1;
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             let expanded_value = assignment_result.value;
             let substitution_status = assignment_result.substitution_status;
             if assignment_result.arithmetic_error && !assignment_result.arithmetic_nonfatal_error {
@@ -329,7 +361,8 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
-            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             self.exit_code = 1;
             // Same GNU DISCARD class as execute_empty_words_command above:
             // subst.c:10404-10410 expand_wdesc_error (non-fatal) for
@@ -342,7 +375,12 @@ impl Executor {
         // substitution, so the 5.2-era whole-word `bad substitution`
         // pre-check no longer applies.
         if let Some((name, message, status)) = self.parameter_expansion_error(cmd) {
-            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_redirected_command_stderr(cmd, line.as_bytes())?;
+            if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExitCode(1));
+            }
             self.exit_code = status;
             if status == 1 {
                 // GNU 5.2 non-fatal word-expansion errors (bad substitution,
@@ -353,6 +391,60 @@ impl Executor {
             return Err(ExecuteError::ExitCode(status));
         }
         Ok(())
+    }
+
+    /// GNU execute_cmd.c:4366 fix_arrayref_words: for a command word list
+    /// headed by an ARRAYREF_BUILTIN (after leading assignment words and
+    /// `command` prefixes are skipped), mark each operand whose
+    /// pre-expansion text is a valid_array_reference(.., 0) — the
+    /// arithmetic-mode scan on the raw word, quotes included, so `"A[$k]"`
+    /// is not a reference while `A[$k]` is. The flag is consumed
+    /// post-expansion as VA_ONEWORD|VA_NOEXPAND (see arrayref.rs).
+    ///
+    /// GNU attaches W_ARRAYREF even when a function shadows the builtin —
+    /// the flag is invisible there. rubash carries it in-band, so a
+    /// function-bound command must not be marked (the byte would leak into
+    /// positional parameters); `command` still runs the real builtin, so
+    /// its operands keep their marks.
+    fn arrayref_operand_marks(&self, cmd: &CommandNode) -> Vec<bool> {
+        let mut marks = vec![false; cmd.words.len()];
+        let mut index = 0usize;
+        // fix_arrayref_words: "Skip over assignment statements preceding a
+        // command name" — W_ASSIGNMENT words, including `name[sub]=value`.
+        while index < cmd.words.len()
+            && (split_assignment_word(&cmd.words[index]).is_some()
+                || cmd
+                    .array_element_assignments
+                    .iter()
+                    .any(|assignment| assignment.word_index == Some(index)))
+        {
+            index += 1;
+        }
+        let mut saw_command = false;
+        while cmd.words.get(index).map(String::as_str) == Some("command") {
+            saw_command = true;
+            index += 1;
+        }
+        let Some(name) = cmd.words.get(index) else {
+            return marks;
+        };
+        if !crate::builtins::arrayref::is_arrayref_builtin(name)
+            || (!saw_command && self.functions.contains_key(name.as_str()))
+        {
+            return marks;
+        }
+        for (operand, mark) in marks.iter_mut().enumerate().skip(index + 1) {
+            let raw = cmd
+                .word_metadata
+                .get(operand)
+                .map(|metadata| metadata.raw.as_str())
+                .filter(|raw| !raw.is_empty())
+                .unwrap_or(cmd.words[operand].as_str());
+            // flags = 0: no VA_NOEXPAND — the arithmetic skipsubscript scan
+            // on the pre-expansion text (arrayfunc.c:1317 `else` branch).
+            *mark = crate::builtins::arrayref::valid_array_reference(raw, false, false, false);
+        }
+        marks
     }
 
     pub(in crate::executor) fn expand_command_words(
@@ -438,6 +530,19 @@ impl Executor {
             line: cmd.line,
             ..CommandNode::new()
         };
+        // GNU execute_cmd.c:4366 fix_arrayref_words (called at
+        // execute_cmd.c:4612 immediately before expand_words): operand words
+        // of ARRAYREF_BUILTINs (mkbuiltins.c:180 arrayvar_builtins) whose
+        // pre-expansion text is a valid_array_reference(.., 0) carry
+        // W_ARRAYREF through expansion. SET_VFLAGS (common.h:279) and
+        // builtin_arrayref_flags (common.c:1050) then turn it into
+        // VA_ONEWORD|VA_NOEXPAND, which is what makes the post-expansion
+        // `A[]]` from `read A[$rkey]`/`unset -v A[$rkey]`/`wait -p A[$rkey]`
+        // a valid `]`-key reference while literal `A[]]` and quoted
+        // `"A[$rkey]"` operands stay invalid. The flag is carried in-band
+        // as an ARRAYREF_FLAG prefix so it survives word splitting the way
+        // GNU copies word->flags to each output word.
+        let arrayref_marks = self.arrayref_operand_marks(cmd);
         let expanded_words = cmd
             .words
             .iter()
@@ -450,9 +555,17 @@ impl Executor {
                     || word.starts_with('\x1d')
                     || raw_word_suppresses_pathname_expansion(raw, metadata)
                     || compound_assignment_operand_word(cmd, index, word);
+                let arrayref_marked = arrayref_marks.get(index).copied().unwrap_or(false);
                 self.expand_command_word(cmd, index, word, raw)
                     .into_iter()
-                    .map(move |word| (word, suppress_glob))
+                    .map(move |word| {
+                        let word = if arrayref_marked {
+                            format!("{}{word}", crate::builtins::arrayref::ARRAYREF_FLAG)
+                        } else {
+                            word
+                        };
+                        (word, suppress_glob)
+                    })
             })
             .collect::<Vec<_>>();
         // GNU subst.c:9955-9956 + 4288-4296: a bad array subscript in a
@@ -474,16 +587,33 @@ impl Executor {
         if !is_test_cmd {
             let mut words = Vec::new();
             for (word, suppress_glob) in expanded_words {
+                // W_ARRAYREF rides as an in-band prefix through expansion;
+                // strip it for pathname matching and re-attach to each
+                // result the way GNU copies word->flags to every output
+                // word of expand_word_list_internal.
+                let (arrayref_marked, word_text) =
+                    crate::builtins::arrayref::take_arrayref_flag(&word);
+                let remark = |word: String| {
+                    if arrayref_marked {
+                        format!("{}{word}", crate::builtins::arrayref::ARRAYREF_FLAG)
+                    } else {
+                        word
+                    }
+                };
                 if suppress_glob {
                     let materialized =
-                        materialize_expanded_command_word(&word).replace('\x17', "'");
-                    words.push(materialized);
+                        materialize_expanded_command_word(word_text).replace('\x17', "'");
+                    words.push(remark(materialized));
                 } else {
-                    match pathname_expand_word(&word, &self.env_vars) {
-                        PathnameExpansion::Matches(matches) => words
-                            .extend(matches.into_iter().map(|value| value.replace('\x17', "'"))),
-                        PathnameExpansion::NoMatch => words
-                            .push(materialize_expanded_command_word(&word).replace('\x17', "'")),
+                    match pathname_expand_word(word_text, &self.env_vars) {
+                        PathnameExpansion::Matches(matches) => words.extend(
+                            matches
+                                .into_iter()
+                                .map(|value| remark(value.replace('\x17', "'"))),
+                        ),
+                        PathnameExpansion::NoMatch => words.push(remark(
+                            materialize_expanded_command_word(word_text).replace('\x17', "'"),
+                        )),
                         PathnameExpansion::Fail(pattern) => {
                             self.report_failglob(&pattern);
                             // GNU failglob is a fatal word-expansion error:
@@ -583,6 +713,14 @@ impl Executor {
         word: &str,
         raw: Option<&str>,
     ) -> Vec<String> {
+        // One cross-pass subscript-eval memo scope per command word —
+        // covers this pre-scan and the real expansion below so one `${}`
+        // fragment's subscript side effects run once (GNU param_expand).
+        // The word-context id keys the fragment sites for this word.
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new(
+            crate::executor::expand_braced_indices::next_word_ctx(),
+        );
         // Assignment operators inside parameter expansions take effect at
         // the point where their word is expanded. Applying them to every
         // command word up front changes Bash's left-to-right semantics.
@@ -787,6 +925,11 @@ impl Executor {
             if let Some(values) = self.quoted_braced_alternate_positional_at_values(word) {
                 return values;
             }
+            // A fully double-quoted "${a[@]:-y}" still expands to the
+            // element list when the array is set (array22.sub).
+            if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                return values;
+            }
             // A whole-word ${op...} the lexer marked wholly quoted but whose
             // raw word carries no outer quotes expands its alternate as an
             // unquoted word: quoted-empty spans survive as empty fields
@@ -849,14 +992,14 @@ impl Executor {
         }
         // scan_substitution_spans only sees $()/backtick spans, so a plain
         // double-quoted "${...}" word reports Unquoted. Restore the lexer's
-        //  quote marker for the whole-word braced form so the operator
+        // \x1d quote marker for the whole-word braced form so the operator
         // expander can tell "${v:-~}" (no tilde) from ${v:-~} (tilde).
         let word = if raw.is_some_and(|raw| raw.starts_with('"') && raw.ends_with('"'))
-            && !word.starts_with('')
+            && !word.starts_with('\u{1d}')
             && word.starts_with("${")
             && word.ends_with('}')
         {
-            format!("{word}")
+            format!("\u{1d}{word}")
         } else {
             word.to_string()
         };
@@ -875,6 +1018,35 @@ impl Executor {
                 .and_then(|spans| spans.first().map(|span| span.context))
                 .unwrap_or(SubstitutionQuoteContext::Unquoted)
         };
+        // GNU subst.c:9978-10007 parameter_brace_expand: "${!PREFIX@}"
+        // expands to the sorted matching variable names as one field per
+        // name (string_list_dollar_at -> W_DOLLARAT); an empty match list
+        // yields zero fields, like "$@". "${!PREFIX*}" is the IFS[0]-joined
+        // scalar and stays on the String path below.
+        if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
+            if let Some(body) = word
+                .strip_prefix('\x1d')
+                .filter(|w| {
+                    w.starts_with("${!") && w.ends_with('}') && braced_parameter_spans_whole_word(w)
+                })
+                .map(|w| &w[3..w.len() - 1])
+            {
+                if let Some(prefix) = body.strip_suffix('@') {
+                    if !prefix.is_empty() && is_shell_name(prefix) {
+                        let mut names: Vec<String> = self
+                            .env_vars
+                            .keys()
+                            .filter(|name| is_shell_name(name) && name.starts_with(prefix))
+                            .cloned()
+                            .collect();
+                        // all_variables_matching_prefix -> vapply ->
+                        // sort_variables: strcmp order (variables.c:4250).
+                        names.sort_unstable();
+                        return names;
+                    }
+                }
+            }
+        }
         // GNU marks literal word characters with CTLESC during expansion
         // (subst.c expand_word_internal), so only expansion results are
         // eligible for IFS splitting. Rubash's expansion does not carry
@@ -1057,15 +1229,71 @@ impl Executor {
         Some(values)
     }
 
+    /// GNU parameter_brace_expand operand resolution for `name[@]`/`name[*]`
+    /// and the positional `@`/`*`: the element list plus whether it is the
+    /// per-element (`@`) form. Assoc arrays iterate in hash-slot order like
+    /// join_array_parameter_values.
+    pub(in crate::executor) fn braced_operator_list_values(
+        &self,
+        var_name: &str,
+    ) -> Option<(Vec<String>, bool)> {
+        if var_name == "@" {
+            return Some((self.positional_params.clone(), true));
+        }
+        if var_name == "*" {
+            return Some((self.positional_params.clone(), false));
+        }
+        let (base, is_at) = var_name
+            .strip_suffix("[@]")
+            .map(|base| (base, true))
+            .or_else(|| var_name.strip_suffix("[*]").map(|base| (base, false)))?;
+        let storage = self.parameter_array_storage(base)?;
+        let values = if is_marked_var(&self.env_vars, ASSOC_VARS, base) {
+            assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, base))
+        } else {
+            array_values(&storage)
+        };
+        Some((
+            values
+                .into_iter()
+                .map(normalize_array_expanded_value)
+                .collect(),
+            is_at,
+        ))
+    }
+
     fn braced_alternate_word_values(
         &mut self,
         word: &str,
         raw: Option<&str>,
     ) -> Option<Vec<String>> {
-        let name = word.strip_prefix("${")?.strip_suffix('}')?;
-        if !braced_parameter_spans_whole_word(word) {
+        let was_quoted = word.starts_with('\x1d');
+        let word = word.strip_prefix('\x1d').unwrap_or(word);
+        let Some(rest) = word.strip_prefix("${") else {
             return None;
-        }
+        };
+        // GNU parse.y's dolbrace state machine (POSIX mode, Austin Group
+        // Interp 221) treats a single quote inside a double-quoted ${...}
+        // as literal text, so the first `}` closes the expansion:
+        // "${IFS+'}'z}" is the word `'` plus trailing text `'z}`. The
+        // unconditional strip_suffix('}') below would pair the LAST `}` and
+        // misread the alternate as `'}'z` (posixexp2). In that context the
+        // brace must be matched with the quoting-aware scanner, and a word
+        // whose match is not the final character is not a whole-word
+        // ${op...} at all.
+        let posix_dq = was_quoted && self.posix_mode_enabled();
+        let name = if posix_dq {
+            let end = matching_parameter_brace_in_context(rest, true, true)?;
+            if end + 1 != rest.len() {
+                return None;
+            }
+            &rest[..end]
+        } else {
+            if !braced_parameter_spans_whole_word(word) {
+                return None;
+            }
+            rest.strip_suffix('}')?
+        };
 
         // `+`/`:+` use the word when the parameter is set (non-empty for
         // `:+`); `-`/`:-` use the word when it is unset (or empty for `:-`).
@@ -1085,7 +1313,52 @@ impl Executor {
                 return None;
             };
 
+        // GNU parameter_brace_expand (subst.c:9850-9960): for a list-valued
+        // operand — a[@], a[*], @, * — the "value used when set" of `-`/`:-`
+        // is the element list itself: [@]/@ yields one word per element
+        // (array22.sub: all-empty elements stay <><> instead of collapsing
+        // into " "), while [*]/* yields the single IFS[0]-joined word whose
+        // emptiness `:-` then tests. The scalar path joins [@] with spaces
+        // and cannot express the multi-word result, so list operands
+        // intercept here before the narrow gate.
+        let mut list_is_null_or_unset = false;
+        if !use_when_set {
+            if let Some((values, is_at)) = self.braced_operator_list_values(var_name) {
+                // GNU subst.c:9990-9993 + 10132: the `:-` null test applies
+                // to the operand's string form — string_list_dollar_at joins
+                // [@]/@ with " " while string_list_dollar_star joins [*]/*
+                // with IFS[0] — so `a[1]=` alone makes ${a[@]:-y} yield `y`
+                // while `a[0]= a[1]=` expands to two empty words, and under
+                // IFS='' `${A[*]:-X}` of A=('' '') yields `X` (array22.sub).
+                // `-` only tests whether the list is non-empty.
+                let separator = if is_at {
+                    " ".to_string()
+                } else {
+                    self.ifs_first_char_separator()
+                };
+                let joined = values.join(&separator);
+                let null = joined.is_empty();
+                if is_at {
+                    if !values.is_empty() && !(require_non_empty && null) {
+                        return Some(values);
+                    }
+                } else if !null || (!require_non_empty && !values.is_empty()) {
+                    return Some(vec![joined]);
+                }
+                // unset, or empty under `:-`: the alternate word is used.
+                // The scalar parameter_operator_value below cannot see a
+                // null-but-set list (${A[*]:-X} under IFS='' joins to ""),
+                // so force the alternate branch here.
+                list_is_null_or_unset = true;
+            }
+        }
+
+        let whole_array_alternate = alternate
+            .strip_prefix("${")
+            .and_then(|a| a.strip_suffix('}'))
+            .is_some_and(|inner| inner.ends_with("[*]") || inner.ends_with("[@]"));
         if narrow
+            && !whole_array_alternate
             && !alternate.contains("$@")
             && !alternate.contains("$*")
             && !alternate.contains("${*")
@@ -1101,7 +1374,9 @@ impl Executor {
         let word_used = if use_when_set {
             value.is_some() && (!require_non_empty || !value.unwrap_or_default().is_empty())
         } else {
-            value.is_none() || (require_non_empty && value.unwrap_or_default().is_empty())
+            list_is_null_or_unset
+                || value.is_none()
+                || (require_non_empty && value.unwrap_or_default().is_empty())
         };
         if !word_used {
             return None;
@@ -1122,7 +1397,16 @@ impl Executor {
             && !fragment_quoted
             && (alternate.contains("$@") || alternate.contains("${@}"))
         {
-            return Some(self.expand_alternate_word_fragment(&format!("\"{alternate}\"")));
+            // GNU subst.c:12026-12035 (expand_word_internal): the enclosing
+            // double-quoted ${...} retains one empty field when the used
+            // alternate expands to zero words (`"${foo-$@}"` with no
+            // positional parameters yields `argv[1] = <>`, not zero args).
+            let values = self.expand_alternate_word_fragment(&format!("\"{alternate}\""));
+            return Some(if values.is_empty() {
+                vec![String::new()]
+            } else {
+                values
+            });
         }
 
         // Posix interp 888 (subst.c string_list_pos_params:3047-3072): the
@@ -1196,6 +1480,45 @@ impl Executor {
                 }
             }
         }
+        // GNU param_expand routes the operator word through
+        // expand_string_for_rhs with PF_ASSIGNRHS: an array alternate
+        // `${name[*]}`/`${name[@]}` joins via string_list_dollar_star /
+        // string_list_dollar_at (IFS[0] for [*], space for [@]) and then
+        // field-splits per the ambient IFS; a set-empty IFS leaves the
+        // element list per-word (array24.sub: ${var-${A[*]}} under
+        // IFS='' yields abc / def ghi / jkl, not the concatenated
+        // "abcdef ghijkl").
+        if !outer_double_quoted && whole_array_alternate {
+            let inner = &alternate[2..alternate.len() - 1];
+            let base = &inner[..inner.len() - 3];
+            if let Some(storage) = self.parameter_array_storage(base) {
+                let values: Vec<String> = if is_marked_var(&self.env_vars, ASSOC_VARS, base) {
+                    assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, base))
+                } else {
+                    array_values(&storage)
+                }
+                .into_iter()
+                .map(normalize_array_expanded_value)
+                .collect();
+                if values.is_empty() {
+                    return Some(Vec::new());
+                }
+                match self.env_vars.get("IFS").map(String::as_str) {
+                    Some("") => return Some(values),
+                    ifs => {
+                        let separator = if inner.ends_with("[*]") {
+                            self.ifs_first_char_separator()
+                        } else {
+                            " ".to_string()
+                        };
+                        return Some(field_split_values_with_ifs(
+                            &values.join(&separator),
+                            ifs,
+                        ));
+                    }
+                }
+            }
+        }
         let positional_at = alternate.contains("$@")
             || alternate.contains("${@")
             || alternate.contains("$*")
@@ -1221,7 +1544,27 @@ impl Executor {
             .map(|ifs| ifs.chars().all(|ch| matches!(ch, ' ' | '\t' | '\n')))
             .unwrap_or(true);
         if !positional_at && !posix_literal_quotes && ifs_all_whitespace {
-            let expanded = self.expand_alternate_parameter_word(alternate);
+            // GNU param_expand passes the enclosing `quoted` down to the
+            // alternate word (subst.c:7840-7860): inside "${var-word}" the
+            // alternate expands in double-quote context — `"` toggles
+            // quoting and `'` is literal data ("${dbg-'"'hey}" -> ''hey,
+            // array6.sub:26). The unquoted path would treat `'` as an sq
+            // opener instead.
+            let expanded = if outer_double_quoted {
+                crate::executor::parameter_words::unescape_parameter_operator_result(
+                    &self.expand_embedded_parameters_mut_with_context(
+                        &crate::executor::parameter_words::decode_double_quotes_in_quoted_parameter_word(
+                            alternate,
+                            self.posix_mode_enabled(),
+                        ),
+                        SubstitutionQuoteContext::DoubleQuoted,
+                    ),
+                    SubstitutionQuoteContext::DoubleQuoted,
+                    self.env_vars.get("IFS").map(String::as_str),
+                )
+            } else {
+                self.expand_alternate_parameter_word(alternate)
+            };
             // Quoted-empty spans in the alternate carry the quoted-null
             // marker: the splitter keeps each marker-only field as an empty
             // argument (quote2.sub: ${x:+"$e" "$e"} -> two empty args,
@@ -1240,7 +1583,15 @@ impl Executor {
             }
             return Some(self.field_split_values(&expanded));
         }
-        Some(self.expand_alternate_word_fragment(alternate))
+        // Same quoted-null retention as the `$@` branch above: a fully
+        // double-quoted `${...}` keeps one empty field when the used
+        // alternate expands to zero words (`"${foo-"$@"}"`, `"${foo:-${@}}"`,
+        // `"${foo-$@$@}"` with no positional parameters).
+        let values = self.expand_alternate_word_fragment(alternate);
+        if outer_double_quoted && values.is_empty() {
+            return Some(vec![String::new()]);
+        }
+        Some(values)
     }
 
     // Fully double-quoted `${op...$@...}` words (e.g. `"${1+  $@  }"`) carry
@@ -1259,14 +1610,27 @@ impl Executor {
             return None;
         }
         let inner = &braced[2..braced.len() - 1];
+        // GNU param_expand reads the operator only at the top level of the
+        // `${}` body: `+`/`-`/`:` inside `[...]` belong to the array
+        // subscript (`${a[i++]:-x}` has no `-` operator). A naive split_once
+        // cuts the subscript in half (`a[$((i`) and then evaluates the
+        // malformed expression.
         let (var_name, alternate, use_when_set, require_non_empty) =
-            if let Some((var_name, alternate)) = inner.split_once(":+") {
+            if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(inner, ":+")
+            {
                 (var_name, alternate, true, true)
-            } else if let Some((var_name, alternate)) = inner.split_once('+') {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(inner, '+')
+            {
                 (var_name, alternate, true, false)
-            } else if let Some((var_name, alternate)) = inner.split_once(":-") {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(inner, ":-")
+            {
                 (var_name, alternate, false, true)
-            } else if let Some((var_name, alternate)) = inner.split_once('-') {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(inner, '-')
+            {
                 (var_name, alternate, false, false)
             } else {
                 return None;
@@ -1323,11 +1687,32 @@ impl Executor {
                 .join(&self.ifs_first_char_separator())]);
         }
 
-        let synthetic_raw = format!("\"{alternate}\"");
-        self.quoted_positional_at_word_values_with_raw(alternate, Some(&synthetic_raw), None)
+        // The outer `"${...}"` quoting carries into the alternate word
+        // (GNU param_expand passes `quoted` through), so the positional
+        // list must expand in a double-quoted context. An alternate that
+        // already carries its own quotes (`"$@"`) is scanned verbatim --
+        // wrapping it again (`""$@""`) would read the `$@` between the
+        // empty spans as a bare unquoted positional.
+        let synthetic_raw = if alternate.starts_with('"') && alternate.ends_with('"') {
+            alternate.to_string()
+        } else {
+            format!("\"{alternate}\"")
+        };
+        let values = self
+            .quoted_positional_at_word_values_with_raw(alternate, Some(&synthetic_raw), None)?;
+        // GNU subst.c:12026-12035: this word is \x1d-marked (fully
+        // double-quoted), so a zero-field alternate still yields one empty
+        // field (`"${foo-$@}"` with no positional parameters -> `argv[1] = <>`).
+        if values.is_empty() {
+            return Some(vec![String::new()]);
+        }
+        Some(values)
     }
 
-    fn expand_alternate_word_fragment(&mut self, fragment: &str) -> Vec<String> {
+    pub(in crate::executor) fn expand_alternate_word_fragment(
+        &mut self,
+        fragment: &str,
+    ) -> Vec<String> {
         // In POSIX mode, quotes inside a double-quoted parameter expansion
         // word are literal for quote-state purposes. Preserve that context
         // when expanding an alternate fragment instead of reparsing it as an
@@ -1386,14 +1771,24 @@ impl Executor {
         {
             return None;
         }
+        // Operator characters inside `[...]` belong to the array subscript;
+        // a naive split_once would cut `${a[i++]-x}` at the subscript's `-`.
         let (var_name, alternate, use_when_set, require_non_empty) =
-            if let Some((var_name, alternate)) = inner.split_once(":+") {
+            if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(inner, ":+")
+            {
                 (var_name, alternate, true, true)
-            } else if let Some((var_name, alternate)) = inner.split_once('+') {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(inner, '+')
+            {
                 (var_name, alternate, true, false)
-            } else if let Some((var_name, alternate)) = inner.split_once(":-") {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(inner, ":-")
+            {
                 (var_name, alternate, false, true)
-            } else if let Some((var_name, alternate)) = inner.split_once('-') {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(inner, '-')
+            {
                 (var_name, alternate, false, false)
             } else {
                 return None;
@@ -1694,24 +2089,56 @@ pub(in crate::executor) fn expand_braces_with_optional_raw(
 }
 
 fn word_contains_brace_group(word: &str) -> bool {
+    // GNU braces.c brace_expand: braces inside a `${...}`/`$(...)` body are
+    // expansion syntax, not brace-expansion candidates -- `a${u-{x,y}}z`
+    // renders literally and `declare a=("${x[@]}" "y")` must not be dequoted
+    // by the raw re-expansion path. Skip each `$`-opened body through its
+    // matching close, tracking nested opens.
+    let chars: Vec<char> = word.chars().collect();
     let mut escaped = false;
     let mut open = false;
-    for ch in word.chars() {
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
         if escaped {
             escaped = false;
+            index += 1;
             continue;
         }
         if ch == '\\' {
             escaped = true;
+        } else if ch == '$'
+            && matches!(chars.get(index + 1), Some(&next) if next == '{' || next == '(')
+        {
+            let open_ch = chars[index + 1];
+            let close_ch = if open_ch == '{' { '}' } else { ')' };
+            let mut depth = 1usize;
+            let mut inner = index + 2;
+            let mut inner_escaped = false;
+            while inner < chars.len() && depth > 0 {
+                let inner_ch = chars[inner];
+                if inner_escaped {
+                    inner_escaped = false;
+                } else if inner_ch == '\\' {
+                    inner_escaped = true;
+                } else if inner_ch == open_ch {
+                    depth += 1;
+                } else if inner_ch == close_ch {
+                    depth -= 1;
+                }
+                inner += 1;
+            }
+            index = inner;
+            continue;
         } else if ch == '{' {
             open = true;
         } else if ch == '}' && open {
             return true;
         }
+        index += 1;
     }
     false
 }
-
 pub(in crate::executor) fn restore_pathname_escape_markers(word: &str) -> String {
     let word = crate::expand::tilde::tilde::strip_assignment_quote_marker(word);
     let word = word

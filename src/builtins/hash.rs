@@ -374,6 +374,38 @@ fn store_hash_table(env_vars: &mut HashMap<String, String>, table: &HashMap<Stri
     );
 }
 
+/// GNU hashlib.c:254: a hash_search hit increments times_found — every
+/// phash_search (`type`, `command -v`, exec resolution, `hash -t`) counts.
+pub(crate) fn bump_hashed_path_hit(env_vars: &mut HashMap<String, String>, name: &str) {
+    let mut table = hash_table(env_vars);
+    if let Some((_, hits, _)) = table.get_mut(name) {
+        *hits += 1;
+        store_hash_table(env_vars, &table);
+    }
+}
+
+/// GNU findcmd.c:365-426: a command resolution that hits hashed_filenames
+/// bumps times_found (phash_search -> hashlib.c:254); one resolved through
+/// PATH enters the table with times_found=1 (phash_insert found=1).
+/// Called from the external-command dispatch once `find_user_command`
+/// resolved `name` to `shell_path`.
+pub(crate) fn record_command_resolution(
+    env_vars: &mut HashMap<String, String>,
+    name: &str,
+    shell_path: &str,
+) {
+    let mut table = hash_table(env_vars);
+    if let Some((_, hits, _)) = table.get_mut(name) {
+        *hits += 1;
+    } else {
+        table.insert(
+            name.to_string(),
+            (shell_path.to_string(), 1, next_hash_seq(&table)),
+        );
+    }
+    store_hash_table(env_vars, &table);
+}
+
 fn script_prefix(env_vars: &HashMap<String, String>) -> String {
     if let (Some(script), Some(line)) = (
         env_vars.get("__RUBASH_SCRIPT_NAME"),

@@ -42,6 +42,19 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     push_command_word(&mut state.current_cmd, token);
                 }
             } else if token.raw.contains("=(") && token.raw.ends_with(')') {
+                // GNU parse.y read_token_word: `=(` only opens a compound
+                // assignment when the `=` follows a valid assignment LHS --
+                // `$(( a=(1+2) ))` keeps `=(` inside the arithmetic word and
+                // must never reach the position check.
+                let compound_candidate = token
+                    .raw
+                    .split_once('=')
+                    .is_some_and(|(lhs, _)| valid_compound_assignment_lhs(lhs));
+                if compound_candidate
+                    && !compound_assignment_position_ok(&state.current_cmd.words)
+                {
+                    return reject_compound_assignment_position(tokens, i, state, token);
+                }
                 // Atomic compound operand after a command word (declare -a
                 // e=(...) ): the lexer keeps name=(...) whole and de-quotes
                 // the value, which would destroy element quote grouping
@@ -225,6 +238,14 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     let raw_word = token.raw.clone();
                     let mut atomic_compound_attached = false;
                     if raw_word.ends_with(')') && raw_word.contains("=(") {
+                        let compound_candidate = raw_word
+                            .split_once('=')
+                            .is_some_and(|(lhs, _)| valid_compound_assignment_lhs(lhs));
+                        if compound_candidate
+                            && !compound_assignment_position_ok(&state.current_cmd.words)
+                        {
+                            return reject_compound_assignment_position(tokens, i, state, token);
+                        }
                         // Atomic compound (the lexer keeps name=(...) whole
                         // through whitespace and metacharacters, GNU
                         // read_token_word): mark it and preserve the raw
@@ -286,14 +307,39 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                                 && raw_rhs.starts_with("'(")
                                 && raw_rhs.ends_with(")'")
                             {
-                                // Strip only the outer single quotes; the
-                                // inner double quotes are the element
-                                // grouping the storage parser needs.
-                                let inner = &raw_rhs[1..raw_rhs.len() - 1];
+                                // token.value carries the single-quoted body
+                                // with the lexer's carriers intact (\x1f for
+                                // `$`, \x18 for `"`, ...), so word expansion
+                                // leaves it verbatim. GNU defers the compound
+                                // expansion to declare_builtin ->
+                                // expand_compound_array_assignment
+                                // (arrayfunc.c:557) — after earlier operands
+                                // have bound — so `declare -a a=('x') d='($a)'
+                                // must still see the unexpanded `$a` here. The
+                                // \x03 lead-in inside the parens marks the
+                                // carriers as deferred SYNTAX (the builtin
+                                // decodes them back to real chars and expands)
+                                // rather than escape-produced data.
+                                let inner = token
+                                    .value
+                                    .split_once('=')
+                                    .map(|(_, value)| value)
+                                    .unwrap_or_else(|| &raw_rhs[1..raw_rhs.len() - 1]);
+                                // The protected value may lead with the
+                                // sq-protection tag (\x1c); keep it and mark
+                                // the compound body after it.
+                                let (tag, body) = inner
+                                    .strip_prefix('\u{1c}')
+                                    .map(|body| ("\u{1c}", body))
+                                    .unwrap_or(("", inner));
+                                let deferred = body
+                                    .strip_prefix('(')
+                                    .map(|rest| format!("{tag}(\u{3}{rest}"))
+                                    .unwrap_or_else(|| inner.to_string());
                                 word = format!(
                                     "{lhs}={}{}",
                                     crate::executor::types::COMPOUND_ASSIGNMENT_MARKER,
-                                    inner
+                                    deferred
                                 );
                             }
                         }
@@ -301,6 +347,15 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         if let Some((compound_value, next_i)) =
                             collect_compound_assignment(tokens, *i)
                         {
+                            let lhs = token.value.strip_suffix('=').unwrap_or(&token.value);
+                            let compound_candidate = valid_compound_assignment_lhs(lhs);
+                            if compound_candidate
+                                && !compound_assignment_position_ok(&state.current_cmd.words)
+                            {
+                                return reject_compound_assignment_position(
+                                    tokens, i, state, token,
+                                );
+                            }
                             if let Some(compound_assignment) = compound_assignment_from_word(
                                 &token.value,
                                 compound_value.clone(),
@@ -1036,6 +1091,65 @@ fn collect_process_substitution_suffix(
     }
 
     (value, raw, index.saturating_sub(1))
+}
+
+/// GNU parse.y:5791-5810 + builtins/mkbuiltins.c:157 assignment_builtins:
+/// a `=(` inside a command word only lexes as a compound assignment where
+/// an assignment statement is acceptable (PST_ASSIGNOK) — command position
+/// (every preceding word is an assignment), after an assignment builtin
+/// (alias/declare/export/local/readonly/typeset), or after eval/let.
+/// Elsewhere the `(` is an unexpected token, e.g.
+/// `printf "%s\n" -a a=(a 'b  c')` (array1.sub:1).
+fn compound_assignment_position_ok(words: &[String]) -> bool {
+    for word in words {
+        let is_assignment_word = word
+            .split_once('=')
+            .is_some_and(|(lhs, _)| valid_compound_assignment_lhs(lhs));
+        if !is_assignment_word {
+            return matches!(
+                word.as_str(),
+                "alias" | "declare" | "export" | "local" | "readonly" | "typeset" | "eval"
+                    | "let"
+            );
+        }
+    }
+    true
+}
+
+/// Emit the GNU `syntax error near unexpected token `('` parse error for a
+/// `=(` word in a position where assignments are not acceptable. GNU parses
+/// the whole line before executing any of it (same as the `}` case above),
+/// so commands already parsed on this line are suppressed.
+fn reject_compound_assignment_position(
+    tokens: &[Token],
+    i: &mut usize,
+    state: &mut ParseState,
+    token: &Token,
+) -> TokenAction {
+    let error_line = token.position;
+    while state
+        .ast
+        .commands
+        .last()
+        .is_some_and(|command| command.line == Some(error_line))
+    {
+        state.ast.commands.pop();
+    }
+    state.current_cmd.insert_assignment(
+        "__RUBASH_PARSE_ERROR__".to_string(),
+        "unexpected token `('".to_string(),
+    );
+    if let Some(source) = parse_error_source_line(tokens, *i) {
+        state
+            .current_cmd
+            .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
+    }
+    state
+        .ast
+        .commands
+        .push(std::mem::take(&mut state.current_cmd));
+    *i += 1;
+    TokenAction::Continue
 }
 
 /// Name-side validator for atomic compound assignments: optional

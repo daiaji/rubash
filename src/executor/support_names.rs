@@ -27,6 +27,26 @@ pub(in crate::executor) fn is_special_parameter_name(name: &str) -> bool {
 /// the version must see a compatible value, like other Bash-compatible shells.
 const BASH_COMPAT_VERSION: &str = "5.3.0";
 
+/// GNU variables.c sv_bashcompat / set_compatibility_level: assigning
+/// BASH_COMPAT sets shell_compatibility_level (default 53 for bash-5.3);
+/// accepted spellings are `NN' (44, 51) and `N.N' (5.1). An unparseable
+/// or out-of-range value leaves the level unchanged — model the parsed
+/// level directly, defaulting to the 5.3 level.
+pub(in crate::executor) fn shell_compatibility_level_value(
+    env_vars: &HashMap<String, String>,
+) -> u32 {
+    let Some(raw) = env_vars.get("BASH_COMPAT") else {
+        return 53;
+    };
+    let raw = raw.trim();
+    let level = if let Some((major, minor)) = raw.split_once('.') {
+        format!("{}{}", major.trim(), minor.trim())
+    } else {
+        raw.to_string()
+    };
+    level.parse::<u32>().unwrap_or(53)
+}
+
 pub(in crate::executor) fn bash_version_value() -> String {
     format!("{}(1)-release", BASH_COMPAT_VERSION)
 }

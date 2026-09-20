@@ -3,6 +3,7 @@ use super::*;
 const READ_USAGE: &str =
     "read: usage: read [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]";
 
+
 /// GNU read.def:405: `read` accepts a name that is either a valid identifier
 /// or a valid array reference `name[subscript]` (array.tests:80 `read x[1]`).
 /// The array-reference check is `valid_array_reference(name, arrayflags)`
@@ -18,10 +19,16 @@ fn is_valid_read_name(
     name: &str,
     w_arrayref: bool,
     env_vars: &HashMap<String, String>,
+
 ) -> bool {
+    // W_ARRAYREF arrives in-band as an ARRAYREF_FLAG prefix on the operand
+    // text; it is a word flag, not name bytes, so strip it before the
+    // identifier/reference checks (execute_cmd.c:4366 fix_arrayref_words).
+    let name = crate::builtins::arrayref::take_arrayref_flag(name).1;
     if is_shell_name(name) {
         return true;
     }
+
     let expand_once = crate::builtins::shopt::option_enabled(env_vars, "array_expand_once");
     crate::executor::subscript_expansion::valid_array_reference_env(
         name,
@@ -29,10 +36,37 @@ fn is_valid_read_name(
         expand_once && w_arrayref,
         env_vars,
     )
+
 }
 
 impl Executor {
     pub(in crate::executor) fn execute_read(&mut self, cmd: &CommandNode) -> i32 {
+        // GNU execute_cmd.c do_redirections applies redirects before the
+        // builtin runs: a failed input open aborts the command — read's
+        // variables stay unset and the diagnostic is the redirect's
+        // (probe: `read a < /nonexist` leaves `a` unset, status 1). The
+        // in-reader open treats failure as EOF, which wrongly assigns "".
+        if let Some(redirect) = &cmd.redirect_in {
+            if redirect.fd.unwrap_or(0) == 0 && redirect.fd_var.is_none() {
+                let target = self.expand_word(&redirect.target);
+                if !is_closed_redirect_target(&target)
+                    && redirect_target_fd(&target).is_none()
+                    && !target.starts_with("<(")
+                {
+                    if let Err(error) = self.open_input_redirect(&target) {
+                        let mut line = Vec::new();
+                        let _ = writeln!(
+                            &mut line,
+                            "{}{}",
+                            self.diagnostic_prefix(),
+                            crate::posix_errors::message(&error)
+                        );
+                        let _ = self.write_default_stderr(&line);
+                        return 1;
+                    }
+                }
+            }
+        }
         let mut stderr = Vec::new();
         let mut array_name = None;
         let mut delimiter = '\n';
@@ -57,12 +91,14 @@ impl Executor {
                             index += 1;
                             continue;
                         }
+
                         if is_valid_read_name(
                             &cmd.words[index],
                             self.word_is_arrayref(cmd, index),
                             &self.env_vars,
                         ) {
-                            scalar_names.push(cmd.words[index].clone());
+                            scalar_names.push(crate::builtins::arrayref::take_arrayref_flag(&cmd.words[index]).1.to_string());
+
                             scalar_field_count += 1;
                         } else {
                             report_read_invalid_identifier(
@@ -88,7 +124,7 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(name.clone());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -113,7 +149,7 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(name.clone());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -129,7 +165,7 @@ impl Executor {
                     raw = true;
                     let name = &word[3..];
                     if is_shell_name(name) {
-                        array_name = Some(name.to_string());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -154,7 +190,7 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(name.clone());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -172,7 +208,7 @@ impl Executor {
                     raw = true;
                     let name = &word[4..];
                     if is_shell_name(name) {
-                        array_name = Some(name.to_string());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -197,7 +233,7 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(name.clone());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -220,7 +256,7 @@ impl Executor {
                     raw = true;
                     let name = &word[5..];
                     if is_shell_name(name) {
-                        array_name = Some(name.to_string());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -243,7 +279,7 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(name.clone());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -258,7 +294,7 @@ impl Executor {
                 word if word.starts_with("-sa") && word.len() > 3 => {
                     let name = &word[3..];
                     if is_shell_name(name) {
-                        array_name = Some(name.to_string());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -281,7 +317,7 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(name.clone());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -296,7 +332,7 @@ impl Executor {
                 word if word.starts_with("-ea") && word.len() > 3 => {
                     let name = &word[3..];
                     if is_shell_name(name) {
-                        array_name = Some(name.to_string());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -321,7 +357,7 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(name.clone());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -339,7 +375,7 @@ impl Executor {
                     raw = true;
                     let name = &word[4..];
                     if is_shell_name(name) {
-                        array_name = Some(name.to_string());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -354,7 +390,7 @@ impl Executor {
                 word if word.starts_with("-a") && word.len() > 2 => {
                     let name = &word[2..];
                     if is_shell_name(name) {
-                        array_name = Some(name.to_string());
+                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -370,8 +406,8 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or('\u{0}');
                     index += 2;
                 }
                 "-n" => {
@@ -986,13 +1022,13 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or('\u{0}');
                     initial_text = cmd.words.get(index + 2).cloned();
                     index += 3;
                 }
                 word if word.starts_with("-edi") && word.len() > 4 => {
-                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[3..]);
                     initial_text = Some(word[4..].to_string());
                     index += 1;
                 }
@@ -1000,13 +1036,13 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or('\u{0}');
                     initial_text = cmd.words.get(index + 2).cloned();
                     index += 3;
                 }
                 word if word.starts_with("-dei") && word.len() > 4 => {
-                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[3..]);
                     initial_text = Some(word[4..].to_string());
                     index += 1;
                 }
@@ -1014,12 +1050,12 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or('\u{0}');
                     index += 2;
                 }
                 word if word.starts_with("-ed") && word.len() > 3 => {
-                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[3..]);
                     index += 1;
                 }
                 "-red" | "-erd" => {
@@ -1027,15 +1063,15 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or('\u{0}');
                     index += 2;
                 }
                 word if (word.starts_with("-red") || word.starts_with("-erd"))
                     && word.len() > 4 =>
                 {
                     raw = true;
-                    delimiter = word[4..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[4..]);
                     index += 1;
                 }
                 "-st" => {
@@ -1118,12 +1154,12 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or('\u{0}');
                     index += 2;
                 }
                 word if word.starts_with("-sd") && word.len() > 3 => {
-                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[3..]);
                     index += 1;
                 }
                 word if word.starts_with('-')
@@ -1134,7 +1170,7 @@ impl Executor {
                     index += 1;
                 }
                 word if word.starts_with("-d") && word.len() > 2 => {
-                    delimiter = word[2..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[2..]);
                     index += 1;
                 }
                 "-rd" => {
@@ -1142,13 +1178,13 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or('\u{0}');
                     index += 2;
                 }
                 word if word.starts_with("-rd") && word.len() > 3 => {
                     raw = true;
-                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[3..]);
                     index += 1;
                 }
                 "-rsd" | "-srd" => {
@@ -1156,15 +1192,15 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or('\u{0}');
                     index += 2;
                 }
                 word if (word.starts_with("-rsd") || word.starts_with("-srd"))
                     && word.len() > 4 =>
                 {
                     raw = true;
-                    delimiter = word[4..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[4..]);
                     index += 1;
                 }
                 "-ersd" | "-esrd" | "-resd" | "-rsed" | "-serd" | "-sred" => {
@@ -1172,8 +1208,8 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or('\u{0}');
                     index += 2;
                 }
                 word if (word.starts_with("-ersd")
@@ -1185,7 +1221,7 @@ impl Executor {
                     && word.len() > 5 =>
                 {
                     raw = true;
-                    delimiter = word[5..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[5..]);
                     index += 1;
                 }
                 "-rsn" | "-srn" => {
@@ -1807,8 +1843,10 @@ impl Executor {
                     return self.finish_read_error(cmd, &stderr, 2);
                 }
                 word if !stop_scalar_names => {
+
                     if is_valid_read_name(word, self.word_is_arrayref(cmd, index), &self.env_vars) {
-                        scalar_names.push(word.to_string());
+                        scalar_names.push(crate::builtins::arrayref::take_arrayref_flag(word).1.to_string());
+
                         scalar_field_count += 1;
                     } else {
                         report_read_invalid_identifier(
@@ -2274,7 +2312,15 @@ impl Executor {
         {
             return 0;
         }
-        1
+        // GNU read.def polls fd 0 with select(): a non-terminal inherited
+        // stdin (regular file, /dev/null, a pipe at EOF) is always readable,
+        // so `-t 0` succeeds. Only a live terminal with no pending input
+        // fails the poll.
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -2292,6 +2338,9 @@ fn parse_read_timeout(value: &str) -> Result<bool, ()> {
 }
 
 fn report_read_invalid_identifier(stderr: &mut Vec<u8>, diagnostic_prefix: &str, name: &str) {
+    // GNU sh_invalidid prints the operand's text; W_ARRAYREF's in-band
+    // ARRAYREF_FLAG prefix (execute_cmd.c:4366) is a word flag, not text.
+    let name = crate::builtins::arrayref::take_arrayref_flag(name).1;
     let _ = writeln!(
         stderr,
         "{diagnostic_prefix}read: `{name}': not a valid identifier"

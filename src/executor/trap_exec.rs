@@ -1183,6 +1183,8 @@ impl Executor {
                 decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
             input.push('\n');
             input
+        } else if let Some(pre) = preexpanded_stdin_body(body) {
+            pre.to_string()
         } else {
             strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
         };

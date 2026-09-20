@@ -202,10 +202,13 @@ impl Executor {
     /// A dedicated quoted-heredoc marker keeps the body literal without sharing
     /// the compound-assignment transport protocol.
     pub(in crate::executor) fn expand_heredoc_body_mut(&mut self, body: &str) -> String {
+        if let Some(pre) = preexpanded_stdin_body(body) {
+            return decode_stdin_body_enq(pre);
+        }
         let quoted = body.starts_with(crate::lexer::QUOTED_HEREDOC_MARKER);
         let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));
         if quoted {
-            return body.to_string();
+            return decode_stdin_body_enq(body);
         }
         // comsub-eof6: `read foo <<EOF` with body `$(seq 10` (missing `)`)
         // must not expand to `1`; GNU reports `command substitution:
@@ -219,10 +222,10 @@ impl Executor {
             return String::new();
         }
         let prepared = prepare_unquoted_heredoc_expansion(body);
-        self.expand_embedded_parameters_mut_with_context(
+        decode_stdin_body_enq(&self.expand_embedded_parameters_mut_with_context(
             &prepared,
             SubstitutionQuoteContext::HereDocument,
-        )
+        ))
     }
 
     pub(in crate::executor) fn expand_heredoc_body_readback(
@@ -238,10 +241,13 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_heredoc_body(&self, body: &str) -> String {
+        if let Some(pre) = preexpanded_stdin_body(body) {
+            return decode_stdin_body_enq(pre);
+        }
         let quoted = body.starts_with(crate::lexer::QUOTED_HEREDOC_MARKER);
         let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));
         if quoted {
-            return body.to_string();
+            return decode_stdin_body_enq(body);
         }
         if crate::lexer::has_unclosed_command_substitution(body) {
             eprintln!(
@@ -252,7 +258,9 @@ impl Executor {
         }
         let expanded =
             self.expand_embedded_parameters_for_heredoc(&prepare_unquoted_heredoc_expansion(body));
-        decode_command_substitution_payload(&restore_command_substitution_output(&expanded))
+        decode_stdin_body_enq(&decode_command_substitution_payload(
+            &restore_command_substitution_output(&expanded),
+        ))
     }
 }
 

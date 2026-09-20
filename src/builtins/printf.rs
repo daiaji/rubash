@@ -103,7 +103,14 @@ where
     W: Write,
     E: Write,
 {
-    let args: Vec<&str> = args.into_iter().collect();
+    // W_ARRAYREF (in-band ARRAYREF_FLAG) is consumed by the executor's
+    // SET_VFLAGS pre-pass (printf.def:305); strip any surviving prefix off
+    // the operand text so it never leaks into format/arguments.
+    let stripped_args: Vec<String> = args
+        .into_iter()
+        .map(|arg| crate::builtins::arrayref::take_arrayref_flag(arg).1.to_string())
+        .collect();
+    let args: Vec<&str> = stripped_args.iter().map(String::as_str).collect();
     let mut output_var = None;
     let mut index = 0;
 
@@ -152,11 +159,23 @@ where
 
         if let Some(name) = name {
             if !valid_identifier(name) && !valid_printf_array_target(name, env_vars) {
+                // GNU prints the expanded operand text; decode the
+                // marker-encoded assoc key the executor delivered so the
+                // diagnostic names `a[80's]`, not its carrier bytes.
+                let display = parse_printf_array_target(name)
+                    .map(|(base, subscript)| {
+                        let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(
+                            subscript,
+                        )
+                        .unwrap_or_else(|| subscript.to_string());
+                        format!("{base}[{key}]")
+                    })
+                    .unwrap_or_else(|| name.to_string());
                 writeln!(
                     stderr,
                     "{}printf: `{}': not a valid identifier",
                     diagnostic_prefix(env_vars),
-                    name
+                    display
                 )?;
                 return Ok(EX_USAGE);
             }
@@ -219,6 +238,7 @@ fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
     "rubash: ".to_string()
 }
 
+
 fn valid_printf_array_target(name: &str, env_vars: &HashMap<String, String>) -> bool {
     // GNU printf.def:305: valid_array_reference(vname, arrayflags) with the
     // VA_NOEXPAND flags SET_VFLAGS derives from array_expand_once
@@ -234,13 +254,12 @@ fn valid_printf_array_target(name: &str, env_vars: &HashMap<String, String>) -> 
     ) {
         return false;
     }
-    let Some((base, subscript)) = parse_printf_array_target(name) else {
-        return false;
-    };
-    if is_marked(env_vars, "__RUBASH_ASSOC_VARS", base) {
-        return true;
-    }
-    resolve_printf_indexed_subscript(env_vars, base, subscript).is_some()
+
+    // GNU valid_array_reference (arrayfunc.c) is purely syntactic: the
+    // subscript only has to be non-empty and quote-balanced. `a[@]` is a
+    // VALID reference — the `@`: bad array subscript diagnostic fires at
+    // bind time inside bind_variable -> assign_array_element, not here.
+    parse_printf_array_target(name).is_some()
 }
 
 /// GNU builtins/common.c:949 builtin_bind_variable -> bind_variable:
@@ -334,7 +353,16 @@ fn assign_printf_output(
             }
             assign_printf_indexed_element(env_vars, base, index, output);
         } else {
-            env_vars.insert(name.to_string(), output);
+            // GNU bind_variable -> assign_array_element -> array_expand_index:
+            // `@`/`*` (and any subscript the index expansion rejects) reports
+            // `name[sub]: bad array subscript` (builtin_error) and fails the
+            // assignment with status 1.
+            writeln!(
+                stderr,
+                "{}{name}: bad array subscript",
+                diagnostic_prefix(env_vars),
+            )?;
+            return Ok(Some(1));
         }
         return Ok(None);
     }
@@ -497,10 +525,16 @@ fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
 }
 
 fn quote_assoc_key(key: &str) -> String {
+    // The storage form is re-parsed by split_storage_words on every
+    // read: a bare `'` opens a single-quote span that swallows the
+    // rest of the pair list (assoc9.sub printf -v a[$b] with
+    // b="80's" stored key `80s`), so it forces quoting like
+    // whitespace, `"`, `\`, `]`, backtick and `$` — matching the
+    // executor/declare quoters.
     if !key.is_empty()
         && !key
             .chars()
-            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '"' | '\\' | ']'))
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '\'' | '"' | '\\' | ']' | '`' | '$'))
     {
         return key.to_string();
     }

@@ -216,8 +216,11 @@ pub(in crate::executor) fn quote_assoc_display_key(key: &str) -> String {
 /// value holds a non-printing byte. High-bit bytes follow the UTF-8-locale
 /// multibyte path (351-354): a printable decoded character is fine, an
 /// undecodable or non-printing one forces quoting.
-pub(in crate::executor) fn ansic_shouldquote(value: &str) -> bool {
-    let bytes = value.as_bytes();
+pub(crate) fn ansic_shouldquote(value: &str) -> bool {
+    // strtrans.c ansic_shouldquote (341-361) tests the raw byte stream;
+    // raw-byte markers (U+E000 series) must decode first or a stored
+    // non-printing byte reads as a printable PUA wide char.
+    let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(value);
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
@@ -240,8 +243,11 @@ pub(in crate::executor) fn ansic_shouldquote(value: &str) -> bool {
 /// escapes, backslash and single-quote escaped, printable bytes (and whole
 /// printable UTF-8 characters under a UTF-8 locale, 266-282) literal, and
 /// every other byte as a three-digit octal escape (291-294).
-pub(in crate::executor) fn ansic_quote(value: &str) -> String {
-    let bytes = value.as_bytes();
+pub(crate) fn ansic_quote(value: &str) -> String {
+    // strtrans.c ansic_quote (230-308) walks the raw byte stream; decode
+    // raw-byte markers first (same boundary as ansic_quote_with_markers in
+    // execution_misc.rs) so stored non-printing bytes render as octal.
+    let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(value);
     let mut out = String::with_capacity(4 * bytes.len() + 4);
     out.push_str("$'");
     let mut index = 0;
@@ -496,5 +502,8 @@ fn decode_ansic_escapes(value: &str) -> String {
         out.push(bytes[index]);
         index += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    // The decoded byte stream may not be UTF-8 (`$'\200'`): non-UTF-8 bytes
+    // re-encode as raw-byte markers so they round-trip verbatim instead of
+    // degrading to U+FFFD (array9.sub `a[2]=$'\x80'`).
+    crate::executor::substitution_metadata::bytes_to_shell_text(&out)
 }

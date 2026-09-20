@@ -182,19 +182,27 @@ impl Executor {
             };
             let inner = &after_start[..end];
             if let Some((name, require_non_empty)) = parse_parameter_assignment_operator(inner) {
-                if self.parameter_assignment_required(name, require_non_empty) {
-                    if name.parse::<usize>().is_ok_and(|index| index > 0) {
+                // GNU only reports when the assignment is actually
+                // attempted against an unassignable target — check the
+                // (subscript-free) target first so `${a[$((i++))]:=x}` on
+                // a normal array does not evaluate the subscript here at
+                // all; param_expand's single array_expand_index does it
+                // once during the real expansion.
+                let is_positional = name.parse::<usize>().is_ok_and(|index| index > 0);
+                let target = parse_array_subscript(name)
+                    .map(|(array_name, _)| array_name.to_string())
+                    .unwrap_or_else(|| {
+                        self.nameref_target_name(name)
+                            .unwrap_or_else(|| name.to_string())
+                    });
+                let readonly = is_marked_var(&self.env_vars, READONLY_VARS, &target);
+                if (is_positional || readonly)
+                    && self.parameter_assignment_required(name, require_non_empty)
+                {
+                    if is_positional {
                         return Some((format!("${name}"), "cannot assign in this way"));
                     }
-                    let target = parse_array_subscript(name)
-                        .map(|(array_name, _)| array_name.to_string())
-                        .unwrap_or_else(|| {
-                            self.nameref_target_name(name)
-                                .unwrap_or_else(|| name.to_string())
-                        });
-                    if is_marked_var(&self.env_vars, READONLY_VARS, &target) {
-                        return Some((target, "readonly variable"));
-                    }
+                    return Some((target, "readonly variable"));
                 }
             } else if let Some((name, require_non_empty)) = parse_special_assignment_operator(inner)
             {
@@ -277,8 +285,24 @@ impl Executor {
         self.parameter_error_value(&name)
     }
 
+    /// GNU subst.c:9917 want_indir + subst.c:122 VALID_INDIR_PARAM: a `!`
+    /// prefix introduces indirect expansion only when the next character is
+    /// a valid indirect parameter; `#` and `?` qualify only outside posix
+    /// mode, so `${!?}` under `sh` is the `!` parameter under the `?`
+    /// operator (posixexp2.sub test 6), not indirection through `$?`.
+    pub(in crate::executor) fn indirect_parameter_body<'a>(
+        &self,
+        name: &'a str,
+    ) -> Option<&'a str> {
+        let body = name.strip_prefix('!')?;
+        if self.posix_mode_enabled() && matches!(body.chars().next(), Some('#' | '?')) {
+            return None;
+        }
+        Some(body)
+    }
+
     fn indirect_parameter_operator_value(&self, name: &str) -> Option<Option<String>> {
-        let indirect_name = name.strip_prefix('!')?;
+        let indirect_name = self.indirect_parameter_body(name)?;
         if let Some(target_name) = self.nameref_target_name(indirect_name) {
             return Some(Some(target_name));
         }
@@ -537,20 +561,25 @@ impl Executor {
             return false;
         };
         if first == ':' {
-            let rest = &name[1..];
-            if rest.is_empty() {
-                return false;
-            }
-            return match rest.chars().next() {
-                Some('-' | '+' | '=' | '?') => rest.len() > 1,
-                _ => true,
-            };
+            // GNU 5.3 parameter_brace_expand: a `:`-led operator accepts an
+            // empty word — `${#:-}`/`${#:+}`/`${#:=}`/`${#:?}` are `$#` under
+            // the colon operator (more-exp `recho ${#:-}` -> `0`), unlike
+            // the colon-less `${#=}`/`${#+}` which stay bad substitution.
+            return !name[1..].is_empty();
         }
         matches!(
             first,
             '-' | '+' | '=' | '?' | '@' | '^' | ',' | '/' | '%' | '#'
         ) && name.len() > 1
     }
+
+    /// GNU subst.c:8949 parameter_brace_transform returns
+    /// &expand_param_fatal for an invalid `@xform` operator; subst.c:4296
+    /// maps that to FORCE_EOF, so a noninteractive shell exits with status
+    /// 1 instead of merely abandoning the command list like
+    /// &expand_param_error (DISCARD) does. The scan reports this as a
+    /// sentinel status that command_prepare translates to ExitCode(1).
+    pub(in crate::executor) const FATAL_PARAMETER_EXPANSION_STATUS: i32 = i32::MIN;
 
     pub(in crate::executor) fn parameter_expansion_error(
         &self,
@@ -638,6 +667,34 @@ impl Executor {
             if inner.contains("[${${") {
                 return Some((format!("${{{inner}}}"), "bad substitution".to_string(), 1));
             }
+            // GNU subst.c:10053 valid_brace_expansion_word: after ${, the
+            // parameter name must be a valid name/special-var/subscripted
+            // form. `${$(...` parses as special var $ followed by a (`
+            // token, which is not a valid operator tail — bad substitution
+            // (new-exp.tests `${c//${$(($#-1))}/x/}`).
+            if inner.starts_with("$(") || inner.contains("${$(") {
+                return Some((format!("${{{inner}}}"), "bad substitution".to_string(), 1));
+            }
+            // GNU subst.c:8944-8951 parameter_brace_transform +
+            // valid_parameter_transform (subst.c:8898): a `@xform` suffix on
+            // a parameter name must be exactly one valid transform
+            // character; `${x@C}`/`${x@}` are fatal bad substitutions.
+            if let Some(base) = invalid_at_transform_base(inner) {
+                // parameter_brace_transform (subst.c:8927) returns NULL for
+                // an unset variable BEFORE validating the transform
+                // character, so `${unset@C}`/`${unset@}` expand empty
+                // without error; only a set variable reaches the fatal
+                // valid_parameter_transform check at subst.c:8944.
+                let is_set = self.parameter_error_value(base).is_some()
+                    || self.env_vars.contains_key(base);
+                if is_set {
+                    return Some((
+                        format!("${{{inner}}}"),
+                        "bad substitution".to_string(),
+                        Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                    ));
+                }
+            }
             // `${#X}` is the length form. X must be a valid parameter name
             // (special, shell name, numeric positional, or `arr[@]` index form).
             // Other suffixes such as `${#:}`, `${#/}`, `${#1xyz}` are bad
@@ -651,7 +708,7 @@ impl Executor {
             // array subscript form, or the prefix@ variable-name listing
             // form; anything else (e.g. a stray trailing '!' in ${!bad!})
             // is a bad substitution in GNU.
-            if let Some(indirect) = inner.strip_prefix('!') {
+            if let Some(indirect) = self.indirect_parameter_body(inner) {
                 if !Self::is_valid_indirect_expression(indirect) {
                     return Some((format!("${{{inner}}}"), "bad substitution".to_string(), 1));
                 }
@@ -683,14 +740,22 @@ impl Executor {
                         }
                     }
                 }
-                // `${!name-op...}` indirect-with-operator form: GNU
-                // parameter_brace_expand_indir (subst.c:7911-7918) checks
-                // the indirect NAME before the operator tail is applied —
-                // a valid identifier that does not name a variable is an
-                // "invalid indirect expansion" error, aborting the command
-                // without evaluating the operator's rhs (nameref3.sub:29
-                // `recho "${!foo-unset}"` prints nothing).
-                else {
+                // GNU subst.c:9978-10007 parameter_brace_expand:
+                // `${!NAME*}` / `${!NAME@}` with a valid-name prefix is the
+                // variable-name-prefix list form — handled before the indir
+                // validation, so a trailing `@` or `*` is the list marker,
+                // not an operator tail.
+                else if indirect
+                    .strip_suffix(['@', '*'])
+                    .is_none_or(|prefix| prefix.is_empty() || !is_shell_name(prefix))
+                {
+                    // `${!name-op...}` indirect-with-operator form: GNU
+                    // parameter_brace_expand_indir (subst.c:7911-7918) checks
+                    // the indirect NAME before the operator tail is applied —
+                    // a valid identifier that does not name a variable is an
+                    // "invalid indirect expansion" error, aborting the command
+                    // without evaluating the operator's rhs (nameref3.sub:29
+                    // `recho "${!foo-unset}"` prints nothing).
                     let head_end = indirect
                         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                         .unwrap_or(indirect.len());
@@ -796,7 +861,8 @@ impl Executor {
             {
                 return Some((format!("${{{inner}}}"), "bad substitution".to_string(), 1));
             }
-            if let Some((name, message, require_non_empty)) = parse_parameter_error_operator(inner)
+            if let Some((name, message, require_non_empty)) =
+                parse_parameter_error_operator(inner, self.posix_mode_enabled())
             {
                 let value = self.parameter_error_value(name);
                 let is_error = if require_non_empty {
@@ -958,10 +1024,52 @@ impl Executor {
             }
         }
 
+        // GNU subst.c parameter_brace_expand_indir under nounset:
+        // `${!name}` / `${!name@T}` report `!name` when the indirection
+        // TARGET is unbound — including a target array whose cell has no
+        // elements (check_unbound_variable treats array_cell(v)==0 as
+        // unbound for scalar forms; new-exp15 `-uc` runs). An unset
+        // indirection source is "invalid indirect expansion" elsewhere,
+        // not an unbound diagnostic, and `[@]`/`[*]` list forms (either on
+        // the source or produced by the target) are never unbound.
+        if let Some(indirect) = name.strip_prefix('!') {
+            let base = indirect
+                .strip_suffix("@a")
+                .or_else(|| indirect.strip_suffix("@A"))
+                .unwrap_or(indirect);
+            if base.ends_with("[@]") || base.ends_with("[*]") {
+                return None;
+            }
+            let resolved = self
+                .resolved_variable_name(base)
+                .unwrap_or_else(|| base.to_string());
+            let Some(target) = self.env_vars.get(&resolved).cloned() else {
+                return None;
+            };
+            if target.ends_with("[@]") || target.ends_with("[*]") {
+                return None;
+            }
+            let bound = if let Some((tbase, tsub)) = parse_array_subscript(&target) {
+                if tsub == "@" || tsub == "*" {
+                    true
+                } else if self.is_assoc_parameter_array(&tbase) {
+                    let key = self.assoc_subscript_key(&tsub);
+                    self.parameter_array_storage(&tbase)
+                        .and_then(|storage| assoc_value_at(&storage, &key))
+                        .is_some()
+                } else {
+                    !self.nounset_indexed_element_absent(&tbase, &tsub)
+                }
+            } else {
+                self.nounset_variable_bound(&target)
+            };
+            return (!bound).then(|| format!("!{base}"));
+        }
+
         if name.is_empty()
             || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
             || name.starts_with('!')
-            || parse_parameter_error_operator(name).is_some()
+            || parse_parameter_error_operator(name, self.posix_mode_enabled()).is_some()
             || name.contains(":-")
             || name.contains(":=")
             || name.contains(":+")
@@ -978,13 +1086,19 @@ impl Executor {
         // (new-exp15 `-uc` cases; check_unbound_variable precedes
         // string_transform). Run this before the generic `@` bail-out.
         if let Some(stripped) = name.strip_suffix("@a").or_else(|| name.strip_suffix("@A")) {
+            // `${arr[@]@a}`/`${arr[*]@a}` expand the element list — like
+            // `arr[@]` itself they are never unbound, even when the array
+            // has no elements (GNU subst.c:8856 array_transform handles the
+            // empty cell without a value check).
+            if stripped.ends_with("[@]") || stripped.ends_with("[*]") {
+                return None;
+            }
             let target = stripped.strip_prefix('!').unwrap_or(stripped);
             let resolved = self
                 .resolved_variable_name(target)
                 .unwrap_or_else(|| target.to_string());
-            return (!self.dynamic_parameter_is_set(&resolved)
-                && !self.env_vars.contains_key(&resolved))
-            .then(|| stripped.to_string());
+            return (!self.nounset_variable_bound(&resolved))
+                .then(|| stripped.to_string());
         }
 
         if name.contains('@') {
@@ -1069,13 +1183,47 @@ impl Executor {
                 }
                 return None;
             }
-            return (!self.dynamic_parameter_is_set(name)
-                && !self.env_vars.contains_key(name)
-                && std::env::var(name).is_err())
-            .then(|| name.to_string());
+            return (!self.nounset_variable_bound(name)).then(|| name.to_string());
         }
 
         None
+    }
+
+    /// GNU subst.c check_unbound_variable: a variable is unbound under
+    /// nounset when it has no value — and an array/assoc cell with zero
+    /// elements counts as unset for scalar-form expansions (new-exp15
+    /// `-uc`: `${foo}` / `${foo@a}` on `declare -a foo=()` report
+    /// `foo: unbound variable`, while `${foo[@]}` stays bound).
+    fn nounset_variable_bound(&self, name: &str) -> bool {
+        if self.dynamic_parameter_is_set(name) {
+            return true;
+        }
+        let has_array_marker = is_marked_var(&self.env_vars, ASSOC_VARS, name)
+            || is_marked_array_var(&self.env_vars, name);
+        match self.env_vars.get(name) {
+            Some(value) => {
+                if has_array_marker || is_array_storage(value) {
+                    let resolved =
+                        self.resolved_variable_name(name).unwrap_or_else(|| name.to_string());
+                    return self
+                        .parameter_array_storage(&resolved)
+                        .map(|storage| {
+                            if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+                                !assoc_hash_ordered_values(
+                                    &storage,
+                                    assoc_nbuckets(&self.env_vars, &resolved),
+                                )
+                                .is_empty()
+                            } else {
+                                !indexed_array_entries(&storage).is_empty()
+                            }
+                        })
+                        .unwrap_or(false);
+                }
+                true
+            }
+            None => !has_array_marker && std::env::var(name).is_ok(),
+        }
     }
 
     /// GNU subst.c check_unbound_variable: whether an `a[sub]` element

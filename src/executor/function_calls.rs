@@ -181,14 +181,23 @@ impl Executor {
             None
         };
         let body_ast = redirected_body.as_ref().unwrap_or_else(|| body.as_ref());
-        let call_stdin = if let Some(definition_redirects) = &definition_redirects {
-            match self.function_call_stdin(definition_redirects)? {
-                Some(input) => Some(input),
-                None => self.function_call_stdin(call_cmd)?,
-            }
-        } else {
-            self.function_call_stdin(call_cmd)?
-        };
+        // GNU shares fd 0 between caller and function: capture the parent's
+        // FUNCTION_STDIN cursor before function_call_stdin carves the
+        // remainder so the child's consumed prefix can fold back onto it.
+        let parent_stdin_base = self
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let (call_stdin, stdin_carved_from_parent) =
+            if let Some(definition_redirects) = &definition_redirects {
+                match self.function_call_stdin(definition_redirects)? {
+                    (Some(input), carved) => (Some(input), carved),
+                    (None, _) => self.function_call_stdin(call_cmd)?,
+                }
+            } else {
+                self.function_call_stdin(call_cmd)?
+            };
         let (old_function, old_function_stdin, old_function_stdin_offset, old_positional_params) = {
             let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
             let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
@@ -343,12 +352,33 @@ impl Executor {
                     self.bash_argv_stack.remove(0);
                 }
             }
+            // Fold any deferred comsub write-back into the child's cursor
+            // before it is read — the pending offset was recorded against
+            // the child's FUNCTION_STDIN buffer, so it must apply while
+            // that buffer is still installed.
+            self.apply_comsub_stdin_writeback();
             restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_function_stdin);
-            restore_optional_env_var(
-                &mut self.env_vars,
-                FUNCTION_STDIN_OFFSET,
-                old_function_stdin_offset,
-            );
+            if stdin_carved_from_parent {
+                // The child's FUNCTION_STDIN_OFFSET is its cursor into the
+                // carved remainder; fold it back into the parent's cursor so
+                // input the function did not read stays readable after return
+                // (GNU: shared fd 0 position).
+                let child_offset = self
+                    .env_vars
+                    .get(FUNCTION_STDIN_OFFSET)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                self.env_vars.insert(
+                    FUNCTION_STDIN_OFFSET.to_string(),
+                    (parent_stdin_base + child_offset).to_string(),
+                );
+            } else {
+                restore_optional_env_var(
+                    &mut self.env_vars,
+                    FUNCTION_STDIN_OFFSET,
+                    old_function_stdin_offset,
+                );
+            }
             match old_function {
                 Some(value) => {
                     self.env_vars
@@ -444,12 +474,23 @@ impl Executor {
         Ok(())
     }
 
+    /// Returns the call's stdin plus whether it was carved from the caller's
+    /// FUNCTION_STDIN remainder. GNU execute_function inherits fd 0
+    /// unchanged: the function and its caller share one input cursor, so a
+    /// carved call must fold the child's final offset back onto the parent's
+    /// cursor on return rather than drain to EOF.
     pub(in crate::executor) fn function_call_stdin(
         &mut self,
         call_cmd: &CommandNode,
-    ) -> Result<Option<String>, ExecuteError> {
+    ) -> Result<(Option<String>, bool), ExecuteError> {
+        self.apply_comsub_stdin_writeback();
+        let carves_parent_stdin = call_cmd.redirect_in.is_none()
+            && call_cmd.heredoc.is_none()
+            && call_cmd.here_string.is_none()
+            && self.virtual_fd_stdin_remaining(0).is_none()
+            && self.function_stdin_remaining().is_some();
         if let Some(input) = self.stdin_string_for_command_mut(call_cmd) {
-            return Ok(Some(input));
+            return Ok((Some(input), carves_parent_stdin));
         }
 
         let Some(redirect) = &call_cmd.redirect_in else {
@@ -463,21 +504,27 @@ impl Executor {
                     .get(FUNCTION_STDIN_OFFSET)
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(0);
-                return Ok(Some(input.get(offset..).unwrap_or_default().to_string()));
+                return Ok((
+                    Some(input.get(offset..).unwrap_or_default().to_string()),
+                    true,
+                ));
             }
-            return Ok(self.virtual_fd_stdin_remaining(0));
+            return Ok((self.virtual_fd_stdin_remaining(0), false));
         };
         if redirect.fd.unwrap_or(0) != 0 {
-            return Ok(None);
+            return Ok((None, false));
         }
         let target = self.expand_word(&redirect.target);
         if is_closed_redirect_target(&target) {
-            return Ok(None);
+            return Ok((None, false));
         }
-        Ok(Some(fs::read_to_string(shell_path_to_windows(
-            &target,
-            &self.env_vars,
-        ))?))
+        Ok((
+            Some(fs::read_to_string(shell_path_to_windows(
+                &target,
+                &self.env_vars,
+            ))?),
+            false,
+        ))
     }
 }
 

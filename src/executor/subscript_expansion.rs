@@ -96,6 +96,18 @@ impl Executor {
         if let Some(literal) = wholly_single_quoted_literal(raw) {
             return literal;
         }
+        // GNU subst.c:11063 expand_subscript_string -> expand_string ->
+        // expand_word_internal: the `$'...'` arm ANSI-C decodes the span
+        // (ansicstr, lib/sh/strtrans.c:130). Raw subscript text that bypassed
+        // the lexer still carries `$'...'` source form; decode it to the
+        // carrier-marked data form the embedded walker already consumes.
+        let raw_owned;
+        let raw = if raw.contains("$'") {
+            raw_owned = decode_ansi_c_spans(raw);
+            raw_owned.as_str()
+        } else {
+            raw
+        };
         // Quote removal belongs to the LEXER token -- `\X` loses its backslash
         // there -- while the parameter/command/arithmetic walker below only
         // reads data. Resolve the escapes first so the walker never mistakes a
@@ -133,14 +145,55 @@ impl Executor {
     ) -> String {
         match source {
             SubscriptSource::Protected(text) => text.to_string(),
-            SubscriptSource::Raw(raw) => self.expand_subscript_string(raw),
+            SubscriptSource::Raw(raw) => {
+                // expand_subscript_string runs expansion side effects
+                // (`$((i++))`, `$(...)`): dedup repeated resolves of the
+                // same `${}` fragment across the validate/pre-scan/real
+                // passes (SUB_RES_XPASS docs).
+                let Some(key) =
+                    crate::executor::expand_braced_indices::sub_site_key(raw)
+                else {
+                    return self.expand_subscript_string(raw);
+                };
+                if let Some(hit) =
+                    crate::executor::expand_braced_indices::sub_res_lookup(&key)
+                {
+                    return hit;
+                }
+                let resolved = self.expand_subscript_string(raw);
+                crate::executor::expand_braced_indices::sub_res_store(key, resolved.clone());
+                resolved
+            }
             SubscriptSource::ExpandedOnce(text) => {
                 if crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once") {
                     // VA_NOEXPAND / ASS_NOEXPAND: the first expansion was the
                     // word expansion; the consumer uses the text verbatim.
                     text.to_string()
                 } else {
-                    self.expand_subscript_string(text)
+                    // expand_subscript_string re-parses the subscript text:
+                    // operand-resident quotes are SYNTAX (`unset
+                    // 'assoc["@"]'` unsets key `@`), while quote characters
+                    // produced by expansions inside the pass stay data
+                    // (subst.c:11063 -> expand_word_internal: produced text
+                    // is not re-lexed). Marking the whole operand's quotes
+                    // as data here is wrong — it breaks the deferred-quote
+                    // semantics the builtin paths rely on.
+                    let Some(key) =
+                        crate::executor::expand_braced_indices::sub_site_key(text)
+                    else {
+                        return self.expand_subscript_string(text);
+                    };
+                    if let Some(hit) =
+                        crate::executor::expand_braced_indices::sub_res_lookup(&key)
+                    {
+                        return hit;
+                    }
+                    let resolved = self.expand_subscript_string(text);
+                    crate::executor::expand_braced_indices::sub_res_store(
+                        key,
+                        resolved.clone(),
+                    );
+                    resolved
                 }
             }
         }
@@ -162,13 +215,26 @@ impl Executor {
         if resolved.is_empty() {
             return IndexedSubscript::Empty;
         }
-        match self.eval_indexed_subscript_expression(&resolved) {
+        // The same `${}` fragment is re-checked by layered passes; GNU's
+        // single array_expand_index evaluates the resolved text once.
+        let memo_key = crate::executor::expand_braced_indices::sub_site_key(&resolved);
+        if let Some(hit) = memo_key
+            .as_ref()
+            .and_then(crate::executor::expand_braced_indices::sub_idx_lookup)
+        {
+            return hit;
+        }
+        let result = match self.eval_indexed_subscript_expression(&resolved) {
             Some(index) => IndexedSubscript::Index(index),
             None => {
                 self.report_indexed_subscript_error(&resolved);
                 IndexedSubscript::Error
             }
+        };
+        if let Some(key) = memo_key {
+            crate::executor::expand_braced_indices::sub_idx_store(key, result);
         }
+        result
     }
 
     /// `&self` variant of [`Executor::eval_indexed_subscript`] for the
@@ -186,12 +252,25 @@ impl Executor {
         if resolved.is_empty() {
             return IndexedSubscript::Empty;
         }
-        let (result, writes) = eval_conditional_arith_value_with_writes(&resolved, &self.env_vars);
+        // Same single-evaluation dedup as eval_indexed_subscript: the
+        // layered `${}` passes re-resolve the identical site+text.
+        let memo_key = crate::executor::expand_braced_indices::sub_site_key(&resolved);
+        if let Some(hit) = memo_key
+            .as_ref()
+            .and_then(crate::executor::expand_braced_indices::sub_idx_lookup)
+        {
+            return hit;
+        }
+        let overlaid =
+            crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
+                &self.env_vars,
+            );
+        let (result, writes) = eval_conditional_arith_value_with_writes(&resolved, &overlaid);
         if !writes.is_empty() {
             crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
                 .with(|pending| pending.borrow_mut().extend(writes));
         }
-        match result {
+        let result = match result {
             Some(index) => IndexedSubscript::Index(index),
             None => {
                 self.report_indexed_subscript_error(&resolved);
@@ -209,7 +288,11 @@ impl Executor {
                 self.arithmetic_fatal_error.set(true);
                 IndexedSubscript::Error
             }
+        };
+        if let Some(key) = memo_key {
+            crate::executor::expand_braced_indices::sub_idx_store(key, result);
         }
+        result
     }
 
     /// GNU `test -v name[sub]` / `[ -v name[sub] ]` (test.c:650-668):
@@ -290,10 +373,16 @@ impl Executor {
         let Some((name, subscript)) = parse_array_subscript(operand) else {
             return Ok(operand.to_string());
         };
-        if !is_shell_name(name) || matches!(subscript, "@" | "*") {
+        if !is_shell_name(name) {
             return Ok(operand.to_string());
         }
         let assoc = is_marked_var(&self.env_vars, ASSOC_VARS, name);
+        // GNU test.def/test_variable: for an ASSOCIATIVE array `@`/`*` are
+        // ordinary literal keys (`[[ -v assoc[@] ]]` tests key `@`); only an
+        // indexed array's `@`/`*` mean the whole array.
+        if !assoc && matches!(subscript, "@" | "*") {
+            return Ok(operand.to_string());
+        }
         // TEST_ARRAYEXP implies the raw token ended with `]` (flag-1 needs
         // it as terminator), so the cooked text ends with `]` too and a
         // non-empty subscript is the whole validity question. Without it,
@@ -411,10 +500,21 @@ impl Executor {
         noexpand: bool,
         oneword: bool,
     ) -> Result<String, ()> {
+        // W_ARRAYREF arrives in-band as an ARRAYREF_FLAG prefix on the
+        // operand text (execute_cmd.c:4366 fix_arrayref_words); callers
+        // already derived the VA_ONEWORD half via word_is_arrayref, so strip
+        // the carrier byte before name/subscript parsing.
+        let operand = crate::builtins::arrayref::take_arrayref_flag(operand).1;
         let Some((name, subscript)) = parse_array_subscript(operand) else {
             return Ok(operand.to_string());
         };
-        if !is_shell_name(name) || matches!(subscript, "@" | "*") {
+        let is_assoc =
+            assoc.unwrap_or_else(|| is_marked_var(&self.env_vars, ASSOC_VARS, name));
+        // GNU test.c/expr.c: for an ASSOCIATIVE base, `@` and `*` are
+        // ordinary subscript keys (`test -v 'assoc[@]'` tests the `@`
+        // element); only indexed arrays treat them as whole-array
+        // subscripts that bypass element resolution.
+        if !is_shell_name(name) || (!is_assoc && matches!(subscript, "@" | "*")) {
             return Ok(operand.to_string());
         }
         if mode != OperandSubscriptMode::AlwaysExpand {
@@ -439,7 +539,7 @@ impl Executor {
             // assign_array_element_internal without ASS_NOEXPAND.
             OperandSubscriptMode::AlwaysExpand => SubscriptSource::Raw(subscript),
         };
-        if assoc.unwrap_or_else(|| is_marked_var(&self.env_vars, ASSOC_VARS, name)) {
+        if is_assoc {
             let key = self.resolve_array_subscript(source);
             return Ok(format!(
                 "{name}[{}]",
@@ -492,19 +592,28 @@ impl Executor {
     /// Returns `None` after printing the GNU diagnostic when an indexed
     /// subscript fails evaluation ("operand expected") — the caller must
     /// abandon the whole assignment with status 1.
+    /// Returns Err(partial) on an element failure: GNU
+    /// assign_compound_array_list (arrayfunc.c:765-830) reports the error
+    /// and BREAKS — elements already processed still bind and the array is
+    /// materialized (`b=([k]=v [""]=x [k2]=v2)` leaves `b=([k]="v")`, rc=1).
+    /// Callers must store the partial text instead of dropping the
+    /// assignment wholesale.
     pub(in crate::executor) fn rewrite_compound_element_subscripts(
         &mut self,
         name: &str,
         value: &str,
         assoc: bool,
         preexpanded: bool,
-    ) -> Option<String> {
+    ) -> Result<String, String> {
         let Some(inner) = value
             .strip_prefix('(')
             .and_then(|value| value.strip_suffix(')'))
         else {
-            return Some(value.to_string());
+            return Ok(value.to_string());
         };
+        if !preexpanded {
+            return self.expand_declare_compound_elements(name, inner, assoc);
+        }
         let mut out = String::with_capacity(inner.len());
         let mut index = 0usize;
         let mut token_start = true;
@@ -549,11 +658,15 @@ impl Executor {
                                 self.expand_subscript_string(sub)
                             };
                             if key.is_empty() {
-                                // GNU err_badarraysub prints the element word.
-                                self.report_bad_array_subscript(compound_element_word(
-                                    inner, index,
-                                ));
-                                return None;
+                                // GNU err_badarraysub prints the element
+                                // word as rebuilt by
+                                // expand_compound_array_assignment.
+                                self.report_bad_array_subscript(
+                                    &compound_element_diagnostic_word(
+                                        inner, index, sub_end, &key, true,
+                                    ),
+                                );
+                                return Err(format!("({out})"));
                             }
                             out.push('[');
                             out.push_str(&encode_compound_assoc_key(&key));
@@ -577,13 +690,17 @@ impl Executor {
                             self.expand_subscript_string(&once)
                         };
                         if resolved.is_empty() {
-                            self.report_bad_array_subscript(compound_element_word(inner, index));
-                            return None;
+                            self.report_bad_array_subscript(
+                                &compound_element_diagnostic_word(
+                                    inner, index, sub_end, &resolved, false,
+                                ),
+                            );
+                            return Err(format!("({out})"));
                         }
                         let Some(index_value) = self.eval_indexed_subscript_expression(&resolved)
                         else {
                             self.report_indexed_subscript_error(&resolved);
-                            return None;
+                            return Err(format!("({out})"));
                         };
                         out.push('[');
                         out.push_str(&index_value.to_string());
@@ -598,7 +715,218 @@ impl Executor {
             index += ch.len_utf8();
             token_start = ch.is_ascii_whitespace();
         }
-        Some(format!("({out})"))
+        Ok(format!("({out})"))
+    }
+
+    /// GNU arrayfunc.c:557-617 `expand_compound_array_assignment` +
+    /// :623-665 `assign_assoc_from_kvlist` + :700-836
+    /// `assign_compound_array_list` on the `declare`/`local`/`typeset`
+    /// operand path (`preexpanded == false`): the compound body is still
+    /// literal text here — word expansion deliberately leaves it alone — so
+    /// each element word is parsed and expanded the way the builtin does
+    /// it:
+    ///
+    ///   * indexed bare elements go through `expand_words_no_vars`
+    ///     (subst.c:12590): full word expansion plus field splitting;
+    ///   * indexed `[sub]=value` words expand once (their RHS keeps
+    ///     W_ASSIGNMENT no-split semantics, subst.c:4357
+    ///     expand_string_assignment), then `array_expand_index` re-evaluates
+    ///     the subscript text — modeled by the existing two-pass
+    ///     `expand_subscript_string` + `eval_indexed_subscript_expression`;
+    ///   * assoc `[key]=value` words expand the key through
+    ///     `expand_subscript_string` (arrayfunc.c:817/865) and the value
+    ///     through `expand_assignment_string_to_string` (subst.c:3881) —
+    ///     no field split;
+    ///   * assoc kv-pair words alternate the same two expanders
+    ///     (assign_assoc_from_kvlist arrayfunc.c:644-665).
+    ///
+    /// A `\x03` lead-in (DEFERRED_COMPOUND_BODY, token_actions.rs) marks a
+    /// whole-single-quoted operand body whose carriers stand for the
+    /// original syntax characters: `\x1f` decodes to a real `$`, `\x18` to
+    /// a real `"`, etc. Without it the body already went through word
+    /// expansion and a surviving `\x1f` is a protected literal `$` (data).
+    fn expand_declare_compound_elements(
+        &mut self,
+        name: &str,
+        inner: &str,
+        assoc: bool,
+    ) -> Result<String, String> {
+        let body = match inner.strip_prefix(crate::executor::types::DEFERRED_COMPOUND_BODY) {
+            Some(rest) => std::borrow::Cow::Owned(decode_deferred_compound_body(rest)),
+            None => std::borrow::Cow::Borrowed(inner),
+        };
+        let tokens: Vec<String> =
+            crate::executor::assignment_helpers::split_storage_words(&body).collect();
+        let mut elements: Vec<String> = Vec::new();
+
+        if assoc {
+            // GNU kvpair_assignment_p (arrayfunc.c:665): the FIRST word
+            // decides — a `[`-led word selects the strict [key]=value loop,
+            // anything else is alternating literal key/value pairs.
+            let strict = tokens
+                .first()
+                .is_some_and(|token| token.starts_with('['));
+            if !strict {
+                for pair in tokens.chunks(2) {
+                    let key = self.expand_subscript_string(&pair[0]);
+                    let value = pair
+                        .get(1)
+                        .map(|value| self.expand_compound_assignment_rhs(name, value))
+                        .unwrap_or_default();
+                    elements.push(quote_compound_field_value(&key));
+                    elements.push(quote_compound_field_value(&value));
+                }
+                return Ok(format!("({})", elements.join(" ")));
+            }
+            for token in &tokens {
+                let subscripted = token
+                    .starts_with('[')
+                    .then(|| scan_compound_subscript(token, 0))
+                    .flatten()
+                    .filter(|(_, tail)| *tail == CompoundSubscriptTail::Assignment);
+                let Some((sub_end, _)) = subscripted else {
+                    // A bare word in strict form draws "must use subscript"
+                    // from assoc_bare_elements upstream; keep its text.
+                    elements.push(token.clone());
+                    continue;
+                };
+                let sub = &token[1..sub_end];
+                // GNU arrayfunc.c:817/865: the assoc key takes one
+                // expand_subscript_string pass on the stored text.
+                let key = self.expand_subscript_string(sub);
+                if key.is_empty() {
+                    self.report_bad_array_subscript(&compound_token_diagnostic_word(
+                        token, sub_end, &key, true,
+                    ));
+                    return Err(format!("({})", elements.join(" ")));
+                }
+                let tail = &token[sub_end + 1..];
+                let (op, raw_value) = tail
+                    .strip_prefix("+=")
+                    .map(|value| ("+=", value))
+                    .unwrap_or_else(|| ("=", tail.strip_prefix('=').unwrap_or(tail)));
+                let expanded_value = self.expand_compound_assignment_rhs(name, raw_value);
+                elements.push(format!(
+                    "[{}]{}{}",
+                    encode_compound_assoc_key(&key),
+                    op,
+                    quote_compound_field_value(&expanded_value)
+                ));
+            }
+            return Ok(format!("({})", elements.join(" ")));
+        }
+
+        for token in &tokens {
+            // Field-split products pre-marked by word-stage expansion
+            // (\x10) and rendered-array words (\x1d) are already final.
+            if token.starts_with(ARRAY_FIELD_SPLIT_MARKER) || token.starts_with('\x1d') {
+                elements.push(token.clone());
+                continue;
+            }
+            let subscripted = token
+                .starts_with('[')
+                .then(|| scan_compound_subscript(token, 0))
+                .flatten()
+                .filter(|(_, tail)| *tail == CompoundSubscriptTail::Assignment);
+            if let Some((sub_end, _)) = subscripted {
+                let sub = &token[1..sub_end];
+                // GNU expand_words_no_vars expands the element word once,
+                // then array_expand_index expands the subscript text again
+                // (5.3.0: the second pass is not gated by array_expand_once
+                // on this path).
+                let once = self.expand_subscript_string(sub);
+                let resolved = self.expand_subscript_string(&once);
+                if resolved.is_empty() {
+                    self.report_bad_array_subscript(&compound_token_diagnostic_word(
+                        token, sub_end, &resolved, false,
+                    ));
+                    return Err(format!("({})", elements.join(" ")));
+                }
+                let Some(index_value) = self.eval_indexed_subscript_expression(&resolved) else {
+                    self.report_indexed_subscript_error(&resolved);
+                    return Err(format!("({})", elements.join(" ")));
+                };
+                let tail = &token[sub_end + 1..];
+                let (op, raw_value) = tail
+                    .strip_prefix("+=")
+                    .map(|value| ("+=", value))
+                    .unwrap_or_else(|| ("=", tail.strip_prefix('=').unwrap_or(tail)));
+                // W_ASSIGNMENT element: the RHS expands with assignment
+                // semantics — no field splitting (array.tests:
+                // declare -a b1='([1]=$v)' stores [1]="a b").
+                let expanded_value = self.expand_compound_assignment_rhs(name, raw_value);
+                elements.push(format!(
+                    "[{index_value}]{op}{}",
+                    quote_compound_field_value(&expanded_value)
+                ));
+                continue;
+            }
+            // Bare element: GNU expand_words_no_vars (arrayfunc.c:610) runs
+            // the full word expansion on the element text — parameter and
+            // command substitution, "${a[@]}" fan-out, field splitting and
+            // pathname expansion included. Re-lexing the raw token through
+            // the command-word expander reproduces all of it, including the
+            // multi-word result of a quoted "${d[@]}" element.
+            for field in self.expand_alternate_word_fragment(token) {
+                let fields = match super::glob::pathname_expand_word(&field, &self.env_vars) {
+                    super::glob::PathnameExpansion::Matches(matches) => matches,
+                    super::glob::PathnameExpansion::NoMatch => vec![field],
+                    super::glob::PathnameExpansion::Fail(pattern) => {
+                        self.report_failglob(&pattern);
+                        return Err(format!("({})", elements.join(" ")));
+                    }
+                };
+                for field in fields {
+                    // \x10 marks the field as a word-expansion product so the
+                    // storage layer stores it bare even when it looks like a
+                    // [subscript]= assignment (GNU: the flag is parse-time only).
+                    elements.push(format!(
+                        "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                        quote_compound_field_value(&field)
+                    ));
+                }
+            }
+        }
+        Ok(format!("({})", elements.join(" ")))
+    }
+
+    /// GNU arrayfunc.c:753/865: a `[sub]=value` (or assoc kv-pair value)
+    /// element word carries W_ASSIGNMENT, so the value side expands through
+    /// expand_assignment_string_to_string (subst.c:3881) — full expansion
+    /// plus quote removal, no field splitting. The raw element text still
+    /// holds real quote syntax here (`[1]=""`, `[2]="$v"`); re-lexing it as
+    /// an assignment RHS turns those quotes into the carrier encoding
+    /// expand_assignment_value expects, so syntax quotes are consumed and
+    /// expansion-produced `"`s stay data.
+    fn expand_compound_assignment_rhs(&mut self, name: &str, raw_value: &str) -> String {
+        // The /E109 whitespace tags are CTLESC-style protection for the
+        // following character (embedded_mutations expansion_ws_marked):
+        // re-lexing raw text would treat the space after the tag as a word
+        // delimiter and drop the rest of the value (assoc12.sub: a
+        // `[k]=$bar` RHS `3 4 5` shrank to `3`). Rewriting tag+char as
+        // backslash+char keeps it one literal character in the RHS.
+        let mut escaped = String::with_capacity(raw_value.len());
+        let mut chars = raw_value.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG {
+                if let Some(next) = chars.next() {
+                    escaped.push('\\');
+                    escaped.push(next);
+                }
+            } else {
+                escaped.push(ch);
+            }
+        }
+        let raw_value = &escaped;
+        let probe = format!("__v={raw_value}");
+        let rhs = crate::lexer::tokenize(&probe)
+            .into_iter()
+            .next()
+            .and_then(|token| token.value.split_once('=').map(|(_, rhs)| rhs.to_string()));
+        match rhs {
+            Some(rhs) => self.expand_assignment_value(name, &rhs),
+            None => self.expand_assignment_value(name, raw_value),
+        }
     }
 }
 
@@ -668,9 +996,116 @@ pub(super) fn scan_compound_subscript(
     None
 }
 
-/// The `[sub]=value` element word starting at `start` — the text GNU's
-/// `err_badarraysub` prints for a failing compound element (the whole
-/// word, `[]=v` style), up to the next unquoted whitespace.
+/// Decode a deferred (`\x03`-marked) single-quoted compound body: every
+/// lexer carrier stands for the original syntax character, which GNU's
+/// parse_string_to_word_list re-parse sees as real quoting/expansion
+/// syntax (arrayfunc.c:580). `\x1f` -> `$`, `\x18` -> `"`, `\x1a` ->
+/// backtick, `\x14` -> `\`, `\x17` -> `'`.
+/// Decode each `$'...'` span in raw subscript text (GNU subst.c:11063
+/// expand_subscript_string -> expand_word_internal's ANSI-C arm). The decoded
+/// bytes pass through escape_decoded_ansi_c_quotes so quotes and `$` in the
+/// result stay DATA for the embedded-parameter walker.
+fn decode_ansi_c_spans(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0usize;
+    let mut in_single = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\\' && !in_single && index + 1 < chars.len() {
+            // A backslash pair outside quotes is literal syntax here; keep it
+            // for mask_subscript_escapes.
+            output.push(ch);
+            output.push(chars[index + 1]);
+            index += 2;
+            continue;
+        }
+        if ch == '\'' {
+            in_single = !in_single;
+            output.push(ch);
+            index += 1;
+            continue;
+        }
+        if !in_single
+            && ch == '$'
+            && chars.get(index + 1) == Some(&'\'')
+        {
+            // `$'...'`: the close quote is the first unescaped `'`.
+            let mut inner_end = index + 2;
+            let mut inner = String::new();
+            let mut closed = false;
+            while inner_end < chars.len() {
+                let c = chars[inner_end];
+                if c == '\\' && inner_end + 1 < chars.len() {
+                    inner.push(c);
+                    inner.push(chars[inner_end + 1]);
+                    inner_end += 2;
+                    continue;
+                }
+                if c == '\'' {
+                    closed = true;
+                    break;
+                }
+                inner.push(c);
+                inner_end += 1;
+            }
+            if closed {
+                let decoded = crate::lexer::decode_ansi_c_quoted(&inner);
+                output.push_str(&crate::lexer::escape_decoded_ansi_c_quotes(&decoded));
+                index = inner_end + 1;
+                continue;
+            }
+        }
+        output.push(ch);
+        index += 1;
+    }
+    output
+}
+
+fn decode_deferred_compound_body(inner: &str) -> String {
+    inner
+        .chars()
+        .map(|ch| match ch {
+            LITERAL_DOLLAR => '$',
+            LITERAL_BACKTICK => '`',
+            LITERAL_BACKSLASH => '\\',
+            LITERAL_DOUBLE_QUOTE => '"',
+            LITERAL_SINGLE_QUOTE => '\'',
+            other => other,
+        })
+        .collect()
+}
+
+/// The element word as GNU's `err_badarraysub` sees it, token-based variant
+/// of compound_element_diagnostic_word for expand_declare_compound_elements:
+/// assoc elements report as `['key']='value'` (quote_string'd rebuild),
+/// indexed as the expanded-unquoted `[sub]=value`.
+fn compound_token_diagnostic_word(
+    token: &str,
+    sub_end: usize,
+    subscript: &str,
+    assoc: bool,
+) -> String {
+    let tail = &token[sub_end + 1..];
+    let (op, value) = tail
+        .strip_prefix("+=")
+        .map(|value| ("+=", value))
+        .unwrap_or_else(|| ("=", tail.strip_prefix('=').unwrap_or(tail)));
+    let dequoted = dequote_compound_subscript(value);
+    if assoc {
+        format!(
+            "[{}]{}{}",
+            diagnostic_single_quote(subscript),
+            op,
+            diagnostic_single_quote(&dequoted)
+        )
+    } else {
+        format!("[{subscript}]{op}{dequoted}")
+    }
+}
+
+/// The `[sub]=value` element word starting at `start` — the raw text span
+/// up to the next unquoted whitespace.
 fn compound_element_word(text: &str, start: usize) -> &str {
     let bytes = text.as_bytes();
     let mut pos = start;
@@ -687,6 +1122,54 @@ fn compound_element_word(text: &str, start: usize) -> &str {
         pos += 1;
     }
     &text[start..pos]
+}
+
+/// The element word as GNU's `err_badarraysub` sees it: the assoc compound
+/// word list was rebuilt by expand_compound_array_assignment with each
+/// expanded part quote_string'd, so `[""]="v"` reports as `['']='v'`;
+/// indexed elements keep the expanded-but-unquoted text (`[]=v`).
+/// `sub_end` indexes the `]` closing the subscript in `text`; `subscript`
+/// is the expanded/dequoted subscript text.
+fn compound_element_diagnostic_word(
+    text: &str,
+    start: usize,
+    sub_end: usize,
+    subscript: &str,
+    assoc: bool,
+) -> String {
+    let element = compound_element_word(text, start);
+    let tail = &element[sub_end - start + 1..];
+    let (op, value) = tail
+        .strip_prefix("+=")
+        .map(|value| ("+=", value))
+        .unwrap_or_else(|| ("=", tail.strip_prefix('=').unwrap_or(tail)));
+    let dequoted = dequote_compound_subscript(value);
+    if assoc {
+        format!(
+            "[{}]{}{}",
+            diagnostic_single_quote(subscript),
+            op,
+            diagnostic_single_quote(&dequoted)
+        )
+    } else {
+        format!("[{subscript}]{op}{dequoted}")
+    }
+}
+
+/// lib/sh/shquote.c sh_single_quote: wrap in single quotes, rendering each
+/// embedded quote as `'\''`.
+fn diagnostic_single_quote(s: &str) -> String {
+    let mut quoted = String::with_capacity(s.len() + 2);
+    quoted.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// Dequote a compound-element subscript the way GNU's re-parse of the
@@ -741,6 +1224,7 @@ fn encode_compound_assoc_key(key: &str) -> String {
             matches!(
                 ch,
                 '[' | ']' | '=' | '+' | '\'' | '"' | '\\' | '\x1e' | '\x1f'
+                    | '`' | '$'
             ) || ch.is_ascii_whitespace()
         });
     if safe {
@@ -748,6 +1232,50 @@ fn encode_compound_assoc_key(key: &str) -> String {
     } else {
         crate::executor::arithmetic::encode_arithmetic_assoc_key(key)
     }
+}
+
+/// Mark bare `'` bytes in already-expanded subscript text with the \x17
+/// data carrier (CTLESC port). GNU's lexer resolves single-quoted spans
+/// before expansion — expand_word_internal never treats `'` as syntax —
+/// so every `'` surviving in a once-expanded operand is data produced by
+/// that expansion (`dict["$k"]` with k=`'`). Escaped quotes are left for
+/// mask_subscript_escapes, which resolves `\'` to the same carrier.
+pub(crate) fn mark_expanded_once_data_squotes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            out.push(ch);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        out.push(if ch == '\'' { LITERAL_SINGLE_QUOTE } else { ch });
+    }
+    out
+}
+
+/// Same once-expanded-data invariant for `"` bytes: a `"` surviving in a
+/// word-expanded operand is expansion output (GNU's CTLESC'd data), never a
+/// quote delimiter — `unset -v dict["$k"]` with k=`"` removes key `"` while
+/// the literal 'dict["]' operand fails valid_array_reference
+/// (assoc9.sub del loop). Mark with the \x18 data carrier so
+/// expand_subscript_string's walker emits it as a literal `"`.
+pub(crate) fn mark_expanded_once_data_dquotes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            out.push(ch);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        out.push(if ch == '"' { LITERAL_DOUBLE_QUOTE } else { ch });
+    }
+    out
 }
 
 /// Resolve the subscript token's quoting the way the lexer does, leaving the

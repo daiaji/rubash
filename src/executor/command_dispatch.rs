@@ -40,7 +40,16 @@ impl Executor {
                 // command words (`foo=one echo hi` → `+ foo=one` `+ echo hi`).
                 let assignments = self.xtrace_assignment_text(cmd);
                 writeln!(xtrace_output, "{prefix}{}", assignments.join(" ")).ok();
-                writeln!(xtrace_output, "{prefix}{}", cmd.words.join(" ")).ok();
+                writeln!(
+                    xtrace_output,
+                    "{prefix}{}",
+                    cmd.words
+                        .iter()
+                        .map(|word| crate::builtins::arrayref::take_arrayref_flag(word).1)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+                .ok();
             } else {
                 let text = self.xtrace_command_text(cmd);
                 writeln!(xtrace_output, "{prefix}{text}").ok();

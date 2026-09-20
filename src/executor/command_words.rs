@@ -16,6 +16,22 @@ impl Executor {
             return false;
         }
 
+        // GNU subst.c:12026-12035 expand_word_internal: a null result is
+        // discarded only when the word carried no quoting — a quoted
+        // `${...}` that expands empty (`"${foo:-$@}"` with no positional
+        // parameters) still yields one empty field. raw_word_is_quoted
+        // skips ${...}/$() bodies, so only the word's own outer quoting
+        // counts here.
+        if cmd
+            .word_metadata
+            .get(index)
+            .is_some_and(|metadata| {
+                crate::executor::command_prepare::raw_word_is_quoted(Some(&metadata.raw))
+            })
+        {
+            return false;
+        }
+
         cmd.word_kinds
             .get(index)
             .is_some_and(|kind| *kind == TokenKind::Variable)

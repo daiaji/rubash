@@ -11,6 +11,7 @@ mod upstream_scripts;
 use arithmetic::{
     arithmetic_division_by_zero_token, arithmetic_unbound_variable, eval_arith_value,
     eval_conditional_arith_value, eval_conditional_arith_value_categorized,
+    eval_conditional_arith_value_categorized_with_writes,
     eval_conditional_arith_value_with_writes,
 };
 
@@ -150,7 +151,7 @@ mod unset_arrays;
 mod variable_state;
 
 mod alias_helpers;
-mod assignment_helpers;
+pub(crate) mod assignment_helpers;
 mod ast_exec;
 mod builtin_names;
 mod command_subst_helpers;
@@ -180,6 +181,9 @@ use alias_helpers::*;
 use assignment_helpers::*;
 // Shared with builtins::declare for `declare -p` assoc rendering.
 pub(crate) use assignment_helpers::{assoc_nbuckets, bash_assoc_order};
+// Shared with builtins::declare for `declare -p` $'...' value rendering
+// (strtrans.c ansic_shouldquote/ansic_quote over the raw byte stream).
+pub(crate) use arrays::{ansic_quote, ansic_shouldquote};
 use builtin_names::*;
 use command_subst_helpers::*;
 use command_text::*;
@@ -519,6 +523,9 @@ pub struct Executor {
     debug_trap_function_line: Option<usize>,
     arithmetic_expansion_error: Cell<bool>,
     arithmetic_nonfatal_error: Cell<bool>,
+    /// A `[sub]=` element inside a `declare -aA name=(...)` operand failed
+    /// err_badarraysub — GNU assign_compound_array_list stores the elements
+    /// processed before the break and still fails the command (any_failed).
     arithmetic_fatal_error: Cell<bool>,
     /// `set -u` unbound-variable error raised during arithmetic evaluation.
     /// A Cell because word-expansion paths hold `&self` (GNU expr.c raises
@@ -561,6 +568,15 @@ pub struct Executor {
     /// word expansion where it cannot return an error, so it latches here
     /// and execute_prepared_command raises ExpansionFailure(1).
     parameter_assignment_failure: Cell<bool>,
+    /// GNU subst.c:10272-10288 (parameter_brace_expand): a `${...}` whose
+    /// parameter name ends on a character that starts no operator — a quote
+    /// at name position (`${'x'%'t'}`, `${x'y'}`) — hits the `bad
+    /// substitution` default. The error surfaces mid-expansion (nested
+    /// `${}` inside a pattern/alternate word reaches it only when that word
+    /// is actually evaluated), so the expander latches it here and the
+    /// command boundary raises DISCARD — or FORCE_EOF for a noninteractive
+    /// POSIX shell (subst.c:10288).
+    parameter_bad_substitution: Cell<bool>,
     /// GNU variables.c:3536 assign_in_env: names bound through `name=value
     /// cmd` temporary-environment assignments are live at the command's
     /// variable context while it runs — a function-local `declare -n r`
@@ -632,6 +648,12 @@ pub struct Executor {
     /// GNU dropping PF_ASSIGNRHS across a nested substitution boundary.
     pub(crate) inside_assignment_rhs: Cell<bool>,
     last_command_substitution_status: Cell<Option<i32>>,
+    /// GNU subst.c:7143 command_substitute forks sharing fd 0, so input the
+    /// substitution body consumed must advance the caller's FUNCTION_STDIN
+    /// cursor. The substitution runs on `&self`; stash the child's final
+    /// cursor plus a fingerprint of the shared buffer and apply it lazily at
+    /// the next `&mut self` stdin consumer.
+    comsub_stdin_writeback: Cell<Option<(usize, u64)>>,
     /// Tracks the source of the last heredoc EOF warning emitted from
     /// command_substitution_heredoc_output_mut_typed, to avoid duplicate
     /// warnings when the same comsub is expanded through multiple paths

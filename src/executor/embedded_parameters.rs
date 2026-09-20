@@ -78,6 +78,9 @@ impl Executor {
         let mut output = String::new();
         let mut chars = word.chars().peekable();
         let mut in_double = false;
+        // Top-level `${` ordinal for the cross-pass subscript-eval memo —
+        // matches the pre-scan counter (SUB_RES_XPASS).
+        let mut frag_index = 0usize;
 
         while let Some(ch) = chars.next() {
             if protect_ifs && in_double && matches!(ch, ' ' | '\t' | '\n') {
@@ -319,6 +322,28 @@ impl Executor {
                 }
                 Some('{') => {
                     chars.next();
+                    // GNU param_expand resolves one `${}` expansion once:
+                    // memoize array-element fetches for this fragment so a
+                    // subscript's side effects run once (AEPV_MEMO).
+                    let _memo_frame =
+                        crate::executor::expand_braced_indices::AepvMemoFrame::new();
+                    // Same fragment-site record as the mutable walker —
+                    // subscript side effects dedup across layered passes
+                    // (SUB_RES_XPASS). A walked word that IS the `${}`
+                    // fragment being evaluated inherits the enclosing site
+                    // instead of re-keying on the synthetic string.
+                    let whole_braced =
+                        crate::executor::parameter_ops::braced_parameter_spans_whole_word(
+                            word,
+                        ) && crate::executor::expand_braced_indices::sub_site_active();
+                    let this_frag = frag_index;
+                    frag_index += 1;
+                    let _site_guard = (!whole_braced)
+                        .then(|| {
+                            crate::executor::expand_braced_indices::SubSiteGuard::new(
+                                this_frag,
+                            )
+                        });
                     let name = collect_braced_parameter_name(&mut chars);
                     let value = self.expand_word(&format!("${{{name}}}"));
                     if preserve_quotes && !in_double {
@@ -351,8 +376,21 @@ impl Executor {
                             }
                         }
                         let expression = self.expand_arithmetic_special_parameters(&expression);
-                        let (value, actual_category) =
-                            eval_conditional_arith_value_categorized(&expression, &self.env_vars);
+                        // GNU evalexp applies the writes of an arithmetic
+                        // expansion against the live environment; this
+                        // `&self` walk captures them into the deferred
+                        // queue (overlaid so earlier queued writes are
+                        // visible) for the mutable caller to apply.
+                        let overlaid = crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(&self.env_vars);
+                        let (value, writes, actual_category) =
+                            eval_conditional_arith_value_categorized_with_writes(
+                                &expression,
+                                &overlaid,
+                            );
+                        if !writes.is_empty() {
+                            crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
+                                .with(|pending| pending.borrow_mut().extend(writes));
+                        }
                         if let Some(value) = value {
                             let value = value.to_string();
                             if preserve_quotes && !in_double {

@@ -37,6 +37,7 @@ impl Executor {
             return Some(value);
         }
         if matches!(var_name, "@" | "*") {
+
             // GNU pos_params_pat_subst (subst.c:9322) ->
             // string_list_pos_params (subst.c:3030-3074): `*` joins through
             // string_list_dollar_star (IFS[0]) when
@@ -73,6 +74,7 @@ impl Executor {
                 // the re-quoted dollar_star path; every other shape is ' '.
                 Some(_) if var_name == "*" && assign_rhs => String::new(),
                 _ => " ".to_string(),
+
             };
             return Some(
                 self.positional_params

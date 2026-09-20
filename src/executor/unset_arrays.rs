@@ -92,11 +92,22 @@ impl Executor {
         // GNU builtins/set.def:866-867: `unset -f` cancels -n, and -n is
         // only meaningful for variables anyway.
         let nameref_only = args.iter().any(|arg| arg == "-n") && !function_only;
+        // Operand words may carry the in-band W_ARRAYREF flag
+        // (ARRAYREF_FLAG prefix — arrayref.rs); the syntactic flag was
+        // already captured in `arrayref_flags` above, so strip the prefix
+        // here before any name/subscript consumer sees it.
         let names: Vec<(usize, String)> = args
             .iter()
             .enumerate()
             .filter(|(_, arg)| !arg.starts_with('-'))
-            .map(|(index, arg)| (index, arg.clone()))
+            .map(|(index, arg)| {
+                (
+                    index,
+                    crate::builtins::arrayref::take_arrayref_flag(arg)
+                        .1
+                        .to_string(),
+                )
+            })
             .collect();
 
         let mut function_status = 0;
@@ -199,6 +210,15 @@ impl Executor {
             if name.contains('[') {
                 let arrayref = arrayref_flags.get(arg_index).copied().unwrap_or(false);
                 if arrayref {
+                    // GNU builtins/set.def:924 find_variable follows the
+                    // nameref chain, so `unset n[0]' with n -> v resolves the
+                    // element against the REFERENCED array (nameref15.sub:
+                    // v[0] is unbound and n survives) — resolve before the
+                    // element path consumes the operand.
+                    if let Some(status) = self.unset_through_nameref(&name, stderr) {
+                        element_status = element_status.max(i32::from(status));
+                        continue;
+                    }
                     if let Some(status) = self.unset_array_element(&name, true) {
                         element_status = element_status.max(i32::from(status));
                         continue;
@@ -519,6 +539,12 @@ impl Executor {
     /// `unbind_array_element` (arrayfunc.c:1165) binds the assoc subscript
     /// verbatim — `akey = sub` — instead of running the deferred
     /// `expand_subscript_string` pass.
+    /// GNU variables.c shell_compatibility_level — see
+    /// shell_compatibility_level_value for the BASH_COMPAT parse.
+    fn shell_compatibility_level(&self) -> u32 {
+        shell_compatibility_level_value(&self.env_vars)
+    }
+
     pub(in crate::executor) fn unset_array_element(
         &mut self,
         name: &str,
@@ -542,6 +568,37 @@ impl Executor {
         let Some(current) = self.env_vars.get(array_name).cloned() else {
             return None;
         };
+
+        // GNU unset.def:975-977: with shell_compatibility_level <= 51
+        // (BASH_COMPAT=51 or lower) unset passes VA_ALLOWALL, and
+        // unbind_array_element (arrayfunc.c:1153-1162) then unbinds the
+        // WHOLE variable for `arr[@]'/`arr[*]' (behavior 1) instead of
+        // flushing elements or treating @ as a literal assoc key.
+        if (subscript == "@" || subscript == "*")
+            && self.shell_compatibility_level() <= 51
+            && (is_marked_var(&self.env_vars, ASSOC_VARS, array_name)
+                || is_marked_array_var(&self.env_vars, array_name)
+                || is_array_storage(&current))
+        {
+            self.env_vars.remove(array_name);
+            std::env::remove_var(array_name);
+            self.shell_state.variables.remove(array_name);
+            for key in [
+                EXPORTED_VARS,
+                READONLY_VARS,
+                ARRAY_VARS,
+                ASSOC_VARS,
+                ASSOC_128_VARS,
+                INTEGER_VARS,
+                UPPERCASE_VARS,
+                LOWERCASE_VARS,
+                NAMEREF_VARS,
+                DECLARED_UNSET_VARS,
+            ] {
+                unmark_env_name(&mut self.env_vars, key, array_name);
+            }
+            return Some(0);
+        }
 
         if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
             // GNU arrayfunc.c:1241-1251 unbind_array_element assoc branch:

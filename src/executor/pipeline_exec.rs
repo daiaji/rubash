@@ -716,14 +716,18 @@ impl Executor {
         status: i32,
     ) -> Option<String> {
         let saved_status = self.exit_code;
-        let saved_value = self.env_vars.insert(name.to_string(), value.to_string());
+        // The group's `read` assignment is scoped to the pipeline element's
+        // subshell: install it in the real variable store (readonly checks,
+        // nameref resolution) so followup commands see it, then restore the
+        // caller's binding when the group ends.
+        let saved_value = self.shell_state.variables.get(name).cloned();
+        let _ = self.apply_shell_assignment_command("read", name, value.to_string());
         self.exit_code = status;
         let result = self.execute_pipeline_stage(command, "").ok().flatten();
         self.exit_code = saved_status;
+        self.shell_state.variables.remove(name);
         if let Some(saved_value) = saved_value {
-            self.env_vars.insert(name.to_string(), saved_value);
-        } else {
-            self.env_vars.remove(name);
+            let _ = self.shell_state.variables.set(name.to_string(), saved_value);
         }
         let (stdout, stderr, _) = result?;
         stderr.is_empty().then(|| stdout.replace('\x11', ""))

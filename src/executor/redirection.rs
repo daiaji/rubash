@@ -187,6 +187,25 @@ impl Executor {
         Ok(true)
     }
 
+    /// GNU execute_cmd.c execute_simple_command applies `do_redirections`
+    /// before word expansion, so a word-expansion diagnostic
+    /// (`${x?word}`, bad substitution) writes to the command's *redirected*
+    /// stderr. Rubash validates expansions before the command's redirect
+    /// state is active, so route the diagnostic through the resolved
+    /// `OutputFdState` instead of the ambient fd table.
+    pub(in crate::executor) fn write_redirected_command_stderr(
+        &mut self,
+        cmd: &CommandNode,
+        output: &[u8],
+    ) -> Result<(), ExecuteError> {
+        let mut state = self.command_output_fd_state();
+        if !self.apply_ordered_output_redirects(cmd, &mut state)? {
+            self.write_default_stderr(output)?;
+            return Ok(());
+        }
+        state.write_to_fd(self, 2, output)
+    }
+
     fn write_state_output_or_diagnostic(
         &mut self,
         cmd: &CommandNode,

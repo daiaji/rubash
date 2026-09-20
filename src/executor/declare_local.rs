@@ -480,6 +480,14 @@ impl Executor {
                         .env_vars
                         .get(lhs)
                         .is_some_and(|v| v.starts_with('\x1d'));
+                if !marked && !target_is_array {
+                    // Scalar target + unmarked parenthesized text: GNU binds
+                    // the literal string (bind_variable_value), never
+                    // reparsing it -- `declare c='(1 2)'` stores `(1 2)`
+                    // verbatim. Skipping the element rewrite also keeps the
+                    //  field tags out of the scalar cell.
+                    return Ok(arg.clone());
+                }
                 let (compound, preexpanded) = if marked && sq_raw_inner.is_none() {
                     (compound, false)
                 } else if target_is_array {
@@ -545,15 +553,17 @@ impl Executor {
                 } else {
                     (compound, false)
                 };
-                let Some(rewritten) = self.rewrite_compound_element_subscripts(
+                let rewritten = match self.rewrite_compound_element_subscripts(
                     lhs, compound, assoc, preexpanded,
-                ) else {
-                    // GNU declare.def:961-962 convert_var_to_array runs
-                    // BEFORE the assignment: an expand_compound_array_
-                    // assignment failure leaves the variable declared as an
-                    // empty array (`declare -a var='($bad)'` -> `declare -a
-                    // var=()`), not unset.
-                    return Ok(format!("{lhs}=()"));
+                ) {
+                    Ok(rewritten) => rewritten,
+                    // GNU assign_compound_array_list (arrayfunc.c:765-830)
+                    // breaks on the failing element but keeps every element
+                    // processed before it and materializes the array — an
+                    // empty partial list still binds `lhs=()`
+                    // (declare.def:961-962 convert_var_to_array runs before
+                    // the assignment).
+                    Err(partial) => partial,
                 };
                 let marker = if marked { COMPOUND_ASSIGNMENT_MARKER } else { "" };
                 Ok(format!(

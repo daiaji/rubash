@@ -75,6 +75,13 @@ pub(in crate::executor) fn append_assoc_value(
                 continue;
             };
             let key = unquote_storage_value(key);
+            // GNU assign_assoc_from_kvlist (arrayfunc.c:644-650): an empty
+            // expanded key reports `<word>: bad array subscript` and skips
+            // only that pair (continue, not break) — no any_failed, so the
+            // assignment itself still succeeds.
+            if key.is_empty() {
+                continue;
+            }
             let value = pair
                 .get(1)
                 .map(|value| unquote_storage_value(value))
@@ -164,6 +171,33 @@ pub(in crate::executor) fn assoc_bare_elements(value: &str) -> Vec<String> {
         .find(|token| assoc_assignment_token(token).is_none())
         .map(|token| unquote_storage_value(token));
     first_bare.into_iter().collect()
+}
+
+/// Key words of a kvpair-mode assoc compound assignment whose expanded
+/// key is empty — GNU assign_assoc_from_kvlist (arrayfunc.c:644-650)
+/// reports each as `<word>: bad array subscript` and skips just that pair.
+/// The word text is the re-quoted form from the rebuilt word list (`""`
+/// prints `''`). Returns empty for the strict `[key]=value` form, whose
+/// empty key is handled by rewrite_compound_element_subscripts'
+/// err_badarraysub instead.
+pub(crate) fn assoc_empty_key_words(value: &str) -> Vec<String> {
+    let tokens = merge_assoc_subscript_tokens(array_assignment_tokens(value));
+    let strict_mode = tokens
+        .first()
+        .map(|token| token.starts_with('['))
+        .unwrap_or(false);
+    if strict_mode {
+        return Vec::new();
+    }
+    tokens
+        .chunks(2)
+        .filter_map(|pair| {
+            let key = pair.first()?;
+            unquote_storage_value(key)
+                .is_empty()
+                .then(|| key.to_string())
+        })
+        .collect()
 }
 
 /// Split an assoc assignment token (`[key]=value` / `[key]+=value`) at the
@@ -291,10 +325,15 @@ pub(in crate::executor) fn format_assoc_storage(entries: Vec<(String, String)>) 
 }
 
 pub(in crate::executor) fn quote_assoc_key(key: &str) -> String {
+    // The storage form is re-parsed by split_storage_words on every read:
+    // a bare ``` or `$` in the key opens a substitution span in that
+    // tokenizer and glues the following pairs into this pair's value
+    // (assoc9.sub dict['`']=2 then dict["'"]=3), so they must
+    // force quoting alongside whitespace, quotes, backslash and `]`.
     if !key.is_empty()
         && !key
             .chars()
-            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '\'' | '"' | '\\' | ']'))
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '\'' | '"' | '\\' | ']' | '`' | '$'))
     {
         return key.to_string();
     }
@@ -306,26 +345,22 @@ pub(in crate::executor) fn quote_assoc_storage_value(value: &str) -> String {
     if !value.is_empty()
         && !value
             .chars()
-            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '\'' | '"' | '\\'))
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '\'' | '"' | '\\' | '`' | '$'))
     {
         return value.to_string();
     }
 
-    let mut quoted = String::from("\"");
-    for ch in value.chars() {
-        if matches!(ch, '"' | '\\') {
-            quoted.push('\\');
-        }
-        quoted.push(ch);
-    }
-    quoted.push('"');
-    quoted
+    quote_assoc_storage_value_forced(value)
 }
 
 fn quote_assoc_storage_value_forced(value: &str) -> String {
+    // Inside "..." the storage tokenizer still honors `$` and ``` as
+    // substitution openers (they are not gated on in_double), so they
+    // are backslash-escaped like `\"` and `\\\\`; unquote_storage_value's
+    // double-quote branch decodes all four.
     let mut quoted = String::from("\"");
     for ch in value.chars() {
-        if matches!(ch, '"' | '\\') {
+        if matches!(ch, '"' | '\\' | '`' | '$') {
             quoted.push('\\');
         }
         quoted.push(ch);
@@ -583,6 +618,70 @@ impl Iterator for StorageWordIter<'_> {
                 word.push(ch);
                 if let Some((_, next)) = chars.next() {
                     word.push(next);
+                }
+                continue;
+            }
+            // GNU parse_string_to_word_list re-parses the compound value, so
+            // `$(...)`/backtick substitutions are single lexical words —
+            // whitespace inside them never splits (array19.sub:
+            // declare -a e=$y with y='($(echo Darwin))').
+            if ch == '$' && !in_single && matches!(chars.peek(), Some((_, '('))) {
+                word.push(ch);
+                word.push('(');
+                chars.next();
+                let rest_offset = self.offset + relative + 2;
+                let rest = &self.input[rest_offset..];
+                let mut depth = 1usize;
+                let mut inner_single = false;
+                let mut inner_double = false;
+                let mut inner_escaped = false;
+                let mut consumed = 0usize;
+                for (off, c) in rest.char_indices() {
+                    if inner_escaped {
+                        inner_escaped = false;
+                        continue;
+                    }
+                    match c {
+                        '\\' if !inner_single => inner_escaped = true,
+                        '\'' if !inner_double => inner_single = !inner_single,
+                        '"' if !inner_single => inner_double = !inner_double,
+                        '(' if !inner_single && !inner_double => depth += 1,
+                        ')' if !inner_single && !inner_double => {
+                            depth -= 1;
+                            if depth == 0 {
+                                consumed = off + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if consumed == 0 {
+                    consumed = rest.len();
+                }
+                word.push_str(&rest[..consumed]);
+                for _ in 0..rest[..consumed].chars().count() {
+                    chars.next();
+                }
+                continue;
+            }
+            if ch == '`' && !in_single {
+                word.push(ch);
+                loop {
+                    match chars.next() {
+                        Some((_, '`')) => {
+                            word.push('`');
+                            break;
+                        }
+                        Some((_, '\\')) => {
+                            word.push('\\');
+                            if let Some((_, nc)) = chars.next() {
+                                word.push(nc);
+                            }
+                        }
+                        Some((_, c)) => word.push(c),
+                        None => break,
+                    }
                 }
                 continue;
             }

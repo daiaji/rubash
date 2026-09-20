@@ -275,10 +275,15 @@ pub(in crate::builtins::declare) fn format_assoc_storage(entries: Vec<(String, S
 }
 
 pub(in crate::builtins::declare) fn quote_assoc_key(key: &str) -> String {
+    // The storage form is re-parsed by split_storage_words on every
+    // read: a bare ``` or `$` opens a substitution span in that
+    // tokenizer and glues the following pairs into this pair's value
+    // (assoc9.sub), so they must force quoting alongside whitespace,
+    // quotes, backslash and `]`.
     if !key.is_empty()
         && !key
             .chars()
-            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '\'' | '"' | '\\' | ']'))
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '\'' | '"' | '\\' | ']' | '`' | '$'))
     {
         return key.to_string();
     }
@@ -294,14 +299,17 @@ pub(in crate::builtins::declare) fn quote_assoc_storage_value(value: &str) -> St
     if !value.is_empty()
         && !value
             .chars()
-            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '"' | '\\'))
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '"' | '\\' | '`' | '$'))
     {
         return value.to_string();
     }
 
     let mut quoted = String::from("\"");
     for ch in value.chars() {
-        if matches!(ch, '"' | '\\') {
+        // `$` and ``` are still substitution openers inside "..."
+        // for the storage tokenizer; unquote_storage_value decodes all
+        // four escapes.
+        if matches!(ch, '"' | '\\' | '`' | '$') {
             quoted.push('\\');
         }
         quoted.push(ch);
@@ -313,7 +321,10 @@ pub(in crate::builtins::declare) fn quote_assoc_storage_value(value: &str) -> St
 fn quote_assoc_storage_value_forced(value: &str) -> String {
     let mut quoted = String::from("\"");
     for ch in value.chars() {
-        if matches!(ch, '"' | '\\') {
+        // `$` and ``` are still substitution openers inside "..."
+        // for the storage tokenizer; unquote_storage_value decodes all
+        // four escapes.
+        if matches!(ch, '"' | '\\' | '`' | '$') {
             quoted.push('\\');
         }
         quoted.push(ch);

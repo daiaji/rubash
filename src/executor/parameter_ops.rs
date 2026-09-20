@@ -11,6 +11,10 @@ pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
                 output.push('\'');
                 index += 1;
             }
+            '\x18' => {
+                output.push('"');
+                index += 1;
+            }
             '"' => {
                 index += 1;
                 while index < chars.len() {
@@ -49,15 +53,20 @@ pub(in crate::executor) fn restore_protected_replacement_quotes(value: &str) -> 
 
 pub(in crate::executor) fn parse_parameter_error_operator(
     inner: &str,
+    posix: bool,
 ) -> Option<(&str, &str, bool)> {
+    // GNU subst.c:122 VALID_INDIR_PARAM excludes `?`/`#` under
+    // posixly_correct, so `${!?}`/`${!:?'}` in posix mode are the `!`
+    // parameter under `?`/`:?`, not an indirect expansion through `$?`.
+    let error_name = |name: &str| is_parameter_error_name(name) || (posix && name == "!");
     if let Some((name, message)) = inner.split_once(":?") {
-        if is_parameter_error_name(name) {
+        if error_name(name) {
             return Some((name, message, true));
         }
     }
 
     if let Some((name, message)) = inner.split_once('?') {
-        if is_parameter_error_name(name) {
+        if error_name(name) {
             return Some((name, message, false));
         }
     }

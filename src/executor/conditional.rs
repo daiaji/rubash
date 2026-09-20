@@ -7,10 +7,11 @@
 use std::collections::BTreeMap;
 
 use super::{
-    is_marked_var, mark_env_name, parse_helpers::decode_ansi_c_escapes,
-    unescape_remaining_shell_escapes, Executor, ARRAY_VARS, NAMEREF_VARS,
+    is_marked_var, is_shell_name_char, is_shell_name_start, mark_env_name,
+    parse_helpers::decode_ansi_c_escapes, unescape_remaining_shell_escapes, Executor, ARRAY_VARS,
+    NAMEREF_VARS,
 };
-use crate::executor::arithmetic::eval_mutable_arith_value_with_random_flags;
+use crate::executor::arithmetic::{assoc_subscript_end, eval_mutable_arith_value_with_random_flags};
 use crate::executor::arrays::format_indexed_array_storage;
 use crate::parser::QuoteKind;
 
@@ -98,12 +99,14 @@ impl Executor {
                 Err(()) => 1,
             },
             [op, operand, end] if op == "-R" && end == "]]" => {
+
                 let name = self.expand_word_mut(operand);
                 i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, &name))
             }
             [op, operand] if op == "-R" => {
                 let name = self.expand_word_mut(operand);
                 i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, &name))
+
             }
             [op, operand, end] if op == "-o" && end == "]]" => {
                 i32::from(!self.conditional_shell_option_unary(operand))
@@ -392,6 +395,7 @@ impl Executor {
         }
         output
     }
+
     /// GNU `[[ -v name[sub] ]]` (execute_cmd.c:4008-4031): `varflag` runs
     /// `valid_array_reference(raw_word, VA_NOEXPAND)` — flag-1 — on the RAW
     /// operand token, so `'name[$k]'` is NOT TEST_ARRAYEXP (the `[` sits
@@ -409,6 +413,7 @@ impl Executor {
         );
         let cooked = self.expand_word_mut(operand);
         let rewritten = self.rewrite_conditional_v_operand(&cooked, arrayref)?;
+
         Ok(crate::builtins::test::variable_is_set(
             &rewritten,
             &self.env_vars,
@@ -603,6 +608,72 @@ impl Executor {
         output
     }
 
+    /// GNU cond_expand_word(op, 3) -> expand_word_internal under Q_ARITH:
+    /// a `name[sub]` operand region runs expand_array_subscript
+    /// (subst.c:11107) — the subscript is expanded once
+    /// (expand_subscript_string) and every product byte that could
+    /// restart an expansion or delimit a subscript is backslash-quoted
+    /// (abstab: `[` `]` `$` `` ` `` `~` `\` `'` `"`), so the later
+    /// evalexp/array_expand_index passes see expansion products as data.
+    /// `assoc[$key]` with key=`x],b[$(echo uname >&2)` cooks to
+    /// `assoc[x\],b\[\$(echo uname >&2)]` — the `\]` stays inside the
+    /// subscript and `\$(` never executes.
+    fn expand_cond_arith_operand(&mut self, raw: &str) -> String {
+        let bytes = raw.as_bytes();
+        if !raw.contains('[') {
+            return self.expand_word_mut(raw);
+        }
+        let mut output = String::new();
+        let mut literal_start = 0usize;
+        let mut index = 0usize;
+        let mut single = false;
+        let mut double = false;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => index += 1,
+                b'\'' if !double => single = !single,
+                b'"' if !single => double = !double,
+                b'[' if !single && !double => {
+                    let mut name_start = index;
+                    while name_start > literal_start
+                        && is_shell_name_char(bytes[name_start - 1] as char)
+                    {
+                        name_start -= 1;
+                    }
+                    let closed = name_start < index
+                        && is_shell_name_start(bytes[name_start] as char)
+                        && assoc_subscript_end(bytes, index) > index + 1
+                        && bytes.get(assoc_subscript_end(bytes, index) - 1) == Some(&b']');
+                    if !closed {
+                        index += 1;
+                        continue;
+                    }
+                    let end = assoc_subscript_end(bytes, index);
+                    output.push_str(&self.expand_word_mut(&raw[literal_start..name_start]));
+                    output.push_str(&raw[name_start..index]);
+                    output.push('[');
+                    let expanded = self.expand_subscript_string(&raw[index + 1..end - 1]);
+                    for ch in expanded.chars() {
+                        if matches!(ch, '[' | ']' | '$' | '`' | '~' | '\\' | '\'' | '"') {
+                            output.push('\\');
+                        }
+                        output.push(ch);
+                    }
+                    output.push(']');
+                    literal_start = end;
+                    index = end;
+                    continue;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        if literal_start < raw.len() {
+            output.push_str(&self.expand_word_mut(&raw[literal_start..]));
+        }
+        output
+    }
+
     pub(super) fn conditional_numeric_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
         self.conditional_numeric_binary_status(left, op, right) == 0
     }
@@ -613,8 +684,10 @@ impl Executor {
         op: &str,
         right: &str,
     ) -> i32 {
-        let left_expanded = self.expand_word_mut(left);
-        let right_expanded = self.expand_word_mut(right);
+
+        let left_expanded = self.expand_cond_arith_operand(left);
+        let right_expanded = self.expand_cond_arith_operand(right);
+
         // GNU execute_cmd.c:4049-4068 -> test.c:357-372 arithcomp -> evalexp:
         // the operands were word-expanded by cond_expand_word (mode 3,
         // Q_ARITH). Under compat>51 arithcomp passes eflag=0, so

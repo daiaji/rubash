@@ -12,26 +12,27 @@
 
 Rubash 是用 Rust 从零实现的 GNU Bash —— 词法分析、解析器、展开引擎、执行器、内建命令，全部重写。目标是与 GNU Bash 5.3.0 逐字节兼容，原生运行在 Windows 上。
 
-**当前状态**：83 个 GNU Bash 上游测试套件中 42 个零差异通过。全部 83 套件总差异 1833 行，9 天内从 3427 行下降 46%。（此前报告的 `intl`=1209 为缺 locale 的环境噪音；harness 现在自动生成 `en_US.UTF-8`，`intl` 实测为 2 行。）完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
+**当前状态**：83 个 GNU Bash 上游测试套件中 49 个零差异通过。全部 83 套件总差异 848 行，11 天内从 3427 行下降 75%。（此前报告的 `intl`=1209 为缺 locale 的环境噪音；harness 现在自动生成 `en_US.UTF-8`，`intl` 实测为 8 行。）完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
 
 ## 兼容性一览
 
 ```
 GNU Bash 5.3.0 测试套件 — 83 个文件，true-baseline 实测
-（台账：2026-09-17 全量复核）
+（台账：2026-09-20 合并后全量重跑，fix/array6-patsub-quotes）
 
-  零差通过：      42 套件  █████████████████░░░░░░░░░░░░░░  51%
-  小差异(1-50)：  26 套件  ██████████░░░░░░░░░░░░░░░░░░░░░  31%
-  中差异(51-250)：14 套件  █████░░░░░░░░░░░░░░░░░░░░░░░░░  17%
-  大差异(251+)：   1 套件  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1%
+  零差通过：      49 套件  ████████████████████░░░░░░░░░░  59%
+  小差异(1-50)：  27 套件  ██████████░░░░░░░░░░░░░░░░░░░░  33%
+  中差异(51-250)： 7 套件  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░   8%
+  大差异(251+)：   0 套件  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%
   ────────────────────────────────────────────────────────────────
-  总差异：        1833 行（harness locale 修复后 intl=2）
-  9月9日为 3427 行 → 8 天内 −46%
+  总差异：        848 行（stdout 台账口径；stderr/环境噪音在
+                 COMPATIBILITY-STATUS.md 按套件单列）
+  9月9日为 3427 行 → 11 天内 −75%
 ```
 
 ### 完全通过的套件（零差异）
 
-`appendop` `arith-for` `attr` `builtins` `case` `casemod` `comsub-eof` `complete` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp2` `posixpat` `precedence` `printf` `quote` `rhs-exp` `rsh` `strip` `tilde` `tilde2`
+`appendop` `arith` `arith-for` `array` `assoc` `braces` `builtins` `case` `casemod` `complete` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `herestr` `ifs` `invert` `more-exp` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `procsub` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `strip` `tilde` `tilde2`
 
 ### 近期重大修复（2026 年 9 月）
 

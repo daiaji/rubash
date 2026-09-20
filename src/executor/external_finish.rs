@@ -255,7 +255,7 @@ impl Executor {
         // (nameref8.sub warnings reported `rubash.exe:` prologs).
         let saved_assignment_command_name = self.assignment_command_name.take();
 
-        if let Some(input) = self.function_call_stdin(cmd)? {
+        if let (Some(input), _) = self.function_call_stdin(cmd)? {
             self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
             self.env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());

@@ -1,7 +1,7 @@
 # Rubash ↔ GNU Bash 兼容性权威状态（单一事实来源）
 
-> 最后核对日期：2026-09-19（全量 true-baseline 重跑，83 套件，GNU 5.3.0 契约，
-> master `652c1042`；逐套件台账见 `docs/audit-baseline-2026-09-19.md`）
+> 最后核对日期：2026-09-20（合并后全量 true-baseline 重跑，83 套件，GNU 5.3.0 契约，
+> 分支 `fix/array6-patsub-quotes`；逐套件台账见 `target/issue-suites/results/postmerge-baseline-ledger.txt`）
 > 核对方法：用 `./target/debug/rubash.exe` 直接跑 GNU 官方测试文件
 > `third_party/bash/tests/<name>.tests`，对比 GNU bash 的真实输出。
 > 基线约定（2026-09-09 起生效）：语义比对一律用 WSL GNU Bash 5.3.0
@@ -15,11 +15,15 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-19，master `652c1042`）：45 零差 / 38 有 DIFF / 总 1247 行**
+> **最新台账（2026-09-20，合并后 `fix/array6-patsub-quotes`）：49 零差 / 34 有 DIFF / 总 848 行**
+> （DIFF 1-50：27 套件；51-250：7 套件；251+：0。较合并前基线 849 行净减 1，
+> 逐套件对比无任何套件变差；nameref 6→1。零差套件名单见 README）
+>
+> 上一台账（2026-09-19，master `652c1042`）：45 零差 / 38 有 DIFF / 总 1247 行
 > （较 2026-09-18 基线 1833 行净减 586；nameref 281→7、errors 129→3、arith 53→0、
 > type 39→6、shopt/trap 归零；详见 `docs/audit-baseline-2026-09-19.md`）
 >
-> 上一台账（2026-09-16）：43 零差 / 40 有 DIFF / 总 2702 行
+> 更前一台账（2026-09-16）：43 零差 / 40 有 DIFF / 总 2702 行
 > （其中 intl=1209 为 ANSI-C `$'...'` 载体字节架构缺口，排除 intl 后余 39 套件共 1493 行；
 > 详见第二十二节）
 
@@ -1147,3 +1151,318 @@ comsub 17、procsub 13、jobs 63→59、comsub2 48→44、cond 19——无回归
 
 **已知边界**：`time cmd` 的计时报告未实现（GNU `real/user/sys` 三行，
 语义无关 ExitCode）；`select` 空 stdin 菜单重绘差异为既有项。
+
+## 第二十六节：2026-09-20 posixexp 清零 + heredoc/here-string 预展开载体（fix/array6-patsub-quotes）
+
+**本批修复（GNU C 依据逐一对应）**：
+
+- **`${'x1'%'t'}` bad substitution**（`subst.c:10272-10288`
+  `parameter_brace_expand`）：参数名被非法字符（引号）终止 →
+  `default:` 报 bad substitution。展开期检测
+  （`expand_word.rs braced_name_ends_on_quote` +
+  `parameter_bad_substitution` 旗标），故 `${x-${'x1'%'t'}}` 在 x
+  已设时不报（交替词未求值），与 GNU 条件求值一致；posix 非交互
+  → FORCE_EOF 致命（`-c` rc=127、脚本 rc=1），非 posix → DISCARD
+  命令中止脚本继续（`subst.c:10288`、`shell.c:1471`、`eval.c:104`）。
+- **下标引号跳读**：`braced_name_ends_on_quote` 的 `[...]` 扫描按 GNU
+  `skipsubscript` 跳过 `'...'`/`"..."`/`\x` 区段——`${myarray[']']}`
+  合法，不再误报 bad substitution（assoc5.sub）。
+- **heredoc/here-string 预展开载体 `\x05`**（`redir.c` 展开次序：
+  `do_redirections` 在 `expand_words` 之后、命令执行之前展开 stdin
+  体）：`execute_command` 词展开后预展开 heredoc/here-string，结果
+  以 `PREEXPANDED_STDIN_BODY` 前缀缓存；`expand_heredoc_body*`、
+  `expand_here_string_mut`、`stdin_string_for_command*`、
+  `read_heredoc_fd_input`、`alias_loops`、`trap_exec` 全部识别载体
+  并返回缓存文本——体只展开一次，`${'x1'%'t'}` 在 `cat <<EOF` /
+  `read <<<` 中正确致命且不再二次展开/重复诊断。
+- **posix 下 `${!?}`/`${!#}` 非间接**（`subst.c:122 VALID_INDIR_PARAM`：
+  posix 下 `#`/`?` 不是合法间接参数名）：argv0=`sh` 时 `${!?}` 走
+  `?` 算子（posixexp2.sub test 6）。
+- **posix 算术展开错误致命**（`subst.c:10881-10888` +
+  `shell.c:1471` + `eval.c:104`）：`$((x+))` 在 posix 非交互下
+  FORCE_EOF——`-c` rc=127、脚本 rc=1；非 posix 命令中止脚本继续。
+- **无扩展名 PE 直接 exec**（`shell_execve` 先试 execve 再分类）：
+  `cp ${THIS_SH} $TMPDIR/sh` 的无扩展名副本经 MZ magic 探测直接
+  CreateProcess，使套件 posix 重命名子 shell 链路打通；`Executor::new`
+  的 `THIS_SH` 自动检测保留已导出的合法 `sh`/`sh.exe` 路径。
+- **`${x?}` 诊断走命令重定向状态**（`execute_cmd.c` `expand_words`
+  先于 `do_redirections`）：新增 `write_redirected_command_stderr`，
+  子 shell `(${x?}) 2>&1` 诊断正确进管道。
+- **null IFS 下 `$@` 连接符**（`subst.c:3006 string_list_dollar_at`：
+  `PF_ASSIGNRHS || ifs 未设 || ifs 空 → ' '`）：赋值 RHS 快路 `a=$@`
+  在 `IFS=` 下用空格连接（posixexp3.sub）；`$*` 仍用 `ifs_firstc`。
+- **未闭合 `$(` 报 unexpected EOF 中止命令**（`parse.y parse_comsub`）：
+  `collect_command_substitution_source_ex` 返回闭合标志，
+  `"${a+'$('\'}"` 类报 EOF 错、命令中止、脚本继续（braces）。
+- **dq 上下文 `\'` 保留反斜杠**：`decode_double_quotes_in_quoted_parameter_word`
+  非 posix 分支 `\'` → `\x14\x17`（rhs-exp `\'$selvecs\'` → `\'...\'`），
+  裸 `'` → `\x17`（braces `'x y'` 字面量）。
+- **`#`/`%` 模式词 sq 保护**：`push_quoted_pattern_char` sq 臂对
+  `$`/`` ` ``/`"` 出 `\$` 转义形式（braces `'$('` 不展开）。
+
+**台账**（true-baseline.sh 同口径）：posixexp 7→0、braces 1→0、
+assoc 0、array 0、rhs-exp 0、quotearray 50、comsub2 38→34、
+ifs-posix 1、exp 4（`/src/cmd` 环境路径噪声）、new-exp 60、comsub 17。
+标记载体回归（array/assoc/exp/quotearray 一度 +2~+5）已全部归零。
+
+**已知残留**（预存，非本批引入）：
+- `read v <&3 3<<EOF`：GNU 按序应用重定向（`<&3` 先于 `3<<` → fd3
+  未开报 Bad file descriptor）；RB 的 `heredoc_redirects` 独立存储
+  无法与 `redirects` 交错排序——架构项待修。
+- `${!@}`/`${!*}` 非 posix 下 bad substitution 缺口（`VALID_INDIR_PARAM`
+  对 `@`/`*` 合法但 RB 间接路径未实现）。
+
+## 第二十七节：2026-09-21 new-exp/quotearray/comsub2 清零 + read 簇（fix/array6-patsub-quotes）
+
+**new-exp 60→0（GNU C 依据逐一对应）**：
+
+- **`{xxx}` 非保留字**（`parse.y`：`{` 仅独立成 token 才是保留字）：
+  scanner 对 `{` 后紧跟词字符的形态发普通词，`$({xxx}</dev/stdin)`
+  不再硬语法错误中止脚本（GNU 按 command-not-found 恢复）。
+- **引号 `${}` 内嵌 `$@`/`$*` 空展开保留一个空字段**
+  （`subst.c:12026` `had_quoted_null`）：`"${foo:-$@}"`、`"${foo-$@}"`、
+  `"${foo:-$*}"` 等算子词使用且展开为零字段时产出一个空字段；
+  `removes_unquoted_null_word` 增加 raw-quoted 门控。
+- **`${!PREFIX*}`/`${!PREFIX@}` 变量名前缀展开**（`subst.c:9978-10007`
+  `all_variables_matching_prefix` → `vapply` → `sort_variables`
+  strcmp 序）：`@` 形逐字段（W_DOLLARAT）、`*` 形按 IFS[0] 连接；
+  前缀形跳过 `@`/`:` 算子尾检查；空匹配 `@`→0 字段、`*`→1 空字段。
+- **`${@%%pat}` 空位置参数全位置丢弃**（恢复被 revert 的正确语义）。
+- **quoted `"${a[@]:N}"` 逐元素子串**：复合赋值 `\uE102` 原子路径
+  与 `\x1d` 路径均按 `[@]` 逐元素、`[*]` 按 IFS[0] 单字段连接。
+- **`@A`/`@a`/`@Q`/`@E`/`@P`/`@K` 变换矩阵**（`subst.c:8856`
+  `array_transform`）：`@A`/`@a`/`@K` 对数组/assoc 恒单次属性串
+  （`var_attribute_string` 语义，携带全部 `-a/-i/-l/-r/-u` flag）；
+  `storage.is_none()`（cell 未分配）空数组 `@a` 特判返回一次属性串，
+  `foo=()` 已分配空表逐元素→空；`${!var@Q}`/`${!var[@]%..@T}`
+  间接逐元素变换接通。
+- **`-u` 下空数组 cell 视为 unbound**：标量形 `${foo}`/`${foo@a}`/
+  `${!bar}`→空数组报 `foo: unbound variable`；`[@]`/`[*]` 形豁免；
+  `!` 间接报告 `!name`。
+- **`${$(…)}` 与无效 `@op` → bad substitution**（`subst.c:8944`
+  `valid_parameter_transform` + `expand_param_fatal`）：顶层与嵌套
+  `${c//${$((…))}/x/}` 均拦；`@C`/`@` 等无效变换在**已设**变量上
+  FORCE_EOF 致命（rc=1 中止脚本），未设变量 NULL 早退静默。
+- **标量 `${var[@]:N}` 退化为字符子串**（`subst.c` 标量走
+  单元素数组路径）。
+- **`declare -f` 在 comsub 内不再单行规整化重印**（删除伪输出烤死
+  路径，`$(<x)`/`(cat x1)` 序列表保真）。
+- **prompt `\[`/`\]` decode**（`parse.y` 字节语义）：`\[`→`\x01`、
+  `\]`→`\x02` 字面字节，修复外层循环变量遮蔽导致的恒 `\x02`。
+
+**quotearray 50→0**：
+
+- **assoc 下标 `\x1e` 预编码幂等**：`expand_arithmetic_assoc_subscripts`
+  对已编码 `\x1e` 下标透传，修 `eval_parameter_substring_offset{,_mut}`
+  与 `eval_arithmetic_expansion_value` 间的二次编码（`A[%]` 偏移 0 病）。
+- **`${!aref}` 无引号路径按 GNU 桶序**（`assoc_nbuckets`/`bash_assoc_order`）：
+  `indirect_target_values` 不再走插入序 `array_values`——单命令
+  `assoc[@]=at assoc[*]=star` 后 `star bang at` 序对齐。
+
+**comsub2 34→0**：命令替换输出/状态簇按 `subst.c:7143`
+`command_substitute` 与 `parse.y:4451 parse_comsub` 对齐。
+
+**read 44→环境残留（无真 diff）**：
+
+- **内建 `<` 重定向失败中止**（`redir.c:767 do_redirections` 先于
+  builtin 执行）：`{ read -t 0.5 a; } </nonexist` rc=1 且不赋值、
+  不污染后续 read 状态。
+- **共享 stdin 游标**（GNU fd 0 共享语义，`subst.c:7143`）：
+  `FUNCTION_STDIN_OFFSET` 贯通 read/外部命令/函数/命令替换——
+  `stdin_string_for_command` 返回剩余段；`function_call_stdin`
+  标记 carve 来源、函数返回时子游标折回父游标；comsub 子侧经
+  `Cell` 惰性回写（`apply_comsub_stdin_writeback`）；`cat` 快路径
+  裸调用回落真实管线；`run_external_command_substitution` 喂
+  FUNCTION_STDIN 余量。
+- **`read -a` 保留空字段**（`read.def` 非空白 IFS 分隔符产空字段）：
+  `split_read_array_words{,_backslash}` 委托 `split_read_field_ranges`，
+  `IFS=: read -a A <<< :::` → 3 空元素。
+- **`read -t` 超时仍赋已读部分**（`read.def:540-554`：retval=
+  128+SIGALRM 后 `goto assign_vars`）：`timed_read_followup_output`
+  改用真实变量存储做临时赋值/恢复，同组后续命令可见部分值。
+- **`read -t 0` 非终端立即可读 → rc 0**（GNU poll 语义）：
+  /dev/null、EOF 管道、文件均成功。
+- **原始字节分隔符**（`lib/sh/stringlib.c` 字节语义）：
+  `$'\200'` 等载体字节经 RAW_BYTE 标记对存储，分隔符派生与比较
+  全部按解码后字节码位——管道/`< <()`/`-u fd`/`-n` 组合全对齐。
+- **IFS 载体字节分词**（`read.def` IFS whitespace 判定）：
+  `read_split.rs` 分词器改逻辑单元（标记对解码为字节码位）比较，
+  `\f`(0x0c) 等载体字节在 IFS 与输入两侧正确识别修剪——
+  `IFS=$'\t\r\f\v'` 尾部空白裁剪对齐。
+
+**台账**（true-baseline.sh 同口径）：new-exp 60→0、quotearray 50→0、
+comsub2 34→0、read 44→0 真 diff（残留 25 行全环境性：Windows 无
+`/dev/tty` → RB rc=1 vs GNU 真实 tty 超时 142 及其连锁变量态 +
+GNU 侧 mkfifo `Operation not supported` 触发 124 截断）、
+ifs-posix 全量 6856/6856 通过（harness 短超时曾产空 rb.out 抖动）、
+comsub 17（预存：alias 注入未闭合 `$(`、`let --`、case-in-comsub）、
+exp 4（`/src/cmd` 环境路径噪声）、assoc 0、array 0、posixexp 0、
+braces 0、ifs 0、rhs-exp 0、arith 0。
+
+**read 已知环境残留**（非语义缺口）：
+- `read -t N </dev/tty`：RB 打不开 `/dev/tty`（rc=1）vs GNU 打开
+  控制台超时（rc>128）——Windows 无进程控制终端。
+- `read -e`（readline）超时族同理。
+- 套件 GNU 侧 mkfifo 循环（2000 次子 shell）+ `/dev/tty` 阻塞导致
+  GNU 输出在 harness 超时处截断，RB 多出的尾部行为 GNU 未执行区段。
+
+## 合并前审计修复（B1/B3/B4/B7；B2 单独立项）
+
+**B1 `\x05` PREEXPANDED_STDIN_BODY 碰撞（高）**——脚本文件是任意
+字节流，heredoc 体首字节可为原始 0x05，与执行器"已展开"哨兵碰撞
+导致跳过展开。修法：`parser/redirections.rs::encode_stdin_body_enq`
+在收集点（heredoc 体 + here-string 词）把字面 ENQ 编码为既有
+RAW_BYTE 标记对；`execution_misc.rs::decode_stdin_body_enq` 在
+`expand_heredoc_body{,_mut}`/`expand_here_string_mut` 返回边界把
+该对解码回字面 `\x05`（0x05 非载体字节，值域规范形态即字面 char，
+`$'\005'` 亦然）；字节边界统一走
+`substitution_metadata::shell_text_to_raw_bytes`——补齐了
+`external_inner::spawn_external_process` 与 `external_file_builtins::
+external_cat` 快路径原先 `input.as_bytes()` 直写泄漏 PUA 标记的缺口。
+GNU 锚点：heredoc 体为字节流（`parse.y` gather_here_documents +
+`redir.c` do_redirections 不区分字节值）。验证矩阵（RB vs WSL GNU
+5.3 字节级 od 对照）：体首/体中/体独占 0x05 × unquoted/quoted/
+`0<<`/`<<<`/comsub 捕获/`while read`/`grep` 全对齐；`$(cat <<EOF)`
+捕获值中 0x05 不再以 PUA UTF-8 泄漏。
+
+**B3 `cat 0<<EOF` 无输出（中）**——显式 fd-0 heredoc 只入
+`heredoc_redirects`（fd=Some(0)），stdin 取材只查 `cmd.heredoc`。
+修法：`shell_options.rs::stdin_string_for_command{,_mut}` 与
+`external_setup.rs::apply_external_stdin_redirect` 增加 fd-0 消费，
+`external_fd_heredoc_input` 提升为 executor 可见。顺带按 GNU
+`redir.c` do_redirections 左序语义修正 fd-0 输入源取舍：利用
+`cmd.redirects` 有序表取最后一条 fd-0 输入重定向为赢家——
+`cat <<A 0<<B`/`cat 0<<A <<B`/`cat <<A <<<w`/`cat <<<w <<A`/
+`cat <<A <file` 均与 GNU 对齐（同 fd 后写赢）。
+
+**B4 赋值命令 bad substitution 泄漏（中）**——
+`v=${x-${'u'%'v'}}` 两处缺口：①alternate 词经
+`decode_double_quotes_in_quoted_parameter_word` 把 `'` 编码为
+`\x17` 数据哨兵，`braced_name_ends_on_quote` 失配静默——现在把
+`\x17`/`\x18` 识别为源引号证据（该位置只可能来自源引号，
+GNU `subst.c:10277-10288 parameter_brace_expand` 同源），诊断经
+`bad_substitution_display` 还原哨兵为源字符；②
+`parameter_bad_substitution` 旗标在纯赋值命令
+（`execute_empty_words_command`）路径上不被消费，泄漏到下一命令才
+爆且错杀无辜命令行——赋值 RHS 展开后立即按 `abort_on_expansion_
+errors` 同型语义消费（非 posix：ExpansionFailure 丢当前命令 rc=1、
+脚本继续；posix 非交互：ExitCode fatal）。验证：`v=${x-${'u'%'v'}}`
+报错 rc=1、后续命令正常执行、`set -o posix` 下 fatal rc=1，均与
+GNU 5.3 一致。
+
+**B7 卫生**——移除 `RUBASH_DEBUG_HD`（command_execute/
+command_input_scope ×3）、`RUBASH_DEBUG_AV`（assignment_expansion）、
+`RB_DBG_*` 探针；`command_prepare.rs`/`expand_word.rs` 注释与代码
+字面量中的裸 0x1d/0x17/0x18 控制字节全部改转义写法；
+`execution_misc.rs` 上"0x05 不可能出现在体首"的错误断言注释已
+更正为编码不变式说明。
+
+**B2 单独立项（未动）**——`cat <<EOF &` 后台 heredoc 无输出：
+`command_text.rs::bash_command_text` 不渲染 heredoc 体，属命令
+文本重建路径，与本次 stdin 语义修复正交，留作独立任务。
+
+**预存非 UTF-8 脚本限制（新记录，非本批引入）**——含 0x80+ 等
+非法 UTF-8 字节的脚本文件整体被 "cannot execute binary file"
+拒绝（脚本按 UTF-8 解码进 String），GNU 按字节流接受。B1 的
+0x05 属合法 UTF-8 范围不受影响；非 UTF-8 脚本支持是独立的架构项。
+
+**台账**（true-baseline.sh 同口径）：heredoc 5、herestr 0、
+redir 46、vredir 24、comsub2 0、new-exp 0、quotearray 0、
+read 25（全环境性，见上节）、ifs 0、mapfile 60（harness 未拷贝
+`mapfile.data` 夹具，GNU 侧同样 No such file 报错）、comsub 17
+（预存解析簇）。heredoc/redir/vredir 残留均为预存簇（comsub 内
+heredoc 括号平衡、后台 heredoc=B2 族、$LINENO 漂移、`exec 0<&5-`
+/`|&` 重印），本批无回归。
+
+**新记录预存残留**（非本批引入，独立任务候选）：
+- lastpipe 5：嵌套 `while read` 管道外层只读首行
+  （`echo -e 'A
+B' | while read o; do echo -e '1
+2' | while read i;
+  do echo $o$i; done; done` GNU=A1 A2 B1 B2，RB=A1 A2）——无重定向
+  参与，属嵌套管道 FUNCTION_STDIN 游标族，与 B1/B3 正交。
+- 内建/复合命令侧"非赢家 fd-0 `<` 仍执行 open"未建模：
+  `cat <<A <missing` 外部路径已对齐（open 失败中止），内建 cat
+  快路径仍直接给 heredoc 体——属重定向逐条应用的架构项。
+
+## 第二十八节：2026-09-20 master 合并 + 数组下标单遍展开批次（fix/array6-patsub-quotes）
+
+**合并**：`fix/array6-patsub-quotes` 合并 origin/master（assoc/array 批次 +
+shopt 宽度修复）；PST_ASSIGNOK 门控去重——master 的 command_execute.rs
+版本保留（更贴 execute_cmd.c 结构），token_actions.rs 版本移除。
+
+**合并后修复批次**（GNU C 出处见各提交）：
+
+- **数组/assoc 下标单遍展开**——GNU `expand_array_subscript`
+  （subst.c:11107）对下标只展开一遍，产物字节经 abstab 反斜杠转义
+  （`[` `]` `$` `` ` `` `~` `\` `'` `"`）防止二次触发；`array_expand_index`
+  （arrayfunc.c:1356）收 RAW 文本、`expand_arith_string` 是唯一展开遍。
+  Rubash 把已展开文本再过一遍词展开，`a[$key]`（key 含 `$(...)`）二次
+  执行命令替换。修复点：`array_assignment_exec`（LHS 下标喂 raw）、
+  `conditional`（`[[` 算术比较操作数经 `expand_cond_arith_operand`
+  镜像 cond_expand_word(op,3) Q_ARITH）、`arithmetic_aliases`
+  （arith_display_expand 对展开产物施加 abstab 转义用于 evalexp
+  错误 token）、`arithmetic/lvalue`（assoc 键反斜杠解码，expr_streval
+  同源）、`arithmetic/mod`（assoc_subscript_end 公开）。
+- **`expand_subscript_string` ANSI-C 解码**——`$'...'` 下标在 raw 文本里
+  仍是源形态，补 `decode_ansi_c_spans`（subst.c:11063 expand_string 的
+  ansicstr 臂）；`a[$'\x01']` 键恢复正确。
+- **`[[ -v assoc[@] ]]`**——`@`/`*` 对关联数组是字面键（test.def
+  test_variable）；全数组短路只适用索引数组。
+- **W_ARRAYREF 载体消费**——`\x02` 前缀是词旗标不是操作数文本
+  （execute_cmd.c:4366 fix_arrayref_words）；`read` 名字校验、`wait -p`
+  绑定、`unset` 操作数、`printf -v` 名称校验各消费点补齐。
+- **`unset n[0]` nameref 解析**——find_variable 跟随 nameref
+  （builtins/set.def:924），`n -> v` 时删 `v[0]` 而非 `n[0]`。
+- **`unset arr[@]` BASH_COMPAT≤51**——compat 级 ≤51 时 unset 传
+  VA_ALLOWALL，unbind_array_element 删整个变量（arrayfunc.c:1153-1162、
+  unset.def:975-977）；`shell_compatibility_level_value` 解析
+  BASH_COMPAT NN/N.N（variables.c set_compatibility_level）。
+- **`printf -v a[@]`**——valid_array_reference 纯语法判定（arrayfunc.c），
+  `@` 的 `bad array subscript` 在绑定期报（builtins/common.c:949
+  builtin_bind_variable），不再提前报 `not a valid identifier`。
+- **标量 `(...)` RHS 字面绑定**——标量目标的括号文本按字面存
+  （bind_variable_value），不带 W_COMPASSIGN 的 `declare c='(1 2)'`
+  不再被拆成 `\x10` 标记元素（arrayfunc.c:557）。
+- **brace 展开跳过 `$` 体**——`word_contains_brace_group` 跳过
+  `${...}`/`$(...)` 体（GNU braces.c 不下探展开体），修
+  `a${u-{x,y}}z` 与 `("${x[@]}" "y")` 去引号回归。
+- **`${!indir}`/`$ref` nameref 穿透**——parameter_brace_expand_indir
+  把间接目标再过 parameter_brace_expand_word（subst.c:7955），
+  find_variable 跟随 nameref：`indir=ref`、`declare -n ref=arr` 时
+  `${!indir}` 取 arr[0]；`$ref`/`${!name}` 指向 `arr[@]`/`arr[*]` 时是
+  词表源（nameref18.sub）。
+- **卫生**——`__RB_DBG_DECLARE` 探针移除；`read_builtin` 裸 NUL 字面量
+  改 `'\u{0}'` 转义；README 合并冲突残骸修复。
+
+**合并后全量基线**（83 套件，`postmerge-baseline-ledger.txt`）：
+
+| 指标 | 合并前 | 合并后 | Δ |
+|---|---|---|---|
+| 零差套件 | 49 | **49** | 0 |
+| DIFF 1-50 | 27 | 27 | 0 |
+| DIFF 51-250 | 7 | 7 | 0 |
+| DIFF 251+ | 0 | 0 | 0 |
+| 总 diff 行 | 849 | **848** | −1 |
+
+逐套件对比：82/83 持平，nameref 6→1（改善，唯一残留为 coproc `_PID`
+回收时序——GNU 在 SIGCHLD reap 时即 unset，Windows 子进程退出延迟使
+RB 在下一边界才摘，属竞态噪声）；**history 104→108 为 GNU 侧超时抖动**
+——history.tests 的 `${THIS_SH} -i` 交互子测试在本环境 GNU 侧 40s 被
+timeout -k 杀（rc=137，90s 加长同样杀），gnu.out 截断点每次不同，diff
+计数随截断位置浮动；非 RB 语义回归（本批改动全在下标/数组/nameref
+域，不触 interactive history 回显）。
+
+**合并中途出现的回归已全部修回持平**：array 0→38→0、assoc 0→26→0、
+quotearray 0→49→0、nameref 6→11→1、new-exp 0→4→0。根因是合并侧
+`` ARRAYREF_FLAG 载体词旗标在多个消费点未剥离（read 名字校验、
+wait -p、unset 操作数）+ 标量 `(...)` RHS 误走复合赋值拆分 + 下标
+二次展开；均按上文 GNU C 出处修复，非特判补丁。
+
+`heredoc` 5、`lastpipe` 5、`attr` 40、`mapfile` 60（harness 未拷
+`mapfile.data` 夹具，GNU 侧同样报 No such file）等残留均为预存簇
+或环境性，见第二十七节。
+
+**边界规则执行**：本批未新增任何哨兵字节/PUA 码点/命名标记串；仅做了
+既有载体的消费点补齐（`\x02` ARRAYREF_FLAG 在 read/wait/unset/printf-v
+的剥离）与碰撞修复，符合 typed-carrier 迁移边界约定。
