@@ -1275,6 +1275,55 @@ pub(super) fn strip_arith_double_quotes(input: &str) -> String {
     output
 }
 
+/// GNU expand_arith_string output form for an indexed-array subscript that
+/// carried no expansion of its own: single quotes stay literal (evalexp
+/// reports `'x'` as "operand expected"), while double quotes and backslash
+/// escapes are removed (`a[" "]` resolves to 0, `a[' ']` errors). Used when
+/// the cooked index equals the dequoted raw — i.e. the subscript expanded
+/// to itself — so rebuilding the arith-context text from the raw spelling
+/// cannot re-run substitutions (`a[$(echo INJ)]=v` still executes once).
+pub(super) fn arith_subscript_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                out.push('\'');
+                for inner in chars.by_ref() {
+                    out.push(inner);
+                    if inner == '\'' {
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                while let Some(inner) = chars.next() {
+                    match inner {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(next) = chars.next() {
+                                out.push(next);
+                            } else {
+                                out.push('\\');
+                            }
+                        }
+                        _ => out.push(inner),
+                    }
+                }
+            }
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                } else {
+                    out.push('\\');
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Byte index just past the `]` that closes the subscript opened at `open`
 /// (`bytes[open] == b'['`), honoring single/double quotes and `\` escapes so a
 /// `]` inside a quoted key does not terminate the subscript.

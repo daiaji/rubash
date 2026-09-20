@@ -42,7 +42,17 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     push_command_word(&mut state.current_cmd, token);
                 }
             } else if token.raw.contains("=(") && token.raw.ends_with(')') {
-                if !compound_assignment_position_ok(&state.current_cmd.words) {
+                // GNU parse.y read_token_word: `=(` only opens a compound
+                // assignment when the `=` follows a valid assignment LHS --
+                // `$(( a=(1+2) ))` keeps `=(` inside the arithmetic word and
+                // must never reach the position check.
+                let compound_candidate = token
+                    .raw
+                    .split_once('=')
+                    .is_some_and(|(lhs, _)| valid_compound_assignment_lhs(lhs));
+                if compound_candidate
+                    && !compound_assignment_position_ok(&state.current_cmd.words)
+                {
                     return reject_compound_assignment_position(tokens, i, state, token);
                 }
                 // Atomic compound operand after a command word (declare -a
@@ -228,7 +238,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     let raw_word = token.raw.clone();
                     let mut atomic_compound_attached = false;
                     if raw_word.ends_with(')') && raw_word.contains("=(") {
-                        if !compound_assignment_position_ok(&state.current_cmd.words) {
+                        let compound_candidate = raw_word
+                            .split_once('=')
+                            .is_some_and(|(lhs, _)| valid_compound_assignment_lhs(lhs));
+                        if compound_candidate
+                            && !compound_assignment_position_ok(&state.current_cmd.words)
+                        {
                             return reject_compound_assignment_position(tokens, i, state, token);
                         }
                         // Atomic compound (the lexer keeps name=(...) whole
@@ -332,7 +347,11 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         if let Some((compound_value, next_i)) =
                             collect_compound_assignment(tokens, *i)
                         {
-                            if !compound_assignment_position_ok(&state.current_cmd.words) {
+                            let lhs = token.value.strip_suffix('=').unwrap_or(&token.value);
+                            let compound_candidate = valid_compound_assignment_lhs(lhs);
+                            if compound_candidate
+                                && !compound_assignment_position_ok(&state.current_cmd.words)
+                            {
                                 return reject_compound_assignment_position(
                                     tokens, i, state, token,
                                 );

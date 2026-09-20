@@ -373,12 +373,6 @@ impl Executor {
             self.exit_code = 1;
             return true;
         }
-        let index = if index.trim().is_empty() { "0" } else { index };
-        if index.trim() == "*" {
-            self.report_bad_array_subscript(&lhs_as_written);
-            self.exit_code = 1;
-            return true;
-        }
         // GNU arrayfunc.c:420-434 assign_array_element_internal ->
         // array_expand_index (arrayfunc.c:1353-1391): the subscript's single
         // expand_arith_string pass already ran inside expand_command_words
@@ -387,7 +381,47 @@ impl Executor {
         // evalexp verbatim — a `$(...)` produced by the expansion is not
         // valid arithmetic and fails "operand expected" instead of
         // executing (audit C11).
-        let computed_index = match self.eval_indexed_subscript(SubscriptSource::Protected(index)) {
+        // The cooked `index` is that pass's output — except it lost the
+        // raw spelling's single quotes at parse time, and GNU's arith pass
+        // keeps sq literal for evalexp (`a[' ']` errors, `a[" "]` -> 0).
+        // When the raw spelling de-quotes to `index` (no substitution ran),
+        // rebuild the arith-context text from raw so sq/dq/backslash get
+        // their GNU treatment; when they differ `index` IS the expansion
+        // product and feeds evalexp verbatim.
+        let eval_text;
+        let mut eval_input = match raw_subscript {
+            // A single-quoted span survives GNU's arith-context expansion as
+            // literal text but does NOT protect the `$x` inside it —
+            // `a['$v']` expands to `'2'` and evalexp reports operand
+            // expected. The cooked `index` dropped the sq wrapper at parse
+            // time, so rebuild via the same expand_arithmetic_special_
+            // parameters pass the `${a[...]}` read path uses (sq -> \x17
+            // data, `$x`/`$((...))`/`$(...)` expand, dq removed).
+            Some(raw) if raw.contains('\'') => {
+                eval_text = self.expand_arithmetic_special_parameters(raw);
+                eval_text.as_str()
+            }
+            // Quoting other than sq (dq, backslash) normalizes identically
+            // in the cooked index only when no substitution ran; rebuild the
+            // dq/escape-stripped form from raw so `a[" "]` resolves to 0.
+            Some(raw) if crate::lexer::remove_shell_quotes(raw) == index => {
+                eval_text = super::arithmetic::arith_subscript_text(raw);
+                eval_text.as_str()
+            }
+            _ => index,
+        };
+        // GNU evaluates the subscript arithmetically even when it is all
+        // whitespace — `h[ ]=10` stores h[0]=10 (array25.sub): whitespace
+        // only coerces to 0 AFTER the sq check above kept `' '` literal.
+        if eval_input.trim().is_empty() {
+            eval_input = "0";
+        }
+        if eval_input.trim() == "*" {
+            self.report_bad_array_subscript(&lhs_as_written);
+            self.exit_code = 1;
+            return true;
+        }
+        let computed_index = match self.eval_indexed_subscript(SubscriptSource::Protected(eval_input)) {
             IndexedSubscript::Index(index) => index,
             IndexedSubscript::Empty => {
                 self.report_bad_array_subscript(&lhs_as_written);
