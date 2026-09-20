@@ -7,7 +7,7 @@ use super::names::valid_nameref_value;
 use super::storage::{
     append_array_value, append_assoc_value, eval_arith_value, format_assoc_storage,
     format_indexed_array_storage, indexed_array_entries, is_noassign_bash_array,
-    parse_array_tokens, parse_assoc_words,
+    parse_array_tokens, parse_assoc_words, quote_assoc_storage_value,
 };
 use super::{
     ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, COMPOUND_ASSIGNMENT_MARKER, DECLARED_UNSET_VARS,
@@ -129,6 +129,73 @@ where
             continue;
         }
         if let Some((base, index_expression)) = declare_indexed_element(raw_target) {
+            // GNU declare.def:927/935-948: a parenthesized value on a
+            // subscript operand is a COMPOUND assignment on the whole
+            // variable — the subscript is discarded — only when
+            // creating_array (an -a/-A flag on this command) holds
+            // (`declare -a a[1]='(var)' -> [0]="var"; `declare -A
+            // c[k]='(v1 v2)' -> [v1]="v2"). Otherwise it is a literal
+            // element value; a fresh variable without an array flag also
+            // gets the deprecated-compound warning
+            // (`declare a[1]='(var)' -> [1]="(var)" + warning).
+            let paren_value =
+                !append_elem && value.starts_with('(') && value.ends_with(')');
+            if paren_value && (array || assoc) {
+                let expanded_value = expand_compound_array_value(value, variables);
+                if assoc || marked_vars(variables, ASSOC_VARS).contains(base) {
+                    if let Some(bare) = assoc_bare_element(&expanded_value) {
+                        writeln!(
+                            stderr,
+                            "{}declare: {}: {}: must use subscript when assigning associative array",
+                            diagnostic_prefix(variables),
+                            base,
+                            bare
+                        )?;
+                        status = EXECUTION_FAILURE;
+                        continue;
+                    }
+                    let current = variables
+                        .get(base)
+                        .cloned()
+                        .unwrap_or_else(|| "()".to_string());
+                    variables.insert(
+                        base.to_string(),
+                        append_assoc_value(&current, &expanded_value, integer, variables),
+                    );
+                    mark_typed(variables, ASSOC_VARS, base);
+                } else {
+                    match append_array_value("()", &expanded_value, integer, variables) {
+                        Ok(storage) => {
+                            variables.insert(base.to_string(), storage);
+                            mark_typed(variables, ARRAY_VARS, base);
+                        }
+                        Err(pattern) => {
+                            writeln!(
+                                stderr,
+                                "{}no match: {pattern}",
+                                diagnostic_prefix(variables)
+                            )?;
+                            status = EXECUTION_FAILURE;
+                            deleted_names.insert(raw_target.to_string());
+                        }
+                    }
+                }
+                unmark_typed(variables, DECLARED_UNSET_VARS, base);
+                continue;
+            }
+            if paren_value
+                && !marked_vars(variables, ARRAY_VARS).contains(base)
+                && !marked_vars(variables, ASSOC_VARS).contains(base)
+                && !variables.get(base).is_some_and(|v| {
+                    v.starts_with('\x1d') || (v.starts_with('(') && v.ends_with(')'))
+                })
+            {
+                writeln!(
+                    stderr,
+                    "{}warning: {name}: quoted compound array assignment deprecated",
+                    diagnostic_prefix(variables)
+                )?;
+            }
             if assoc || marked_vars(variables, ASSOC_VARS).contains(base) {
                 if readonly.contains(base) {
                     writeln!(
@@ -151,7 +218,11 @@ where
                     let key =
                         crate::executor::arithmetic::decode_arithmetic_assoc_key(index_expression)
                             .unwrap_or_else(|| index_expression.to_string());
-                    let element = format!("([{}]={value})", super::storage::quote_assoc_key(&key));
+                    let element = format!(
+                        "([{}]={})",
+                        super::storage::quote_assoc_key(&key),
+                        quote_assoc_storage_value(value)
+                    );
                     variables.insert(
                         base.to_string(),
                         append_assoc_value(&current, &element, integer, variables),
@@ -187,58 +258,15 @@ where
                     // conversion below from seeding it at element 0.
                     variables.remove(base);
                 }
-                let array_exists = variables.get(base).is_some_and(|v| {
-                    v.starts_with('\x1d') || (v.starts_with('(') && v.ends_with(')'))
-                });
-                if !append_elem && value.starts_with('(') && value.ends_with(')') && array {
-                    // GNU declare.def:944,992: a parenthesized RHS on a
-                    // subscripted operand is a whole-array compound assign
-                    // only when creating_array (-a) is on; the subscript is
-                    // discarded (`declare -a b[1]='(z)'` -> [0]="z").
-                    // GNU arrayfunc.c:557 expand_compound_array_assignment:
-                    // re-parse and expand the compound value (array.tests:115
-                    // declare -a f='("${d[@]}")' expands d into f).
-                    let expanded_value = expand_compound_array_value(value, variables);
-                    match append_array_value("()", &expanded_value, integer, variables) {
-                        Ok(storage) => {
-                            variables.insert(base.to_string(), storage);
-                            mark_typed(variables, ARRAY_VARS, base);
-                            unmark_typed(variables, DECLARED_UNSET_VARS, base);
-                        }
-                        // GNU expand_compound_array_assignment aborts the
-                        // operand before bind: `declare -a g=(zzz-*)` under
-                        // failglob leaves g unset entirely, so the operand
-                        // must not reach the attribute pass either
-                        // (declare.def:1031-1034 deleted-name semantics).
-                        Err(pattern) => {
-                            writeln!(
-                                stderr,
-                                "{}no match: {pattern}",
-                                diagnostic_prefix(variables)
-                            )?;
-                            status = EXECUTION_FAILURE;
-                            deleted_names.insert(raw_target.to_string());
-                        }
-                    }
-                    continue;
-                }
-                if !append_elem
-                    && value.starts_with('(')
-                    && value.ends_with(')')
-                    && !array_exists
-                {
-                    // GNU declare.def:937-944 internal_warning: a quoted
-                    // `(…)` RHS on a subscripted operand whose target is
-                    // not yet an array (and without -a) warns, then binds
-                    // the literal text at the subscript below.
-                    writeln!(
-                        stderr,
-                        "{}warning: {raw_target}={value}: quoted compound array assignment deprecated",
-                        diagnostic_prefix(variables)
-                    )?;
-                }
                 let index = if index_expression.trim().is_empty() {
                     Some(0)
+                } else if index_expression
+                    == crate::executor::types::FAILED_SUBSCRIPT_SENTINEL
+                {
+                    // The executor's subscript pass already evaluated this
+                    // subscript and printed the diagnostic (declare.def:
+                    // assign_error after assign_array_element fails).
+                    None
                 } else {
                     eval_conditional_arith_value(index_expression, variables)
                         .and_then(|value| usize::try_from(value).ok())
@@ -283,6 +311,28 @@ where
                     mark_typed(variables, ARRAY_VARS, base);
                     continue;
                 }
+                // GNU declare.def:988-1011: VSETATTR applied the flags and
+                // the operand's `name[subscript]` made the variable an
+                // indexed array (making_array_special, declare.def:605 ->
+                // convert_var_to_array at 961) BEFORE assign_array_element
+                // evaluated the subscript — a bad subscript leaves the
+                // variable bound with its attributes (`declare -i
+                // a[$bad]=42` -> `declare -ai a=()`; an already
+                // declared-but-unset target keeps its null cell ->
+                // `declare -ai a`).
+                if !marked_vars(variables, ASSOC_VARS).contains(base) {
+                    mark_typed(variables, ARRAY_VARS, base);
+                    if !variables.contains_key(base)
+                        && !marked_vars(variables, DECLARED_UNSET_VARS).contains(base)
+                    {
+                        variables.insert(
+                            base.to_string(),
+                            format_indexed_array_storage(Default::default()),
+                        );
+                    }
+                }
+                status = EXECUTION_FAILURE;
+                continue;
             }
         }
         let (var_name, append) = var_name
@@ -550,9 +600,6 @@ where
             // literal scalar (nameref22.sub: declare array='(one two three)'
             // prints `declare -- array="(one two three)"`).
             let expanded_value = expand_compound_array_value(value, variables);
-            if std::env::var_os("RUBASH_DEBUG_CA").is_some() {
-                eprintln!("[CA] assign {var_name} value={value:?} -> {expanded_value:?}");
-            }
             match append_array_value("()", &expanded_value, false, variables) {
                 Ok(storage) => storage,
                 Err(pattern) => {
@@ -567,8 +614,33 @@ where
                 }
             }
         } else {
-            scalar_assign_to_array(var_name, value, variables)
-                .unwrap_or_else(|| value.to_string())
+
+            // GNU variables.c:3415-3422 assign_in_env (implicitarray): a
+            // scalar `name=value` operand whose target is already an array
+            // binds through bind_array_variable(lhs, 0, rhs) — element/key
+            // "0" is overwritten and every other element survives
+            // (array19.sub: `declare -l foo="$value"` keeps [1]/[2]).
+            if !append && !compound_marked {
+                let current = variables.get(var_name).cloned().unwrap_or_default();
+                if marked_vars(variables, ASSOC_VARS).contains(var_name) {
+                    let element = format!("([0]={})", quote_assoc_storage_value(value));
+                    append_assoc_value(&current, &element, integer, variables)
+                } else {
+                    let is_indexed = marked_vars(variables, ARRAY_VARS).contains(var_name)
+                        || current.starts_with('\x1d')
+                        || (current.starts_with('(') && current.ends_with(')'));
+                    if is_indexed {
+                        let mut entries = indexed_array_entries(&current);
+                        entries.insert(0, value.to_string());
+                        format_indexed_array_storage(entries)
+                    } else {
+                        value.to_string()
+                    }
+                }
+            } else {
+                value.to_string()
+            }
+
         };
         // GNU variables.c:3341-3358 bind_variable_value: an ASS_NAMEREF
         // assignment runs check_selfref on the RESULTING cell, so

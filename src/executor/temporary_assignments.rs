@@ -818,7 +818,22 @@ impl Executor {
                     // GNU assign_compound_array_list breaks on the failing
                     // element but keeps every element processed before it
                     // and materializes the array — store the partial list
-                    // rather than abandoning the assignment.
+                    // rather than abandoning the assignment. GNU
+                    // arrayfunc.c assign_array_var_from_string converts the
+                    // target to an array BEFORE the element loop runs, so a
+                    // failed element on a new target still leaves it bound
+                    // as `()` (array32.sub `b=( [$bad]=hi )`), while an
+                    // existing or declared-but-unset target keeps its prior
+                    // state.
+                    if !self.env_vars.contains_key(base_name)
+                        && !is_marked_var(&self.env_vars, DECLARED_UNSET_VARS, base_name)
+                    {
+                        self.env_vars.insert(
+                            base_name.to_string(),
+                            format_indexed_array_storage(BTreeMap::new()),
+                        );
+                        mark_env_name(&mut self.env_vars, ARRAY_VARS, base_name);
+                    }
                     let current = self
                         .env_vars
                         .get(base_name)
@@ -838,6 +853,7 @@ impl Executor {
                         .unwrap_or(current)
                     };
                     self.env_vars.insert(base_name.to_string(), stored);
+
                     self.exit_code = 1;
                     return false;
                 }

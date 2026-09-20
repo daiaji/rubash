@@ -489,8 +489,8 @@ impl Executor {
     fn strip_invalid_env_assignment_prefixes(&mut self, cmd: &CommandNode) -> CommandNode {
         // Find the run of leading array-style assignment words.
         let mut prefix_end = 0usize;
-        for word in &cmd.words {
-            if !is_array_element_assignment_word(word) {
+        for index in 0..cmd.words.len() {
+            if !command_word_is_array_element_assignment(cmd, index) {
                 break;
             }
             prefix_end += 1;

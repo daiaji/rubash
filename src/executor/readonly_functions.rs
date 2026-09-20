@@ -22,7 +22,6 @@ impl Executor {
         let args = match self.rewrite_declare_operand_subscripts(
             &cmd.words[1..],
             &cmd.word_metadata,
-            "readonly",
         ) {
             Ok(args) => args,
             Err(()) => return Ok(1),

@@ -729,6 +729,7 @@ impl Executor {
                             self.positional_params.clone()
                         }
                         QuotedPositionalAtSegment::ArrayAt(name, _) => self
+
                             .array_subscript_range_values(name, 0, None)
                             .unwrap_or_default(),
                         QuotedPositionalAtSegment::Literal { .. } => Vec::new(),
@@ -1147,6 +1148,7 @@ enum QuotedPositionalAtSegment {
     /// expand_word_internal). `quoted` carries the same split rule as
     /// `PositionalAt`.
     ArrayAt(String, bool),
+
 }
 
 fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegment>> {
@@ -1235,6 +1237,7 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                             false,
                         )?;
                         segments.push(QuotedPositionalAtSegment::ArrayAt(array_name, true));
+
                         saw_positional_at = true;
                         index = end + 1;
                         literal_start = index;
@@ -1295,6 +1298,7 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                                 false,
                             )?;
                             segments.push(QuotedPositionalAtSegment::PositionalAt(false));
+
                             saw_positional_at = true;
                             index = raw[..=close_byte].chars().count();
                             literal_start = index;
@@ -1312,6 +1316,7 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                                 segments.push(QuotedPositionalAtSegment::ArrayAt(
                                     array_name,
                                     false,
+
                                 ));
                                 saw_positional_at = true;
                                 index = raw[..=close_byte].chars().count();
@@ -1336,6 +1341,7 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                     false,
                 )?;
                 segments.push(QuotedPositionalAtSegment::PositionalAt(false));
+
                 saw_positional_at = true;
                 index += 2;
                 literal_start = index;
@@ -1353,6 +1359,7 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                 index += 1;
                 continue;
             }
+
             '\\' => {
                 index += 2;
                 continue;
@@ -1402,6 +1409,7 @@ fn quoted_body_positional_at_segments(body: &[char]) -> Option<Vec<QuotedPositio
                         if is_shell_name(&name) {
                             push_body_piece(&mut segments, &body[piece_start..index])?;
                             segments.push(QuotedPositionalAtSegment::ArrayAt(name, true));
+
                             saw_positional_at = true;
                             index += 2 + close + 1;
                             piece_start = index;
@@ -1524,6 +1532,7 @@ fn decode_protected_ifs_chars(text: &str) -> String {
 fn expand_quoted_positional_at_segments<F, R>(
     segments: &[QuotedPositionalAtSegment],
     ifs: Option<&str>,
+
     resolve_list: R,
     expand_literal: F,
 ) -> Vec<String>
@@ -1570,6 +1579,7 @@ where
                         segments.get(segment_index - 1),
                         Some(QuotedPositionalAtSegment::PositionalAt(_))
                             | Some(QuotedPositionalAtSegment::ArrayAt(..))
+
                     )
                 {
                     // Only an unquoted literal directly after $@ emulates the
@@ -1586,6 +1596,7 @@ where
             | QuotedPositionalAtSegment::ArrayAt(_, quoted) => {
                 saw_positional_at = true;
                 let mut values = resolve_list(segment);
+
                 if values.is_empty() {
                     continue;
                 }
@@ -1596,6 +1607,7 @@ where
                         *value = protect_ifs_field_chars(value, ifs);
                     }
                 }
+
                 current.push_str(&values[0]);
                 current_present = true;
 
@@ -1605,6 +1617,7 @@ where
                     current_has_quoted = *quoted;
                     for value in &values[1..values.len() - 1] {
                         words.push((value.clone(), *quoted));
+
                     }
                     current.push_str(&values[values.len() - 1]);
                 }

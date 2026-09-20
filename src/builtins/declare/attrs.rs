@@ -99,9 +99,6 @@ where
     // assignment, never to the variable name, so every attribute and the
     // variable creation land on the bare name (array.tests: `declare -a
     // e[10]=test` must not leave a variable literally named "e[10]").
-    if env::var_os("RUBASH_DEBUG_CA").is_some() {
-        eprintln!("[attr] names={names:?}");
-    }
     let attr_targets: Vec<(String, bool)> =
         names.iter().map(|name| attr_target_name(name)).collect();
     let attr_names_owned: Vec<String> = if !nameref && !unset_nameref {

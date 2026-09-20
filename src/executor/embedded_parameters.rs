@@ -106,12 +106,17 @@ impl Executor {
             }
 
             if ch == '\x17' {
-                output.push('\'');
+                // In preserve_quotes (compound RHS) the \x17 carrier is the
+                // CTLESC port for a data quote: it must survive into the
+                // storage word so split_storage_words does not re-read it as
+                // quote syntax (array6.sub: ("${a[@]/#/-iname \'}") stores
+                // `-iname 'abc`). unquote_storage_value decodes it.
+                output.push(if preserve_quotes { '\x17' } else { '\'' });
                 continue;
             }
 
             if ch == '\x18' {
-                output.push('"');
+                output.push(if preserve_quotes { '\x18' } else { '"' });
                 continue;
             }
             if ch == crate::lexer::ANSI_C_QUOTE_MARKER {

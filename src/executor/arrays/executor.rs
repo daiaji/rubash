@@ -624,7 +624,8 @@ impl Executor {
     ) -> Option<Vec<String>> {
         let inner = word
             .strip_prefix("${")
-            .and_then(|word| word.strip_suffix('}'))?;
+            .and_then(|word| word.strip_suffix('}'));
+        let inner = inner?;
 
         // array_modified_word_values only handles `name[@]`/`name[*]`
         // targets; validate that before expanding the pattern/replacement

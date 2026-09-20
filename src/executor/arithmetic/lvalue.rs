@@ -6,6 +6,13 @@ use crate::executor::{
 };
 use std::collections::HashSet;
 
+/// Outcome of `parse_assoc_subscript`: the resolved key, or an invalid
+/// `name[...]` token (unterminated quote/missing `]`).
+pub(super) enum ParsedAssocSubscript {
+    Key(String),
+    Invalid,
+}
+
 impl ConditionalArithParser<'_> {
     /// Parse an lvalue for an assignment target. GNU expr.c:1395-1401: the
     /// STR's value (and subscript) is evaluated at token time only when the
@@ -40,11 +47,21 @@ impl ConditionalArithParser<'_> {
         let resolved_name = self.resolved_lvalue_name(&name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
             // Associative arrays use the key verbatim; no deferred evaluation.
-            let key = self.parse_assoc_subscript(&resolved_name)?;
-            return Some(ArithLValue::Assoc {
-                name: resolved_name,
-                key,
-            });
+
+            match self.parse_assoc_subscript(&resolved_name)? {
+                ParsedAssocSubscript::Key(key) => {
+                    return Some(ArithLValue::Assoc {
+                        name: resolved_name,
+                        key,
+                    });
+                }
+                ParsedAssocSubscript::Invalid => {
+                    return Some(ArithLValue::InvalidElement {
+                        display: self.invalid_subscript_display(start),
+                    });
+                }
+            }
+
         }
 
         if self.peek() == Some(b']') {
@@ -142,11 +159,21 @@ impl ConditionalArithParser<'_> {
 
         let resolved_name = self.resolved_lvalue_name(&name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
-            let key = self.parse_assoc_subscript(&resolved_name)?;
-            return Some(ArithLValue::Assoc {
-                name: resolved_name,
-                key,
-            });
+
+            match self.parse_assoc_subscript(&resolved_name)? {
+                ParsedAssocSubscript::Key(key) => {
+                    return Some(ArithLValue::Assoc {
+                        name: resolved_name,
+                        key,
+                    });
+                }
+                ParsedAssocSubscript::Invalid => {
+                    return Some(ArithLValue::InvalidElement {
+                        display: self.invalid_subscript_display(start),
+                    });
+                }
+            }
+
         }
 
         if self.peek() == Some(b']') {
@@ -194,51 +221,89 @@ impl ConditionalArithParser<'_> {
         name.to_string()
     }
 
-    pub(super) fn parse_assoc_subscript(&mut self, name: &str) -> Option<String> {
+
+    /// The `name[...]` text GNU prints for an invalid subscript reference
+    /// (`a[80's]: bad array subscript`, `` `a[80's]': not a valid
+    /// identifier ``) — the STR token text: name through the first `]`,
+    /// or to the end of input when no `]` exists at all.
+    fn invalid_subscript_display(&self, start: usize) -> String {
+        let end = self.input[start..]
+            .iter()
+            .position(|&byte| byte == b']')
+            .map(|offset| start + offset + 1)
+            .unwrap_or(self.input.len());
+        String::from_utf8_lossy(&self.input[start..end]).into_owned()
+    }
+
+    /// Scan the assoc subscript after `name[` with flag-0
+    /// skip_matched_pair semantics (subst.c:2186): quotes, escapes and
+    /// nested brackets are structure, so a `]` inside `'...'`/`"..."` stays
+    /// data. An unterminated quote or missing close makes the whole
+    /// `name[...]` token invalid — `AssocSubscript::Invalid` carries the
+    /// lvalue text GNU prints in `bad array subscript` /
+    /// `not a valid identifier` diagnostics.
+    pub(super) fn parse_assoc_subscript(&mut self, name: &str) -> Option<ParsedAssocSubscript> {
+
         let start = self.pos;
         let mut depth = 0usize;
+        let mut single = false;
+        let mut double = false;
         while self.pos < self.input.len() {
             match self.input[self.pos] {
-                b'[' => {
+                b'\\' => {
+                    self.pos += 1;
+                }
+                b'\'' if !double => single = !single,
+                b'"' if !single => double = !double,
+                b'[' if !single && !double => {
                     depth += 1;
-                    self.pos += 1;
                 }
-                b']' if depth == 0 => {
-                    // The raw subscript is data: GNU expand_subscript_string
-                    // keeps IFS whitespace that surrounds or makes up the key
-                    // (`k=$'\t'; A[$k]=2` keys on the tab, and `A[ $k ]` keys
-                    // on ` x `), so it must not be trimmed away.
-                    let key = std::str::from_utf8(&self.input[start..self.pos])
-                        .ok()?
-                        .to_string();
-                    self.pos += 1;
-                    // A pre-expanded key (the Executor-side
-                    // expand_subscript_string pass) is already the final
-                    // string: use it verbatim and never expand it again.
-                    let key = match super::super::decode_arithmetic_assoc_key(&key) {
-                        Some(literal) => literal,
-                        None => self.expand_assoc_subscript_key(&key),
-                    };
-                    if key.is_empty() {
-                        // GNU array_variable_part (arrayfunc.c): an assoc
-                        // subscript whose expand_subscript_string result is
-                        // empty is a bad subscript — diagnosed once here and
-                        // once in get_array_value, so the read reports it
-                        // twice (`A[$k]` with k unset -> `A[]: bad array
-                        // subscript` x2), then the element reads as 0.
-                        self.diags.push(ArithEvalDiag::BadSubscript(format!("{name}[]")));
-                        self.diags.push(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+
+                b']' if !single && !double => {
+                    if depth == 0 {
+                        // The raw subscript is data: GNU expand_subscript_string
+                        // keeps IFS whitespace that surrounds or makes up the key
+                        // (`k=$'\t'; A[$k]=2` keys on the tab, and `A[ $k ]` keys
+                        // on ` x `), so it must not be trimmed away.
+                        let key = std::str::from_utf8(&self.input[start..self.pos])
+                            .ok()?
+                            .to_string();
+                        self.pos += 1;
+                        // A pre-expanded key (the Executor-side
+                        // expand_subscript_string pass) is already the final
+                        // string: use it verbatim and never expand it again.
+                        let key = match super::super::decode_arithmetic_assoc_key(&key)
+                        {
+                            Some(literal) => literal,
+                            None => self.expand_assoc_subscript_key(&key),
+                        };
+                        if key.is_empty() {
+                            // GNU array_variable_part (arrayfunc.c): an
+                            // assoc subscript whose expand_subscript_string
+                            // result is empty is a bad subscript — diagnosed
+                            // once here and once in get_array_value, so the
+                            // read reports it twice (`A[$k]` with k unset ->
+                            // `A[]: bad array subscript` x2), then the
+                            // element reads as 0.
+                            self.diags
+                                .push(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+                            self.diags
+                                .push(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+                        }
+                        return Some(ParsedAssocSubscript::Key(key));
                     }
-                    return Some(key);
-                }
-                b']' => {
+
                     depth -= 1;
-                    self.pos += 1;
                 }
-                _ => self.pos += 1,
+                _ => {}
             }
+            self.pos += 1;
         }
-        None
+        // Unterminated quote or missing `]` (subst.c:2186 skipsubscript
+        // flag-0): the whole `name[...]` token is not an array reference —
+        // `a[80's]` reports `a[80's]: bad array subscript` on read and
+        // `` `a[80's]': not a valid identifier `` on write.
+        Some(ParsedAssocSubscript::Invalid)
     }
 
     pub(super) fn expand_assoc_subscript_key(&self, key: &str) -> String {

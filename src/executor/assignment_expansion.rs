@@ -1672,7 +1672,7 @@ impl Executor {
 /// quoted space (`("a b"` hoisted to `(\u{E102}a b\u{E102}`) stays inside its
 /// token. Tokens keep every character verbatim; only unquoted whitespace
 /// separates elements.
-fn split_compound_element_words(value: &str) -> Vec<String> {
+pub(in crate::executor) fn split_compound_element_words(value: &str) -> Vec<String> {
     const DQ_DATA: char = '\u{E102}';
     // The hoisted single-quote sentinel (expand_assignment_value_hoisting):
     // `'q k'` arrives as E107 q k E107 and must still count as ONE element

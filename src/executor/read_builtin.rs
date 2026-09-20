@@ -3,21 +3,36 @@ use super::*;
 const READ_USAGE: &str =
     "read: usage: read [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]";
 
-/// GNU read.def:405/1037/1090: `read` accepts a name that is either a
-/// valid identifier or a valid array reference `name[subscript]`
-/// (array.tests:80 `read x[1]`). The subscript check is
-/// tokenize_array_reference (arrayfunc.c:1288): without
-/// array_expand_once it runs the arithmetic scan, so `a[80's]` is
-/// rejected as `not a valid identifier` even when `a` is associative.
+
+/// GNU read.def:405: `read` accepts a name that is either a valid identifier
+/// or a valid array reference `name[subscript]` (array.tests:80 `read x[1]`).
+/// The array-reference check is `valid_array_reference(name, arrayflags)`
+/// (arrayfunc.c:1350 -> tokenize_array_reference arrayfunc.c:1288) with the
+/// `SET_VFLAGS` flag set (builtins/common.h:279): `VA_NOEXPAND` follows
+/// `array_expand_once`; `VA_ONEWORD` is added only when the option is on
+/// AND the raw word carried `W_ARRAYREF` (execute_cmd.c:4370). The double
+/// flag set takes the LAST `]` for an assoc (`read "A[]]"` keys on `]`),
+/// `VA_NOEXPAND` alone takes the first (`read 'a[80's]'` keys on `80's`
+/// but `A[]]` is invalid), and flag-0 runs the quote-aware matched-pair
+/// scan (`read a[80's]` reports not-a-valid-identifier).
 fn is_valid_read_name(
     name: &str,
-    env_vars: &HashMap<String, String>,
     w_arrayref: bool,
+    env_vars: &HashMap<String, String>,
+
 ) -> bool {
     if is_shell_name(name) {
         return true;
     }
-    crate::builtins::arrayref::valid_array_reference_for_env(name, env_vars, w_arrayref)
+
+    let expand_once = crate::builtins::shopt::option_enabled(env_vars, "array_expand_once");
+    crate::executor::subscript_expansion::valid_array_reference_env(
+        name,
+        expand_once,
+        expand_once && w_arrayref,
+        env_vars,
+    )
+
 }
 
 impl Executor {
@@ -72,16 +87,20 @@ impl Executor {
                             index += 1;
                             continue;
                         }
-                        let (w_arrayref, name) =
-                            crate::builtins::arrayref::take_arrayref_flag(&cmd.words[index]);
-                        if is_valid_read_name(name, &self.env_vars, w_arrayref) {
-                            scalar_names.push(name.to_string());
+
+                        if is_valid_read_name(
+                            &cmd.words[index],
+                            self.word_is_arrayref(cmd, index),
+                            &self.env_vars,
+                        ) {
+                            scalar_names.push(cmd.words[index].clone());
+
                             scalar_field_count += 1;
                         } else {
                             report_read_invalid_identifier(
                                 &mut stderr,
                                 &self.diagnostic_prefix(),
-                                name,
+                                &cmd.words[index],
                             );
                             invalid_name = true;
                             scalar_field_count += 1;
@@ -1820,16 +1839,16 @@ impl Executor {
                     return self.finish_read_error(cmd, &stderr, 2);
                 }
                 word if !stop_scalar_names => {
-                    let (w_arrayref, name) =
-                        crate::builtins::arrayref::take_arrayref_flag(word);
-                    if is_valid_read_name(name, &self.env_vars, w_arrayref) {
-                        scalar_names.push(name.to_string());
+
+                    if is_valid_read_name(word, self.word_is_arrayref(cmd, index), &self.env_vars) {
+                        scalar_names.push(word.to_string());
+
                         scalar_field_count += 1;
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
                             &self.diagnostic_prefix(),
-                            name,
+                            word,
                         );
                         invalid_name = true;
                         scalar_field_count += 1;

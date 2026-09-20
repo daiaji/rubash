@@ -137,7 +137,7 @@ impl std::io::Write for WriteFileStderr {
 
 mod shift_echo_builtins;
 mod source_type_state;
-mod subscript_expansion;
+pub(crate) mod subscript_expansion;
 pub(in crate::executor) use subscript_expansion::{
     IndexedSubscript, OperandSubscriptMode, SubscriptSource,
 };
@@ -526,7 +526,6 @@ pub struct Executor {
     /// A `[sub]=` element inside a `declare -aA name=(...)` operand failed
     /// err_badarraysub — GNU assign_compound_array_list stores the elements
     /// processed before the break and still fails the command (any_failed).
-    declare_compound_element_failed: Cell<bool>,
     arithmetic_fatal_error: Cell<bool>,
     /// `set -u` unbound-variable error raised during arithmetic evaluation.
     /// A Cell because word-expansion paths hold `&self` (GNU expr.c raises

@@ -73,7 +73,12 @@ pub(in crate::executor) fn parse_indirect_pattern_removal(
         ("%", PatternRemoval::ShortestSuffix),
     ] {
         if let Some((left, pattern)) = name.split_once(operator) {
-            if !left.is_empty() {
+            // A `/` in the left operand means this is actually a
+            // `${var/pat/repl}` pattern substitution whose pattern begins
+            // with the `#`/`%` anchor (GNU subst.c pat_subst reads `#`/`%`
+            // after `/` as the match-anchor, not a removal operator):
+            // `${a[@]/#/x}` prepends `x`, it does not remove a prefix.
+            if !left.is_empty() && !left.contains('/') {
                 return Some((left, pattern, operation));
             }
         }

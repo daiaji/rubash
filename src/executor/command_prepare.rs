@@ -225,9 +225,6 @@ impl Executor {
         }
         let mut status = 0;
         for (name, value) in &cmd.assignments {
-            if std::env::var("RUBASH_DEBUG_ASSIGN").is_ok() {
-                eprintln!("EMPTY-ASSIGN {name}={value:?}");
-            }
             let assignment_result = self.expand_assignment_value_result(name, value);
             // GNU subst.c:10277-10288: a bad substitution raised while
             // expanding the assignment RHS is an expand_word_error. The
@@ -469,6 +466,24 @@ impl Executor {
                     "declare" | "typeset" | "local" | "export" | "readonly"
                 )
             })
+            // GNU execute_cmd.c:4366-4401 fix_arrayref_words marks every
+            // syntactic array-reference word W_ARRAYREF before execution;
+            // unset.def consumes it via builtin_arrayref_flags
+            // (builtins/common.c:1040 → VA_ONEWORD|VA_NOEXPAND), so the
+            // element subscript binds verbatim. `unset dict["'"]` and
+            // `unset 'dict[']'` expand to identical text; only the raw
+            // token distinguishes a valid reference from an invalid one.
+            || cmd.words.first().is_some_and(|word| word == "unset")
+            // `wait -p NAME` shares the same W_ARRAYREF consumption:
+            // wait.def:156 SET_VFLAGS reads it from the operand word's raw
+            // token to decide VA_NOEXPAND|VA_ONEWORD on the bound element.
+            || cmd.words.first().is_some_and(|word| word == "wait")
+            // `read NAME`/`printf -v NAME` likewise consume W_ARRAYREF via
+            // SET_VFLAGS (read.def:405, printf.def:305): VA_ONEWORD only
+            // attaches when array_expand_once is on AND the operand's raw
+            // token was a syntactic array reference, which the expanded
+            // text cannot recover.
+            || cmd.words.first().is_some_and(|word| word == "read" || word == "printf")
             || !cmd.process_substitutions.is_empty()
             || cmd.word_metadata.iter().any(|metadata| {
                 !metadata.process_substitutions.is_empty()

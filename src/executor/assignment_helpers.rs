@@ -61,9 +61,6 @@ pub(in crate::executor) fn append_assoc_value(
     };
     let mut entries = assoc_entries(current);
     let tokens = merge_assoc_subscript_tokens(array_assignment_tokens(value));
-    if std::env::var_os("RUBASH_DEBUG_AEA").is_some() {
-        eprintln!("[append-assoc] value={value:?} tokens={tokens:?}");
-    }
     // GNU arrayfunc.c kvpair_assignment_p: the FIRST compound word decides
     // the mode — kvpair (alternating pairs) requires the first word to NOT
     // start with `[` (assoc-kv2 probe M2: a=(a=b c=d) stores [a=b]="c=d").

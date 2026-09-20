@@ -103,18 +103,12 @@ where
     W: Write,
     E: Write,
 {
-    // W_ARRAYREF (in-band ARRAYREF_FLAG) rides on operand words for the
-    // `-v` target check (printf.def:305 SET_VFLAGS); it is invisible in
-    // every other position (format/arguments), so strip it off the text
-    // while keeping a parallel flag vector for the -v validation below.
-    let mut w_arrayref: Vec<bool> = Vec::new();
+    // W_ARRAYREF (in-band ARRAYREF_FLAG) is consumed by the executor's
+    // SET_VFLAGS pre-pass (printf.def:305); strip any surviving prefix off
+    // the operand text so it never leaks into format/arguments.
     let stripped_args: Vec<String> = args
         .into_iter()
-        .map(|arg| {
-            let (marked, text) = crate::builtins::arrayref::take_arrayref_flag(arg);
-            w_arrayref.push(marked);
-            text.to_string()
-        })
+        .map(|arg| crate::builtins::arrayref::take_arrayref_flag(arg).1.to_string())
         .collect();
     let args: Vec<&str> = stripped_args.iter().map(String::as_str).collect();
     let mut output_var = None;
@@ -164,11 +158,7 @@ where
         };
 
         if let Some(name) = name {
-            // GNU printf.def:305 SET_VFLAGS: the operand's W_ARRAYREF flag
-            // (in-band ARRAYREF_FLAG prefix — arrayref.rs) only upgrades
-            // the reference check to VA_ONEWORD under array_expand_once.
-            let w_arrayref = w_arrayref.get(index - 1).copied().unwrap_or(false);
-            if !valid_identifier(name) && !valid_printf_array_target(name, env_vars, w_arrayref) {
+            if !valid_identifier(name) && !valid_printf_array_target(name, env_vars) {
                 // GNU prints the expanded operand text; decode the
                 // marker-encoded assoc key the executor delivered so the
                 // diagnostic names `a[80's]`, not its carrier bytes.
@@ -248,32 +238,29 @@ fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
     "rubash: ".to_string()
 }
 
-fn valid_printf_array_target(
-    name: &str,
-    env_vars: &HashMap<String, String>,
-    w_arrayref: bool,
-) -> bool {
+
+fn valid_printf_array_target(name: &str, env_vars: &HashMap<String, String>) -> bool {
+    // GNU printf.def:305: valid_array_reference(vname, arrayflags) with the
+    // VA_NOEXPAND flags SET_VFLAGS derives from array_expand_once
+    // (builtins/common.h:279) — a malformed quoted subscript (`a[80's]`)
+    // is not a valid identifier under the flag-0 matched-pair scan. The
+    // executor pre-pass already applied the SET_VFLAGS W_ARRAYREF half and
+    // rewrote the operand to its normalized `name[index]`/`name[\x1e..]`
+    // form, which the flag-0 scan validates (VA_ONEWORD never applies to
+    // the rewritten carrier text).
+    let noexpand = crate::builtins::shopt::option_enabled(env_vars, "array_expand_once");
+    if !crate::executor::subscript_expansion::valid_array_reference_env(
+        name, noexpand, false, env_vars,
+    ) {
+        return false;
+    }
+
     let Some((base, subscript)) = parse_printf_array_target(name) else {
         return false;
     };
-    // GNU printf.def:306 -> valid_array_reference (arrayfunc.c:1288): the
-    // assoc lookup only happens under VA_NOEXPAND (array_expand_once);
-    // without it the arithmetic subscript scan rejects `a[80's]`
-    // (assoc9.sub `printf -v a[$b]` -> `not a valid identifier`). The
-    // executor delivers assoc keys marker-encoded; validity is decided on
-    // the decoded key text GNU would have scanned.
     if is_marked(env_vars, "__RUBASH_ASSOC_VARS", base) {
-        let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(subscript)
-            .unwrap_or_else(|| subscript.to_string());
-        let decoded = format!("{base}[{key}]");
-        return crate::builtins::arrayref::valid_array_reference_for_env(
-            &decoded, env_vars, w_arrayref,
-        );
+        return true;
     }
-    // GNU arrayfunc.c:1310-1317: a marked (W_ARRAYREF) operand under
-    // array_expand_once takes the VA_ONEWORD branch for assoc bases only;
-    // for an indexed base the operand still has to pass the arithmetic
-    // subscript scan — resolve it the same way.
     resolve_printf_indexed_subscript(env_vars, base, subscript).is_some()
 }
 

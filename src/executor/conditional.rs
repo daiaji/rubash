@@ -88,22 +88,24 @@ impl Executor {
             // expected" and the evalerror discards the rest of the command
             // list (rewrite_conditional_v_operand raises it).
             [op, operand, end] if op == "-v" && end == "]]" => {
-                match self.conditional_dash_v(operand) {
+                match self.conditional_dash_v(operand, None) {
                     Ok(set) => i32::from(!set),
                     Err(()) => 1,
                 }
             }
-            [op, operand] if op == "-v" => match self.conditional_dash_v(operand) {
+            [op, operand] if op == "-v" => match self.conditional_dash_v(operand, None) {
                 Ok(set) => i32::from(!set),
                 Err(()) => 1,
             },
             [op, operand, end] if op == "-R" && end == "]]" => {
-                let expanded = self.expand_word_mut(operand);
-                i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, &expanded))
+
+                let name = self.expand_word_mut(operand);
+                i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, &name))
             }
             [op, operand] if op == "-R" => {
-                let expanded = self.expand_word_mut(operand);
-                i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, &expanded))
+                let name = self.expand_word_mut(operand);
+                i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, &name))
+
             }
             [op, operand, end] if op == "-o" && end == "]]" => {
                 i32::from(!self.conditional_shell_option_unary(operand))
@@ -226,6 +228,21 @@ impl Executor {
                     .conditional_status_with_metadata(rest, &metadata[1..])
                     .unwrap_or_else(|| self.execute_conditional(rest));
                 return Some(i32::from(status == 0));
+            }
+        }
+
+        // `[[ -v name[sub] ]]`: TEST_ARRAYEXP needs the raw operand token —
+        // the cooked args collapse `'name[$k]'` and `name[\$k]` to the same
+        // carrier text, but GNU's flag-1 valid_array_reference sees the real
+        // quotes (execute_cmd.c:4015-4027).
+        if let [op, operand, ..] = args {
+            if op == "-v" && (args.len() == 2 || args.get(2).is_some_and(|end| end == "]]")) {
+                let raw = metadata.get(1).map(|entry| entry.raw.as_str());
+                let status = match self.conditional_dash_v(operand, raw) {
+                    Ok(set) => i32::from(!set),
+                    Err(()) => 1,
+                };
+                return Some(status);
             }
         }
 
@@ -377,14 +394,25 @@ impl Executor {
         }
         output
     }
-    /// GNU cond.c `[[ -v name[sub] ]]`: the operand's subscript is consumed
-    /// verbatim after the conditional word expansion (Protected) — a
-    /// surviving `$name`/`$(...)` fails "operand expected" and the evalerror
-    /// discards the rest of the command list. Err(()) means the diagnostic
-    /// was already printed.
-    fn conditional_dash_v(&mut self, operand: &str) -> Result<bool, ()> {
-        let operand = self.expand_word_mut(operand);
-        let rewritten = self.rewrite_conditional_v_operand(&operand)?;
+
+    /// GNU `[[ -v name[sub] ]]` (execute_cmd.c:4008-4031): `varflag` runs
+    /// `valid_array_reference(raw_word, VA_NOEXPAND)` — flag-1 — on the RAW
+    /// operand token, so `'name[$k]'` is NOT TEST_ARRAYEXP (the `[` sits
+    /// inside quotes and `'name` fails the name check) while `name[$k]` is.
+    /// `raw` is the parser's raw operand token; nested `execute_conditional`
+    /// fallback callers pass None and the check runs on the quote-carrier
+    /// operand text instead. Err(()) means the diagnostic was already
+    /// printed (evalerror abort).
+    fn conditional_dash_v(&mut self, operand: &str, raw: Option<&str>) -> Result<bool, ()> {
+        let arrayref = crate::executor::subscript_expansion::valid_array_reference_env(
+            raw.unwrap_or(operand),
+            true,
+            false,
+            &self.env_vars,
+        );
+        let cooked = self.expand_word_mut(operand);
+        let rewritten = self.rewrite_conditional_v_operand(&cooked, arrayref)?;
+
         Ok(crate::builtins::test::variable_is_set(
             &rewritten,
             &self.env_vars,
@@ -589,16 +617,10 @@ impl Executor {
         op: &str,
         right: &str,
     ) -> i32 {
-        // GNU subst.c:11395-11404 expand_array_subscript: under Q_ARITH a
-        // `name[sub]` operand expands the subscript once and backslash-quotes
-        // the expansion products (abstab: [] $ ` ~ \ ' "), so a `]`/`~`/`$(`
-        // produced by `$key` never re-lexes as subscript syntax — `assoc[]]`
-        // resolves key `]`. Encoding the key to its opaque marker form here
-        // gives the evaluator the same "expanded once, then protected" text.
-        let left_encoded = self.expand_arithmetic_assoc_subscripts(left, false);
-        let right_encoded = self.expand_arithmetic_assoc_subscripts(right, false);
-        let left_expanded = self.expand_word_mut(&left_encoded);
-        let right_expanded = self.expand_word_mut(&right_encoded);
+
+        let left_expanded = self.expand_word_mut(left);
+        let right_expanded = self.expand_word_mut(right);
+
         // GNU execute_cmd.c:4049-4068 -> test.c:357-372 arithcomp -> evalexp:
         // the operands were word-expanded by cond_expand_word (mode 3,
         // Q_ARITH). Under compat>51 arithcomp passes eflag=0, so

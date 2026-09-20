@@ -51,6 +51,13 @@ pub const COMPOUND_ASSIGNMENT_MARKER: &str = "__RUBASH_CA1__";
 /// ORIGINAL syntax characters there — real `$`, `"`, backtick, `\`, `'` —
 /// unlike escape-produced carriers elsewhere in an operand, which are data.
 pub const DEFERRED_COMPOUND_BODY: char = '\u{3}';
+/// GNU declare.def:988-1011: an operand subscript whose evaluation already
+/// failed (diagnostic printed by the subscript evaluator) is carried to the
+/// declare-family builtin under this sentinel so it binds the variable with
+/// its attributes — `convert_var_to_array` and VSETATTR run before
+/// assign_array_element — without re-evaluating (which would double-print
+/// the `operand expected` diagnostic).
+pub const FAILED_SUBSCRIPT_SENTINEL: &str = "\u{E10A}";
 pub const ARRAY_FIELD_SPLIT_MARKER: char = '';
 pub const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str =
     "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";

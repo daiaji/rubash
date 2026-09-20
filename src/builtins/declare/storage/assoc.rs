@@ -291,7 +291,7 @@ pub(in crate::builtins::declare) fn quote_assoc_key(key: &str) -> String {
     quote_assoc_storage_value_forced(key)
 }
 
-fn quote_assoc_storage_value(value: &str) -> String {
+pub(in crate::builtins::declare) fn quote_assoc_storage_value(value: &str) -> String {
     if value.contains(['\n', '\r', '\'']) {
         return super::quote_declare_value(value);
     }

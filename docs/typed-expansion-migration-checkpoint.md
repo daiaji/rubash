@@ -97,3 +97,28 @@ Immutable backtick audit (2026-08-24): expand_backtick_substitution_typed is cur
 ## Recursion Rules
 
 Read this checkpoint before changing the next owner. Do not modify third_party/bash. Do not run unbounded full suites. Keep artifacts under target/issue-suites/results. Run git diff --check, cargo check, and the smallest relevant focused tests before each commit. Check for residual rubash.exe, bash.exe, cargo.exe, and suite runners before closing a testing turn. Never claim completion while a persistent failure or intentional legacy boundary remains.
+
+## 2026-09-20 merge: carrier inventory under the no-new-marker rule
+
+Boundary rule in force since the `fix/array6-patsub-quotes` merge: no new
+sentinel bytes, PUA code points, or named marker strings; existing markers may
+only gain collision fixes and missing consumers — never new domains.
+
+Carriers merged in this round, queued for typed-carrier migration:
+
+- `FAILED_SUBSCRIPT_SENTINEL` (`\u{E10A}`, origin/master `4883ad0b`,
+  `src/executor/types.rs`): carries "declare operand subscript already failed
+  and was diagnosed" from `rewrite_declare_operand_subscripts` to
+  `assign_declare_names`. Replace with a typed operand field
+  (e.g. `DeclareOperand::FailedSubscript`).
+- `DEFERRED_COMPOUND_BODY` (`\u{3}`, branch `802f8382`): marks a
+  whole-single-quoted `( ... )` declare operand whose carriers stand for
+  syntax characters. Master's `sq_raw_inner` recovery via `word_metadata.raw`
+  covers the primary path; the marker remains as the metadata-absent
+  fallback decode arm. Migrate both to a word-flag on the operand.
+- `PREEXPANDED_STDIN_BODY` (`\x05`) collision fix: raw `\x05` heredoc bytes
+  are now encoded as RAW_BYTE marker pairs at collection and decoded at
+  expansion/readback boundaries — collision fix only, no domain expansion.
+- `QuotedPositionalAtSegment` quote-provenance + `\x1c` IFS-char protection
+  (branch `26e58c7d`): `\x1c` is the existing CTLESC-protection carrier; the
+  `quoted` payload on the segment enum is typed metadata, not a new marker.
