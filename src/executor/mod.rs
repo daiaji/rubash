@@ -649,6 +649,12 @@ pub struct Executor {
     /// GNU dropping PF_ASSIGNRHS across a nested substitution boundary.
     pub(crate) inside_assignment_rhs: Cell<bool>,
     last_command_substitution_status: Cell<Option<i32>>,
+    /// GNU subst.c:7143 command_substitute forks sharing fd 0, so input the
+    /// substitution body consumed must advance the caller's FUNCTION_STDIN
+    /// cursor. The substitution runs on `&self`; stash the child's final
+    /// cursor plus a fingerprint of the shared buffer and apply it lazily at
+    /// the next `&mut self` stdin consumer.
+    comsub_stdin_writeback: Cell<Option<(usize, u64)>>,
     /// Tracks the source of the last heredoc EOF warning emitted from
     /// command_substitution_heredoc_output_mut_typed, to avoid duplicate
     /// warnings when the same comsub is expanded through multiple paths

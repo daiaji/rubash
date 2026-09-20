@@ -150,6 +150,12 @@ impl<'a> Lexer<'a> {
             let in_array_value = array_assignment && array_value_paren_depth > 0;
             if " \t\n|&;<>(){}".contains(c)
                 && c != '}'
+                // GNU parse.y:5494-5524 read_token_word shellexp()
+                // (syntax.h:84): a `<`/`>` immediately followed by `(` is a
+                // process substitution and part of the word — the `(...)`
+                // body is consumed as substitution text, so
+                // `index[7<(4+2)]` inside `[[ ]]` stays one word.
+                && !(matches!(c, '<' | '>') && self.peek_after(1) == Some('('))
                 && !(array_assignment && array_subscript_depth > 0 && c.is_ascii_whitespace())
                 && !(in_array_value && c.is_ascii_whitespace())
                 && !(in_array_value && matches!(c, '(' | ')'))
@@ -261,6 +267,14 @@ impl<'a> Lexer<'a> {
                 '[' if array_assignment => {
                     self.advance();
                     array_subscript_depth += 1;
+                    extglob_operator = false;
+                }
+                '<' | '>' if self.peek_after(1) == Some('(') => {
+                    // GNU parse.y:5514-5524: `<(`/`>(` mid-word — parse_comsub
+                    // reads the `(list)` body into the same token.
+                    self.advance();
+                    self.advance();
+                    self.skip_cmd_subst();
                     extglob_operator = false;
                 }
                 ']' if array_assignment && array_subscript_depth > 0 => {

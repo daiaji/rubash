@@ -324,6 +324,119 @@ impl Executor {
             // indirect references keep today's join-and-split path.
             if quoted_positional_word {
                 if let Some(indirect) = name.strip_prefix('!') {
+                    // GNU subst.c parameter_brace_expand_indir +
+                    // parameter_brace_transform: `${!X@T}` / `${!X[@]@T}` /
+                    // `${!X[*]@T}` resolve the indirection to a LIST when the
+                    // target is `arr[@]`/`arr[*]` (or, for `${!arr[@]@T}` on
+                    // an array, its keys — arrayfunc.c array_keys), then the
+                    // @T transform applies to each element (list_transform).
+                    if let Some((ref_name, transform)) = parse_parameter_transform(name) {
+                        if let Some(ind) = ref_name.strip_prefix('!') {
+                            let subscripted = ind
+                                .strip_suffix("[@]")
+                                .map(|base| (base, false))
+                                .or_else(|| ind.strip_suffix("[*]").map(|base| (base, true)));
+                            let resolved_list: Option<(Vec<String>, bool)> = (|| {
+                                if let Some((base, starred)) = subscripted {
+                                    let resolved = self.resolved_variable_name(base)?;
+                                    let is_assoc =
+                                        is_marked_var(&self.env_vars, ASSOC_VARS, &resolved);
+                                    let is_array = is_assoc
+                                        || is_marked_array_var(&self.env_vars, &resolved)
+                                        || self
+                                            .env_vars
+                                            .get(&resolved)
+                                            .is_some_and(|value| is_array_storage(value));
+                                    if is_array {
+                                        let storage = self.env_vars.get(&resolved)?;
+                                        let keys = if is_assoc {
+                                            assoc_keys(
+                                                storage,
+                                                assoc_nbuckets(&self.env_vars, &resolved),
+                                            )
+                                        } else {
+                                            array_indices(storage)
+                                        };
+                                        return Some((keys, starred));
+                                    }
+                                    // Scalar X with [@]/[*]: the subscript
+                                    // collapses to X[0] (array_variable on a
+                                    // non-array yields element 0), so the
+                                    // indirection target is X's value.
+                                    let target = self.env_vars.get(&resolved)?;
+                                    let arr = target
+                                        .strip_suffix("[@]")
+                                        .map(|a| (a, false))
+                                        .or_else(|| {
+                                            target
+                                                .strip_suffix("[*]")
+                                                .map(|a| (a, true))
+                                        })?;
+                                    let resolved_arr =
+                                        self.resolved_variable_name(arr.0)?;
+                                    let storage = self.env_vars.get(&resolved_arr)?;
+                                    let values = if is_marked_var(
+                                        &self.env_vars,
+                                        ASSOC_VARS,
+                                        &resolved_arr,
+                                    ) {
+                                        assoc_hash_ordered_values(
+                                            storage,
+                                            assoc_nbuckets(&self.env_vars, &resolved_arr),
+                                        )
+                                    } else {
+                                        array_values(storage)
+                                    };
+                                    Some((values, arr.1))
+                                } else {
+                                    // `${!X@T}` — indirection target is X's
+                                    // value; a `arr[@]`/`arr[*]` target
+                                    // expands to the element list.
+                                    let resolved = self.resolved_variable_name(ind)?;
+                                    let target = self.env_vars.get(&resolved)?;
+                                    let arr = target
+                                        .strip_suffix("[@]")
+                                        .map(|a| (a, false))
+                                        .or_else(|| {
+                                            target
+                                                .strip_suffix("[*]")
+                                                .map(|a| (a, true))
+                                        })?;
+                                    let resolved_arr =
+                                        self.resolved_variable_name(arr.0)?;
+                                    let storage = self.env_vars.get(&resolved_arr)?;
+                                    let values = if is_marked_var(
+                                        &self.env_vars,
+                                        ASSOC_VARS,
+                                        &resolved_arr,
+                                    ) {
+                                        assoc_hash_ordered_values(
+                                            storage,
+                                            assoc_nbuckets(&self.env_vars, &resolved_arr),
+                                        )
+                                    } else {
+                                        array_values(storage)
+                                    };
+                                    Some((values, arr.1))
+                                }
+                            })();
+                            if let Some((elements, starred)) = resolved_list {
+                                let transformed = elements
+                                    .iter()
+                                    .map(|value| {
+                                        self.apply_parameter_transform_value(value, transform)
+                                    })
+                                    .collect::<Vec<_>>();
+                                if starred {
+                                    // Quoted `*` joins with IFS[0]
+                                    // (string_list_pos_params dollar_star).
+                                    return Some(vec![transformed
+                                        .join(&self.ifs_first_char_separator())]);
+                                }
+                                return Some(transformed);
+                            }
+                        }
+                    }
                     if indirect == "@" {
                         return Some(self.positional_params.clone());
                     }
@@ -752,9 +865,16 @@ impl Executor {
         );
 
         self.apply_child_environment(&mut process);
+        // GNU subst.c:7143 command_substitute forks sharing the parent's
+        // fd 0: feed the child the unread tail of FUNCTION_STDIN and, after
+        // it runs, drain the caller's cursor to EOF.
+        let mut piped_stdin: Option<Vec<u8>> = None;
         if let Some(stdin_path) = stdio.stdin_path {
             let file = File::open(stdin_path).ok()?;
             process.stdin(Stdio::from(file));
+        } else if let Some(input) = self.function_stdin_remaining() {
+            process.stdin(Stdio::piped());
+            piped_stdin = Some(input.into_bytes());
         }
         if let Some(redirect) = &stdio.stdout_redirect {
             let file = open_command_substitution_redirect(redirect).ok()?;
@@ -768,7 +888,22 @@ impl Executor {
         } else {
             process.stderr(Stdio::piped());
         }
-        let output = process.spawn().ok()?.wait_with_output().ok()?;
+        let mut spawned = process.spawn().ok()?;
+        if let Some(input) = piped_stdin.as_deref() {
+            if let Some(mut child_stdin) = spawned.stdin.take() {
+                use std::io::Write;
+                let _ = child_stdin.write_all(input);
+            }
+        }
+        let output = spawned.wait_with_output().ok()?;
+        if piped_stdin.is_some() {
+            if let Some(text) = self.env_vars.get(FUNCTION_STDIN) {
+                self.comsub_stdin_writeback.set(Some((
+                    text.len(),
+                    Self::function_stdin_fingerprint(text),
+                )));
+            }
+        }
         let status = output.status.code().unwrap_or(1);
         if stdio.expanded_words.first().map(String::as_str) == Some("mktemp")
             && status != 0

@@ -67,9 +67,25 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| target_expr.strip_suffix("[*]"))
         {
+            let resolved = self
+                .resolved_variable_name(array_name)
+                .unwrap_or_else(|| array_name.to_string());
             return self
                 .parameter_array_storage(array_name)
-                .map(|value| array_values(&value))
+                .map(|value| {
+                    if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+                        // GNU assoc_reference iterates the hash table in
+                        // bucket order (hashlib.c), not storage order —
+                        // `${!aref}` with aref=`assoc[@]` must match
+                        // `${assoc[@]}` (quotearray4.sub).
+                        assoc_hash_ordered_values(
+                            &value,
+                            assoc_nbuckets(&self.env_vars, &resolved),
+                        )
+                    } else {
+                        array_values(&value)
+                    }
+                })
                 .unwrap_or_default();
         }
 
@@ -138,21 +154,16 @@ impl Executor {
                 Some('#') => output.push_str(&self.prompt_command_number().to_string()),
                 Some('$') => output.push(prompt_dollar(&self.env_vars)),
                 Some('\\') => output.push('\\'),
-                Some('[') | Some(']') => {
+                Some(marker @ ('[' | ']')) => {
                     // GNU parse.y:6609-6622: \[ and \] emit the readline
                     // prompt-ignore markers (RL_PROMPT_START/END_IGNORE) only
                     // when the line editor is active; with no_line_editing (a
                     // script without `set -o emacs`/`vi`) they are dropped
-                    // entirely. A marker equal to CTLESC (0x01) carries a
-                    // CTLESC prefix exactly as GNU does, so the pair dequote
-                    // downstream yields the single marker byte.
+                    // entirely.
                     if crate::builtins::set::shell_option_enabled(&self.env_vars, "emacs")
                         || crate::builtins::set::shell_option_enabled(&self.env_vars, "vi")
                     {
-                        // The marker bytes pass through the word carrier as
-                        //-is when followed by non-marker bytes, matching how
-                        // the octal \001 escape already renders through @P.
-                        output.push(if ch == '[' { '\x01' } else { '\x02' });
+                        output.push(if marker == '[' { '\x01' } else { '\x02' });
                     }
                 }
                 Some(octal @ '0'..='7') => {

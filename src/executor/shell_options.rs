@@ -448,6 +448,40 @@ impl Executor {
                         "__RUBASH_POSIX_MODE".to_string(),
                         if enabled { "1" } else { "0" }.to_string(),
                     );
+                    // GNU general.c:98-128 posix_initialize: entering posix
+                    // mode turns on expand_aliases (among other shopts) and
+                    // saves the prior values; leaving restores the saved set
+                    // or the noninteractive default (off).
+                    if enabled {
+                        let prior = self.alias_expansion_enabled();
+                        self.env_vars.insert(
+                            "__RUBASH_POSIX_SAVED_EXPAND_ALIASES".to_string(),
+                            if prior { "1" } else { "0" }.to_string(),
+                        );
+                        crate::builtins::shopt::set_option(
+                            &mut self.env_vars,
+                            "expand_aliases",
+                            true,
+                        );
+                    } else {
+                        match self
+                            .env_vars
+                            .remove("__RUBASH_POSIX_SAVED_EXPAND_ALIASES")
+                        {
+                            Some(saved) => crate::builtins::shopt::set_option(
+                                &mut self.env_vars,
+                                "expand_aliases",
+                                saved == "1",
+                            ),
+                            // No saved state: noninteractive default is off
+                            // (interactive_shell is 0 here).
+                            None => crate::builtins::shopt::set_option(
+                                &mut self.env_vars,
+                                "expand_aliases",
+                                false,
+                            ),
+                        }
+                    }
                 }
                 index += 2;
                 continue;
@@ -548,10 +582,59 @@ impl Executor {
         expanded
     }
 
+    /// Fingerprint of a FUNCTION_STDIN buffer so a deferred command-
+    /// substitution cursor write-back can verify it still applies to the
+    /// buffer it was recorded against.
+    pub(in crate::executor) fn function_stdin_fingerprint(text: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Apply a deferred command-substitution stdin consumption: the comsub
+    /// child ran on `&self` and could not write env back, so the next
+    /// `&mut` consumer folds the child's cursor into FUNCTION_STDIN_OFFSET
+    /// (GNU subst.c:7143 — the forked body shares fd 0).
+    pub(in crate::executor) fn apply_comsub_stdin_writeback(&mut self) {
+        let Some((offset, fingerprint)) = self.comsub_stdin_writeback.take() else {
+            return;
+        };
+        let same_buffer = self
+            .env_vars
+            .get(FUNCTION_STDIN)
+            .map(|text| Self::function_stdin_fingerprint(text) == fingerprint)
+            .unwrap_or(false);
+        if same_buffer {
+            self.env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), offset.to_string());
+        }
+    }
+
+    /// GNU builtins/read.def: `read` and an external command in the same
+    /// `{ ...; }` group share one fd 0 cursor — after `read -d '|'` stops at
+    /// the delimiter, `cat` sees only the remainder. FUNCTION_STDIN keeps a
+    /// FUNCTION_STDIN_OFFSET cursor for shell reads; feeding a child process
+    /// must hand over only the unread tail.
+    pub(in crate::executor) fn function_stdin_remaining(&self) -> Option<String> {
+        let input = self.env_vars.get(FUNCTION_STDIN)?;
+        if input.is_empty() {
+            return None;
+        }
+        let offset = self
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(input.len());
+        Some(input[offset..].to_string())
+    }
+
     pub(in crate::executor) fn stdin_string_for_command_mut(
         &mut self,
         cmd: &CommandNode,
     ) -> Option<String> {
+        self.apply_comsub_stdin_writeback();
         if let Some(body) = cmd.heredoc.clone() {
             return Some(self.expand_heredoc_body_mut(&body));
         }
@@ -565,7 +648,22 @@ impl Executor {
             input.push('\n');
             return Some(input);
         }
-        self.stdin_string_for_command(cmd)
+        let function_stdin_is_source = cmd.redirect_in.is_none()
+            && self.virtual_fd_stdin_remaining(0).is_none()
+            && self.function_stdin_remaining().is_some();
+        let result = self.stdin_string_for_command(cmd);
+        if result.is_some() && function_stdin_is_source {
+            // The child drains the stream from the cursor onward; GNU's
+            // shared fd 0 means a subsequent `read` sees EOF.
+            let end = self
+                .env_vars
+                .get(FUNCTION_STDIN)
+                .map(|input| input.len())
+                .unwrap_or(0);
+            self.env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), end.to_string());
+        }
+        result
     }
 
     pub(in crate::executor) fn stdin_string_for_command(
@@ -625,10 +723,8 @@ impl Executor {
         }
 
         // Check for FUNCTION_STDIN (set by pipeline execution for builtins)
-        if let Some(input) = self.env_vars.get(FUNCTION_STDIN) {
-            if !input.is_empty() {
-                return Some(input.clone());
-            }
+        if let Some(input) = self.function_stdin_remaining() {
+            return Some(input);
         }
 
         let word = cmd.here_string.as_ref()?;

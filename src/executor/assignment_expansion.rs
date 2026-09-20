@@ -525,6 +525,9 @@ impl Executor {
     }
 
     fn expand_assignment_value_inner(&mut self, name: &str, value: &str) -> String {
+        if std::env::var("RUBASH_DEBUG_AV").is_ok() {
+            eprintln!("[av] name={:?} value={:?}", name, value);
+        }
         // GNU expand_string_for_assignment (subst.c:4365) sets
         // expand_no_split_dollar_star=1 for the whole assignment-RHS
         // expansion, so `${*/a/x}` on the RHS joins with IFS[0]
@@ -642,6 +645,28 @@ impl Executor {
             // (shell_text_to_raw_bytes), so nothing is lost by keeping them.
             let restored = dequote_ctlesc(&restored);
             return restored;
+        }
+        // GNU parse.y FUNSUB_CHAR / subst.c param_expand: a `${ command; }` or
+        // `${| command; }` span is a nofork substitution, not a parameter
+        // form — and its body may itself hold `$(...)`, so it must reach the
+        // embedded-parameter walker (which routes top-level funsub spans to
+        // execution) before the `$(`/backtick fast paths below claim the
+        // inner substitution and leave the `${` literal (comsub2.tests:
+        // `x=${ echo ${ echo one;} $(echo two) }`).
+        if !compound_assignment
+            && crate::executor::parameter_core::word_contains_current_shell_command_substitution(
+                value,
+            )
+            && crate::executor::parameter_core::funsub_span_is_top_level(value)
+        {
+            return self.expand_embedded_parameters_mut_with_context(
+                value,
+                if quoted {
+                    SubstitutionQuoteContext::DoubleQuoted
+                } else {
+                    SubstitutionQuoteContext::Unquoted
+                },
+            );
         }
         // GNU subst.c:4357 expand_string_assignment (W_ASSIGNMENT,
         // subst.c:11432): unquoted element values of a compound assignment
@@ -1322,6 +1347,28 @@ impl Executor {
                 .strip_prefix('\x1d')
                 .and_then(|token| token.strip_prefix("${"))
                 .and_then(|token| token.strip_suffix('}'))
+                .or_else(|| {
+                    // The atomic lexer path (skip_word_at) wraps the
+                    // element's quotes in DQ_DATA markers instead of the
+                    // \x1d quoted-RHS marker: `"${a[@]:2}"` arrives as
+                    // \u{E102}${a[@]:2}\u{E102}. The [@]:off[:len] slice
+                    // must still fan out per element (GNU arrayfunc.c:557
+                    // expand_compound_array_assignment expands each word
+                    // through the real expander — new-exp5.sub
+                    // `b=("${a[@]:2}")` stores C and D as two elements).
+                    if token_raw.starts_with('\u{E102}') && token_raw.ends_with('\u{E102}') {
+                        token_raw
+                            .trim_matches('\u{E102}')
+                            .strip_prefix("${")
+                            .and_then(|token| token.strip_suffix('}'))
+                    } else if token_raw.starts_with('"') {
+                        token
+                            .strip_prefix("${")
+                            .and_then(|token| token.strip_suffix('}'))
+                    } else {
+                        None
+                    }
+                })
             {
                 if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
                     if var_name == "@" {
@@ -1338,21 +1385,28 @@ impl Executor {
                         );
                         continue;
                     }
+                    let starred = var_name.ends_with("[*]");
                     if let Some(array_name) = var_name
                         .strip_suffix("[@]")
                         .or_else(|| var_name.strip_suffix("[*]"))
                     {
                         if let Some(storage) = self.parameter_array_storage(array_name) {
                             changed = true;
-                            values.extend(
-                                array_parameter_slice(
-                                    &storage,
-                                    offset,
-                                    length.and_then(|length| usize::try_from(length).ok()),
-                                )
-                                .iter()
-                                .map(|value| store!(value)),
+                            let sliced = array_parameter_slice(
+                                &storage,
+                                offset,
+                                length.and_then(|length| usize::try_from(length).ok()),
                             );
+                            if starred {
+                                // GNU array_subrange + string_list_pos_params:
+                                // a quoted `arr[*]:off` joins the slice into
+                                // ONE word with IFS[0] (new-exp5.sub nd=1).
+                                values.push(store!(
+                                    &sliced.join(&self.ifs_first_char_separator())
+                                ));
+                            } else {
+                                values.extend(sliced.iter().map(|value| store!(value)));
+                            }
                             continue;
                         }
                     }

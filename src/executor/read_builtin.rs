@@ -22,6 +22,32 @@ fn is_valid_read_name(
 
 impl Executor {
     pub(in crate::executor) fn execute_read(&mut self, cmd: &CommandNode) -> i32 {
+        // GNU execute_cmd.c do_redirections applies redirects before the
+        // builtin runs: a failed input open aborts the command — read's
+        // variables stay unset and the diagnostic is the redirect's
+        // (probe: `read a < /nonexist` leaves `a` unset, status 1). The
+        // in-reader open treats failure as EOF, which wrongly assigns "".
+        if let Some(redirect) = &cmd.redirect_in {
+            if redirect.fd.unwrap_or(0) == 0 && redirect.fd_var.is_none() {
+                let target = self.expand_word(&redirect.target);
+                if !is_closed_redirect_target(&target)
+                    && redirect_target_fd(&target).is_none()
+                    && !target.starts_with("<(")
+                {
+                    if let Err(error) = self.open_input_redirect(&target) {
+                        let mut line = Vec::new();
+                        let _ = writeln!(
+                            &mut line,
+                            "{}{}",
+                            self.diagnostic_prefix(),
+                            crate::posix_errors::message(&error)
+                        );
+                        let _ = self.write_default_stderr(&line);
+                        return 1;
+                    }
+                }
+            }
+        }
         let mut stderr = Vec::new();
         let mut array_name = None;
         let mut delimiter = '\n';
@@ -357,8 +383,8 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or(' ');
                     index += 2;
                 }
                 "-n" => {
@@ -973,13 +999,13 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or(' ');
                     initial_text = cmd.words.get(index + 2).cloned();
                     index += 3;
                 }
                 word if word.starts_with("-edi") && word.len() > 4 => {
-                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[3..]);
                     initial_text = Some(word[4..].to_string());
                     index += 1;
                 }
@@ -987,13 +1013,13 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or(' ');
                     initial_text = cmd.words.get(index + 2).cloned();
                     index += 3;
                 }
                 word if word.starts_with("-dei") && word.len() > 4 => {
-                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[3..]);
                     initial_text = Some(word[4..].to_string());
                     index += 1;
                 }
@@ -1001,12 +1027,12 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or(' ');
                     index += 2;
                 }
                 word if word.starts_with("-ed") && word.len() > 3 => {
-                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[3..]);
                     index += 1;
                 }
                 "-red" | "-erd" => {
@@ -1014,15 +1040,15 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or(' ');
                     index += 2;
                 }
                 word if (word.starts_with("-red") || word.starts_with("-erd"))
                     && word.len() > 4 =>
                 {
                     raw = true;
-                    delimiter = word[4..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[4..]);
                     index += 1;
                 }
                 "-st" => {
@@ -1105,12 +1131,12 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or(' ');
                     index += 2;
                 }
                 word if word.starts_with("-sd") && word.len() > 3 => {
-                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[3..]);
                     index += 1;
                 }
                 word if word.starts_with('-')
@@ -1121,7 +1147,7 @@ impl Executor {
                     index += 1;
                 }
                 word if word.starts_with("-d") && word.len() > 2 => {
-                    delimiter = word[2..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[2..]);
                     index += 1;
                 }
                 "-rd" => {
@@ -1129,13 +1155,13 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or(' ');
                     index += 2;
                 }
                 word if word.starts_with("-rd") && word.len() > 3 => {
                     raw = true;
-                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[3..]);
                     index += 1;
                 }
                 "-rsd" | "-srd" => {
@@ -1143,15 +1169,15 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or(' ');
                     index += 2;
                 }
                 word if (word.starts_with("-rsd") || word.starts_with("-srd"))
                     && word.len() > 4 =>
                 {
                     raw = true;
-                    delimiter = word[4..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[4..]);
                     index += 1;
                 }
                 "-ersd" | "-esrd" | "-resd" | "-rsed" | "-serd" | "-sred" => {
@@ -1159,8 +1185,8 @@ impl Executor {
                     delimiter = cmd
                         .words
                         .get(index + 1)
-                        .and_then(|word| word.chars().next())
-                        .unwrap_or('\0');
+                        .map(|word| read_delimiter_char(word))
+                        .unwrap_or(' ');
                     index += 2;
                 }
                 word if (word.starts_with("-ersd")
@@ -1172,7 +1198,7 @@ impl Executor {
                     && word.len() > 5 =>
                 {
                     raw = true;
-                    delimiter = word[5..].chars().next().unwrap_or('\0');
+                    delimiter = read_delimiter_char(&word[5..]);
                     index += 1;
                 }
                 "-rsn" | "-srn" => {
@@ -2263,7 +2289,15 @@ impl Executor {
         {
             return 0;
         }
-        1
+        // GNU read.def polls fd 0 with select(): a non-terminal inherited
+        // stdin (regular file, /dev/null, a pipe at EOF) is always readable,
+        // so `-t 0` succeeds. Only a live terminal with no pending input
+        // fails the poll.
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            1
+        } else {
+            0
+        }
     }
 }
 

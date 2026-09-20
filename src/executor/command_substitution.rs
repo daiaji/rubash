@@ -221,9 +221,7 @@ impl Executor {
             // only checks that this set option parse emits more than 3 lines.
             return "4".to_string();
         }
-        if source.starts_with("declare -f foo | sed") {
-            return "bar() { echo $(< x1); }".to_string();
-        }
+
         if source == "type -p e" {
             return "./e".to_string();
         }
@@ -415,7 +413,13 @@ impl Executor {
                 .to_string();
         }
 
-        if words.first().map(String::as_str) == Some("cat") {
+        // The file-operand fast path must not claim a bare `cat` (or flag/
+        // `-` operands): those read fd 0, which lives in FUNCTION_STDIN and
+        // shares the caller's cursor — external_cat owns that semantics.
+        if words.first().map(String::as_str) == Some("cat")
+            && words[1..].iter().all(|word| !word.starts_with('-'))
+            && words.len() > 1
+        {
             let mut output = String::new();
             let mut status = 0;
             for word in &words[1..] {
@@ -687,6 +691,28 @@ impl Executor {
         let mut output = subshell.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&captured);
 
+        // GNU subst.c:7143 command_substitute forks sharing the parent's
+        // fd 0 — input the body consumed is gone for the caller too. The
+        // child's cursor lives in its env clone; fold it back when both
+        // sides still name the same FUNCTION_STDIN buffer.
+        if let (Some(parent_input), Some(child_input)) = (
+            self.env_vars.get(FUNCTION_STDIN).cloned(),
+            subshell.env_vars.get(FUNCTION_STDIN).cloned(),
+        ) {
+            if parent_input == child_input {
+                if let Some(child_offset) = subshell
+                    .env_vars
+                    .get(FUNCTION_STDIN_OFFSET)
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    self.comsub_stdin_writeback.set(Some((
+                        child_offset,
+                        Self::function_stdin_fingerprint(&parent_input),
+                    )));
+                }
+            }
+        }
+
         if let Some(saved_dir) = saved_dir {
             let _ = env::set_current_dir(saved_dir);
         }
@@ -788,6 +814,7 @@ impl Executor {
             debug_trap_command: std::cell::RefCell::new(None),
             debug_trap_function_line: None,
             last_command_substitution_status: Cell::new(None),
+            comsub_stdin_writeback: Cell::new(None),
             last_heredoc_warning_source: RefCell::new(None),
             comsub_leading_newlines: Cell::new(0),
             current_shell_substitution_exit: Cell::new(self.current_shell_substitution_exit.get()),

@@ -371,6 +371,7 @@ impl Executor {
         char_limit: Option<usize>,
         exact_char_limit: bool,
     ) -> Option<String> {
+        self.apply_comsub_stdin_writeback();
         let input = self.env_vars.get(FUNCTION_STDIN)?.clone();
         let offset = self
             .env_vars
@@ -388,9 +389,10 @@ impl Executor {
         let mut output = String::new();
         let mut consumed = 0usize;
         let mut took_any = false;
+        let delimiter_needle = read_delimiter_needle(delimiter);
         for (index, ch) in slice.char_indices() {
-            if !exact_char_limit && ch == delimiter {
-                consumed = index + ch.len_utf8();
+            if !exact_char_limit && slice[index..].starts_with(&delimiter_needle) {
+                consumed = index + delimiter_needle.len();
                 took_any = true;
                 break;
             }
@@ -449,11 +451,11 @@ impl Executor {
             let Some(unit) = decoder.next_unit() else {
                 continue;
             };
+            if !exact_char_limit && stdin_unit_is_delimiter(&unit, delimiter) {
+                break;
+            }
             match unit {
                 StdinUnit::Char(ch) => {
-                    if !exact_char_limit && ch == delimiter {
-                        break;
-                    }
                     output.push(ch);
                     units += 1;
                 }

@@ -197,11 +197,11 @@ impl Executor {
             // array's element (unset n[0] with n->v removes v[0]); a plain
             // nameref whose cell is an array reference unbinds that element
             // while keeping the nameref itself.
-            if let Some(status) = self.unset_through_nameref(&name, stderr) {
+            if let Some(status) = self.unset_through_nameref(&name, stderr, w_arrayref) {
                 element_status = element_status.max(i32::from(status));
                 continue;
             }
-            if let Some(status) = self.unset_array_element(&name) {
+            if let Some(status) = self.unset_array_element(&name, w_arrayref) {
                 element_status = element_status.max(i32::from(status));
                 continue;
             }
@@ -324,6 +324,7 @@ impl Executor {
         &mut self,
         name: &str,
         stderr: &mut W,
+        w_arrayref: bool,
     ) -> Option<u8> {
         if is_marked_var(&self.env_vars, NAMEREF_VARS, name) {
             // GNU builtins/set.def:925/990-1014: `unset` of a nameref walks to
@@ -345,7 +346,10 @@ impl Executor {
             }
             let cell = self.env_vars.get(&last).cloned().unwrap_or_default();
             if parse_array_subscript(&cell).is_some() {
-                return self.unset_array_element(&cell).or(Some(0));
+                // The operand itself was a plain nameref (no `[`), so it
+                // never carried W_ARRAYREF; the resolved cell's subscript is
+                // evaluated under the operand's vflags (set.def:1008).
+                return self.unset_array_element(&cell, false).or(Some(0));
             }
             // GNU set.def:936-937 + 962-966: the resolved referent is
             // unbound by name; a readonly referent is an error on the
@@ -390,8 +394,32 @@ impl Executor {
             return None;
         };
         let cell = cell.clone();
-        self.unset_array_element(&format!("{cell}[{subscript}]"))
+        self.unset_array_element(&format!("{cell}[{subscript}]"), w_arrayref)
             .or(Some(0))
+    }
+
+    /// GNU builtins/set.def:870/887 `vflags = builtin_arrayref_flags
+    /// (list->word, base_vflags)`: an operand word that carried W_ARRAYREF
+    /// gets VA_NOEXPAND|VA_ONEWORD unconditionally (common.c:1050), and
+    /// base_vflags adds VA_NOEXPAND under array_expand_once — either makes
+    /// unbind_array_element consume the already-expanded subscript text
+    /// verbatim. An operand that was NOT a valid array reference
+    /// pre-expansion (quoted `unset 'a[$key]'` / `unset 'a["foo"]'`) gets
+    /// vflags=0, so the subscript text goes through a deferred
+    /// expand_subscript_string pass that re-lexes quoting and expands
+    /// again — Raw gives it that second full expansion.
+    fn unset_subscript_source<'a>(
+        &self,
+        subscript: &'a str,
+        w_arrayref: bool,
+    ) -> SubscriptSource<'a> {
+        if w_arrayref
+            || crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once")
+        {
+            SubscriptSource::Protected(subscript)
+        } else {
+            SubscriptSource::Raw(subscript)
+        }
     }
 
     pub(in crate::executor) fn unset_outer_local_variable(&mut self, name: &str) -> bool {
@@ -475,7 +503,11 @@ impl Executor {
     /// scalar unbinding; the status propagates subscript-expansion errors
     /// (GNU arrayfunc.c:1290-1317 unbind_array_element -> arrayfunc.c:420
     /// expand_array_subscript sets return_code=1 on eval failure).
-    pub(in crate::executor) fn unset_array_element(&mut self, name: &str) -> Option<u8> {
+    pub(in crate::executor) fn unset_array_element(
+        &mut self,
+        name: &str,
+        w_arrayref: bool,
+    ) -> Option<u8> {
         let Some((array_name, subscript)) = parse_array_subscript(name) else {
             return None;
         };
@@ -504,7 +536,8 @@ impl Executor {
             // once; with array_expand_once (ASS_NOEXPAND) that text is the
             // literal key, otherwise unbind performs the deferred
             // expand_subscript_string pass here.
-            let key = self.resolve_array_subscript(SubscriptSource::ExpandedOnce(&subscript));
+            let key =
+                self.resolve_array_subscript(self.unset_subscript_source(subscript, w_arrayref));
             let mut entries = assoc_entries(&current);
             entries.retain(|(entry_key, _)| *entry_key != key);
             self.env_vars
@@ -515,18 +548,39 @@ impl Executor {
         if is_marked_array_var(&self.env_vars, array_name) || is_array_storage(&current) {
             // GNU unbind_array_element (arrayfunc.c:1180-1200): with the
             // default compat level (> 51), `unset arr[*]` / `unset arr[@]`
-            // FLUSHES every element (behavior 2) instead of unsetting the
-            // variable or treating * as an index; the variable itself stays
-            // declared as an empty array (array.tests: `unset e[*]` then
-            // `declare -a e=()`).
+            // FLUSHES every element (behavior 2); at compat <= 51 it
+            // unbinds the variable outright (behavior 1,
+            // arrayfunc.c:1191-1195). BASH_COMPAT drives
+            // shell_compatibility_level (variables.c:6460 sv_shcompat).
             if subscript == "*" || subscript == "@" {
-                self.env_vars.insert(
-                    array_name.to_string(),
-                    format_indexed_array_storage(Default::default()),
-                );
+                if shell_compatibility_level(&self.env_vars) <= 51 {
+                    self.env_vars.remove(array_name);
+                    std::env::remove_var(array_name);
+                    self.shell_state.variables.remove(array_name);
+                    for key in [
+                        EXPORTED_VARS,
+                        READONLY_VARS,
+                        ARRAY_VARS,
+                        ASSOC_VARS,
+                        ASSOC_128_VARS,
+                        INTEGER_VARS,
+                        UPPERCASE_VARS,
+                        LOWERCASE_VARS,
+                        NAMEREF_VARS,
+                        DECLARED_UNSET_VARS,
+                    ] {
+                        unmark_env_name(&mut self.env_vars, key, array_name);
+                    }
+                } else {
+                    self.env_vars.insert(
+                        array_name.to_string(),
+                        format_indexed_array_storage(Default::default()),
+                    );
+                }
                 return Some(0);
             }
-            let index = match self.eval_indexed_subscript(SubscriptSource::ExpandedOnce(&subscript))
+            let index = match self
+                .eval_indexed_subscript(self.unset_subscript_source(subscript, w_arrayref))
             {
                 IndexedSubscript::Index(index) => index,
                 // GNU: `unset 'a[]'` is a silent no-op.
@@ -567,7 +621,7 @@ impl Executor {
         if subscript == "*" || subscript == "@" {
             return None;
         }
-        match self.eval_indexed_subscript(SubscriptSource::ExpandedOnce(&subscript)) {
+        match self.eval_indexed_subscript(self.unset_subscript_source(subscript, w_arrayref)) {
             IndexedSubscript::Index(0) => {}
             IndexedSubscript::Index(_) => return None,
             IndexedSubscript::Empty => return Some(0),
@@ -594,5 +648,23 @@ impl Executor {
             unmark_env_name(&mut self.env_vars, key, array_name);
         }
         Some(0)
+    }
+}
+
+/// GNU variables.c:6460 sv_shcompat: BASH_COMPAT accepts `X.Y` or `XY`
+/// (single-dot or two-digit forms); unset/empty/malformed falls back to the
+/// default level, which for this build is 53 (BASH_COMPAT_VERSION 5.3.0).
+fn shell_compatibility_level(env_vars: &HashMap<String, String>) -> u32 {
+    let Some(val) = env_vars.get("BASH_COMPAT") else {
+        return 53;
+    };
+    let bytes = val.as_bytes();
+    if bytes.len() == 3 && bytes[0].is_ascii_digit() && bytes[1] == b'.' && bytes[2].is_ascii_digit()
+    {
+        (bytes[0] - b'0') as u32 * 10 + (bytes[2] - b'0') as u32
+    } else if bytes.len() == 2 && bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() {
+        (bytes[0] - b'0') as u32 * 10 + (bytes[1] - b'0') as u32
+    } else {
+        53
     }
 }

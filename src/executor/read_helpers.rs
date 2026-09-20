@@ -279,6 +279,48 @@ impl StdinCharDecoder {
     }
 }
 
+/// GNU read.def takes `-d` as the first *byte* of the option word
+/// (`delim = (unsigned char)*optarg`). Decode raw-byte markers so
+/// `$'\200'` yields byte 0x80; `char::from` keeps `delimiter as u8`
+/// byte-compare sites working unchanged.
+pub(in crate::executor) fn read_delimiter_char(word: &str) -> char {
+    substitution_metadata::shell_text_to_raw_bytes(word)
+        .first()
+        .copied()
+        .map(char::from)
+        .unwrap_or('\0')
+}
+
+/// The delimiter needle inside buffered shell text: raw bytes live in text
+/// as marker pairs, so a >=0x80 delimiter matches its encoded pair.
+pub(in crate::executor) fn read_delimiter_needle(delimiter: char) -> String {
+    if delimiter as u32 >= 0x80 {
+        substitution_metadata::bytes_to_shell_text(&[delimiter as u8])
+    } else {
+        delimiter.to_string()
+    }
+}
+
+/// True when a decoded stdin unit is the delimiter byte (GNU read.def
+/// compares `c == delim` on input bytes). Raw bytes surface as RawByte
+/// marker units; a multibyte char is compared by its first byte, matching
+/// GNU's byte-level `readchar` semantics.
+pub(in crate::executor) fn stdin_unit_is_delimiter(unit: &StdinUnit, delimiter: char) -> bool {
+    let byte = match unit {
+        StdinUnit::Char(ch) => {
+            let mut encoded = [0u8; 4];
+            ch.encode_utf8(&mut encoded).as_bytes()[0]
+        }
+        StdinUnit::RawByte { text } => {
+            match substitution_metadata::shell_text_to_raw_bytes(text).first() {
+                Some(byte) => *byte,
+                None => return false,
+            }
+        }
+    };
+    byte == delimiter as u8
+}
+
 pub(in crate::executor) fn read_stdin_until(
     delimiter: char,
     char_limit: Option<usize>,
@@ -316,16 +358,20 @@ pub(in crate::executor) fn read_stdin_until(
         };
         let is_cr = matches!(unit, StdinUnit::Char('\r'));
         match unit {
-            StdinUnit::Char(ch) => {
-                if !exact_char_limit && ch == delimiter {
+            unit => {
+                if !exact_char_limit && stdin_unit_is_delimiter(&unit, delimiter) {
                     break;
                 }
-                output.push(ch);
-                units += 1;
-            }
-            StdinUnit::RawByte { text } => {
-                output.push_str(&text);
-                units += 1;
+                match unit {
+                    StdinUnit::Char(ch) => {
+                        output.push(ch);
+                        units += 1;
+                    }
+                    StdinUnit::RawByte { text } => {
+                        output.push_str(&text);
+                        units += 1;
+                    }
+                }
             }
         }
         if char_limit.is_some_and(|limit| units >= limit) {
@@ -351,7 +397,7 @@ pub(in crate::executor) fn trim_read_input(
     exact_char_limit: bool,
 ) -> String {
     if !exact_char_limit {
-        if let Some((before, _)) = input.split_once(delimiter) {
+        if let Some((before, _)) = input.split_once(&read_delimiter_needle(delimiter)) {
             input = before.trim_end_matches('\r').to_string();
         } else if delimiter == '\n' {
             // NOTE: this also drops a lone trailing '\r' that is real data
@@ -422,11 +468,16 @@ pub(in crate::executor) fn unescape_read_backslashes(input: &str) -> String {
 pub(in crate::executor) fn split_read_array_words(line: &str, ifs: Option<&str>) -> Vec<String> {
     match ifs {
         Some("/") => line.split('/').map(str::to_string).collect(),
-        Some(ifs) if !ifs.is_empty() => line
-            .split(|ch| ifs.contains(ch))
-            .filter(|word| !word.is_empty())
-            .map(str::to_string)
-            .collect(),
+        // GNU read.def assigns -a words through the same field-splitting
+        // rules as scalar names: interior empty fields bounded by
+        // non-whitespace IFS delimiters are kept (`IFS=: read -a A` on
+        // `:::` yields three empty elements).
+        Some(ifs) if !ifs.is_empty() => {
+            split_read_field_ranges(line, ifs, false)
+                .into_iter()
+                .map(|(start, end)| line[start..end].to_string())
+                .collect()
+        }
         _ => line.split_whitespace().map(str::to_string).collect(),
     }
 }
@@ -437,7 +488,10 @@ pub(in crate::executor) fn split_read_array_words_with_backslashes(
 ) -> Vec<String> {
     match ifs {
         Some("/") => split_escaped_words(line, '/'),
-        Some(ifs) if !ifs.is_empty() => split_escaped_words_on_set(line, ifs),
+        Some(ifs) if !ifs.is_empty() => split_read_field_ranges(line, ifs, true)
+            .into_iter()
+            .map(|(start, end)| line[start..end].to_string())
+            .collect(),
         _ => split_escaped_words_on_whitespace(line),
     }
 }

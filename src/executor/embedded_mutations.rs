@@ -1134,25 +1134,35 @@ impl Executor {
         );
         let ast = crate::parser::parse(&tokens);
 
-        // GNU subst.c nofork substitution: the body's stdout is captured by
-        // the walker itself (a valsub `${| ...; }` discards it — it never
-        // reaches the enclosing output — while a funsub `${ ...; }` returns
-        // it as the expansion value).
-        let saved_capture = self.stdout_capture.take();
-        self.stdout_capture = Some(Vec::new());
-        // GNU subst.c valsub: REPLY is the value channel and the body's own
-        // REPLY state is scoped to the body — the caller's value comes back
-        // afterwards (comsub26.sub: `inside1-inside2-outside`).
-        let saved_reply = self.env_vars.get("REPLY").cloned();
+        // GNU subst.c function_substitute: a funsub `${ ...; }` redirects the
+        // body's stdout to the anonymous capture file (its expansion value);
+        // a valsub `${| ...; }` does NOT redirect stdout — the body writes to
+        // the caller's real stdout — and instead makes REPLY a fresh local of
+        // the body frame (subst.c:7054 make_local_variable +
+        // uw_unbind_localvar), whose final value is the expansion value.
+        // GNU subst.c:7020-7030 function_substitute: unless inherit_errexit
+        // is set (POSIX mode enables it), the nofork comsub clears the -e
+        // flag itself for the body — `set -e; ${ false; echo x; }` still
+        // prints x (comsub22.sub), and an explicit `set -e` inside the body
+        // re-enables it. The flag lives in env_vars, so save/restore around
+        // the body like uw_restore_errexit does.
+        let inherit_errexit = self.posix_mode_enabled()
+            || crate::builtins::shopt::option_enabled(&self.env_vars, "inherit_errexit");
+        let saved_errexit_flag = self.env_vars.get("__RUBASH_ERREXIT").cloned();
+        let saved_errexit_opt =
+            crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit");
+        if !inherit_errexit {
+            self.env_vars.remove("__RUBASH_ERREXIT");
+            crate::builtins::set::set_shell_option(&mut self.env_vars, "errexit", false);
+        }
+
+        let (captured, body_reply, result);
         if pipe_output {
-            // Seed every frame store so restore_function_locals puts the
-            // caller's REPLY back in env_vars, the typed variable table, and
-            // the attribute set (assignments inside the body touch all three).
             self.local_var_scopes.push(HashMap::new());
             self.local_attr_scopes.push(HashMap::new());
             self.local_typed_scopes.push(HashMap::new());
             if let Some(scope) = self.local_var_scopes.last_mut() {
-                scope.insert("REPLY".to_string(), saved_reply.clone());
+                scope.insert("REPLY".to_string(), self.env_vars.get("REPLY").cloned());
             }
             if let Some(typed) = self.local_typed_scopes.last_mut() {
                 typed.insert(
@@ -1160,31 +1170,50 @@ impl Executor {
                     self.shell_state.variables.get("REPLY").cloned(),
                 );
             }
+            // Fresh local: the body sees REPLY unset; restore_function_locals
+            // brings the caller's value (or unset) back afterwards.
+            self.env_vars.remove("REPLY");
+            self.shell_state.variables.remove("REPLY");
+            self.function_depth += 1;
+            let r = self.execute_ast(&ast);
+            self.function_depth -= 1;
+            body_reply = self.env_vars.get("REPLY").cloned();
+            self.restore_function_locals();
+            captured = Vec::new();
+            result = r;
+        } else {
+            let saved_capture = self.stdout_capture.take();
+            self.stdout_capture = Some(Vec::new());
+            // Direct-stdout builtins inside the body consult the thread-local
+            // capture, which belongs to an enclosing pipeline stage when this
+            // substitution runs inside one; give the body its own capture.
+            let (thread_captured, r) =
+                crate::executor::shell_options::capture_stdout(|| {
+                    self.execute_current_shell_body(&ast)
+                });
+            let mut cap = self.stdout_capture.take().unwrap_or_default();
+            cap.extend_from_slice(&thread_captured);
+            self.stdout_capture = saved_capture;
+            captured = cap;
+            body_reply = None;
+            result = r;
         }
-        // Direct-stdout builtins inside the body consult the thread-local
-        // capture, which belongs to an enclosing pipeline stage when this
-        // substitution runs inside one; give the body its own capture.
-        let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
-            if pipe_output {
-                // The seeded frame is already on the stack; run the body
-                // without pushing another one.
-                self.execute_ast(&ast)
-            } else {
-                self.execute_current_shell_body(&ast)
+
+        if !inherit_errexit {
+            match saved_errexit_flag {
+                Some(value) => {
+                    self.env_vars.insert("__RUBASH_ERREXIT".to_string(), value);
+                }
+                None => {
+                    self.env_vars.remove("__RUBASH_ERREXIT");
+                }
             }
-        });
-        let body_reply = self.env_vars.get("REPLY").cloned();
-        match saved_reply {
-            Some(value) => {
-                self.env_vars.insert("REPLY".to_string(), value);
-            }
-            None => {
-                self.env_vars.remove("REPLY");
-            }
+            crate::builtins::set::set_shell_option(
+                &mut self.env_vars,
+                "errexit",
+                saved_errexit_opt,
+            );
         }
-        let mut captured = self.stdout_capture.take().unwrap_or_default();
-        captured.extend_from_slice(&thread_captured);
-        self.stdout_capture = saved_capture;
 
         // `exit N` inside the body aborts the enclosing (sub)shell with N
         // (comsub26.sub line 32: the subshell never prints and $? = 42).
@@ -1201,9 +1230,6 @@ impl Executor {
         self.last_command_substitution_status.set(Some(status));
 
         if pipe_output {
-            // GNU subst.c valsub: the expansion value is the body-final
-            // REPLY, while the caller's REPLY is restored afterwards
-            // (comsub26.sub: `inside1-inside2-outside`).
             body_reply.unwrap_or_default()
         } else {
             bytes_to_shell_text(&captured)

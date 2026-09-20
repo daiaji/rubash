@@ -267,6 +267,19 @@ impl Executor {
             .resolved_variable_name(array_name)
             .unwrap_or_else(|| array_name.to_string());
         if !is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+            // GNU subst.c:9064 get_var_and_type resolves / on
+            // a scalar to VT_VARIABLE, so parameter_brace_substring
+            // (subst.c:9083-9099) applies the offset/length to the string
+            // value itself rather than slicing an element list.
+            let is_array = is_marked_array_var(&self.env_vars, &resolved)
+                || is_array_storage(&storage);
+            if !is_array {
+                return Some(vec![crate::executor::parameter_substring(
+                    &storage,
+                    offset,
+                    length.map(|length| length as isize),
+                )]);
+            }
             return Some(array_parameter_slice(&storage, offset, length));
         }
         let values = assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, &resolved));
@@ -533,34 +546,68 @@ impl Executor {
         if !array_value_transform_splits_words(transform) {
             return None;
         }
-        let storage = self.parameter_array_storage(array_name)?;
-        let values = if is_marked_var(
-            &self.env_vars,
-            ASSOC_VARS,
-            &self.resolved_variable_name(array_name).unwrap_or_default(),
-        ) {
-            assoc_hash_ordered_values(
-                &storage,
-                assoc_nbuckets(
-                    &self.env_vars,
-                    &self.resolved_variable_name(array_name).unwrap_or_default(),
-                ),
-            )
-        } else {
-            array_values(&storage)
-        }
-        .into_iter()
-        .map(|value| {
-            if transform == ParameterTransform::Attributes {
-                // GNU list_transform -> string_transform (subst.c:8753):
-                // 'a' reports the variable's attributes
-                // (var_attribute_string), once per list element.
-                self.parameter_attribute_transform(var_name)
+        let storage = self.parameter_array_storage(array_name);
+        let values = if transform == ParameterTransform::Attributes {
+            // GNU array_transform (subst.c:8856-8862): `arr[@]@a` on a
+            // DECLARED-but-never-assigned array (array_cell == NULL)
+            // returns var_attribute_string once — the attribute list
+            // describes the variable itself. An assigned-but-empty array
+            // (`foo=()`) has a real cell, so the 'a' transform maps over
+            // its (empty) element list and yields nothing.
+            let resolved = self
+                .resolved_variable_name(array_name)
+                .unwrap_or_default();
+            // DECLARED_UNSET marks the never-assigned cell (`declare -a x`),
+            // matching GNU's array_cell(v) == NULL; `x=()` allocates a real
+            // (empty) cell and clears the marker.
+            let null_cell = storage.is_none()
+                || is_marked_var(&self.env_vars, DECLARED_UNSET_VARS, &resolved);
+            if null_cell {
+                let attrs = self.parameter_attribute_transform(array_name);
+                if attrs.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![attrs]
+                }
             } else {
-                self.apply_parameter_transform_value(&value, transform)
+                let count = match storage.as_ref() {
+                    Some(storage)
+                        if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) =>
+                    {
+                        assoc_hash_ordered_values(
+                            storage,
+                            assoc_nbuckets(&self.env_vars, &resolved),
+                        )
+                        .len()
+                    }
+                    Some(storage) => array_values(storage).len(),
+                    None => 0,
+                };
+                (0..count)
+                    .map(|_| self.parameter_attribute_transform(array_name))
+                    .collect()
             }
-        })
-        .collect::<Vec<_>>();
+        } else {
+            let storage = storage?;
+            if is_marked_var(
+                &self.env_vars,
+                ASSOC_VARS,
+                &self.resolved_variable_name(array_name).unwrap_or_default(),
+            ) {
+                assoc_hash_ordered_values(
+                    &storage,
+                    assoc_nbuckets(
+                        &self.env_vars,
+                        &self.resolved_variable_name(array_name).unwrap_or_default(),
+                    ),
+                )
+            } else {
+                array_values(&storage)
+            }
+            .into_iter()
+            .map(|value| self.apply_parameter_transform_value(&value, transform))
+            .collect::<Vec<_>>()
+        };
         if quoted_array_word && starred {
             // GNU string_list_pos_params (subst.c:3030): a quoted `*` joins
             // with dollar_star (IFS[0]); an unquoted `*` stays a per-element

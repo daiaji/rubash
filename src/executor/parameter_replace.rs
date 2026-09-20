@@ -414,6 +414,37 @@ pub(in crate::executor) enum ParameterTransform {
     Lower,
 }
 
+/// GNU subst.c:8944-8951 parameter_brace_transform +
+/// valid_parameter_transform (subst.c:8898): when the text after the
+/// parameter name is `@xform`, xform must be exactly one valid transform
+/// character. Returns the base variable name when `inner` is such a
+/// `name@junk` form with an invalid suffix; the caller then applies the
+/// unset-NULL (subst.c:8927) vs fatal-error split. `#[...]` length forms
+/// are excluded because GNU parses `#` first, so a later `@` is operand
+/// text, not a transform operator.
+pub(in crate::executor) fn invalid_at_transform_base(inner: &str) -> Option<&str> {
+    let (head, tail) = inner.rsplit_once('@')?;
+    if head.starts_with('#') {
+        return None;
+    }
+    let bracketed = head.ends_with(']') && head.contains('[');
+    let valid_head = is_shell_name(head)
+        || matches!(head, "@" | "*" | "!" | "?" | "-" | "$")
+        || (!head.is_empty() && head.chars().all(|c: char| c.is_ascii_digit()))
+        || head.strip_prefix('!').is_some_and(|h: &str| {
+            is_shell_name(h) || (h.ends_with(']') && h.contains('['))
+        });
+    let valid_tail = matches!(
+        tail,
+        "a" | "A" | "K" | "k" | "E" | "P" | "Q" | "U" | "u" | "L"
+    );
+    if !(valid_head || bracketed) || valid_tail {
+        return None;
+    }
+    let base = head.split('[').next().unwrap_or(head);
+    Some(base.strip_prefix('!').unwrap_or(base))
+}
+
 pub(in crate::executor) fn parse_parameter_transform(
     name: &str,
 ) -> Option<(&str, ParameterTransform)> {

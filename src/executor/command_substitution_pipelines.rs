@@ -525,6 +525,14 @@ impl Executor {
                 })
             }
             Some("cat") => {
+                // Bare `cat` (or flag/`-` operands) reads fd 0 — the shared
+                // FUNCTION_STDIN cursor — which this shortcut cannot model;
+                // fall back to real execution (external_cat owns it).
+                if words.len() <= 1
+                    || words[1..].iter().any(|word| word.starts_with('-'))
+                {
+                    return None;
+                }
                 let mut output = String::new();
                 for word in &words[1..] {
                     let path = self.expand_word(word);
@@ -577,6 +585,11 @@ impl Executor {
                 Some(bytes_to_shell_text(&stdout))
             }
             "cat" => {
+                if words.len() <= 1
+                    || words[1..].iter().any(|word| word.starts_with('-'))
+                {
+                    return None;
+                }
                 let mut output = String::new();
                 for word in &words[1..] {
                     let path = self.expand_word(word);

@@ -87,14 +87,17 @@ impl Executor {
         }
 
         if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
+            // GNU string_var_assignment on an assoc cell emits the full
+            // var_attribute_string flag set (subst.c:8712), not just -A.
+            let flags = self.variable_assignment_flags(name, true);
             if let Some(value) = self
                 .env_vars
                 .get(name)
                 .and_then(|value| assoc_value_at(value, "0"))
             {
-                return format!("declare -A {name}={}", shell_reusable_quote(&value));
+                return format!("declare -{flags} {name}={}", shell_reusable_quote(&value));
             }
-            return format!("declare -A {name}");
+            return format!("declare -{flags} {name}");
         }
 
         if self
@@ -103,12 +106,13 @@ impl Executor {
             .is_some_and(|value| is_array_storage(value))
             || is_marked_array_var(&self.env_vars, name)
         {
+            let flags = self.variable_assignment_flags(name, true);
             return self
                 .env_vars
                 .get(name)
                 .and_then(|value| array_value_at(value, 0))
-                .map(|value| format!("declare -a {name}={}", shell_reusable_quote(&value)))
-                .unwrap_or_else(|| format!("declare -a {name}"));
+                .map(|value| format!("declare -{flags} {name}={}", shell_reusable_quote(&value)))
+                .unwrap_or_else(|| format!("declare -{flags} {name}"));
         }
 
         let readonly = is_marked_var(&self.env_vars, READONLY_VARS, name);
@@ -191,6 +195,53 @@ impl Executor {
     }
 
     pub(in crate::executor) fn parameter_attribute_transform(&self, name: &str) -> String {
+        // GNU array_transform -> list_transform (subst.c:8856+): `arr[@]@a`
+        // maps the attribute string over the ELEMENT list — an allocated
+        // array with N elements yields N copies (dollar_at space-joins
+        // inside quotes, dollar_star joins with IFS[0]), so an
+        // allocated-but-empty array (`foo=()`) yields nothing at all. A
+        // declared-but-never-assigned array (array_cell == NULL) takes the
+        // special case and reports the attributes once. The allocated cell
+        // is distinguished by an env value without the DECLARED_UNSET
+        // marker.
+        let star_suffix = name
+            .strip_suffix("[@]")
+            .map(|base| (base, false))
+            .or_else(|| name.strip_suffix("[*]").map(|base| (base, true)));
+        if let Some((base, starred)) = star_suffix {
+            let resolved = self
+                .resolved_variable_name(base)
+                .unwrap_or_else(|| base.to_string());
+            let allocated = self.env_vars.contains_key(&resolved)
+                && !is_marked_var(&self.env_vars, DECLARED_UNSET_VARS, &resolved);
+            if allocated {
+                let storage = self.parameter_array_storage(&resolved);
+                let count = storage
+                    .as_ref()
+                    .map(|storage| {
+                        if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+                            assoc_hash_ordered_values(
+                                storage,
+                                assoc_nbuckets(&self.env_vars, &resolved),
+                            )
+                            .len()
+                        } else {
+                            array_values(storage).len()
+                        }
+                    })
+                    .unwrap_or(0);
+                let attrs = self.parameter_attribute_transform(&resolved);
+                if count == 0 || attrs.is_empty() {
+                    return String::new();
+                }
+                let sep = if starred {
+                    self.ifs_first_char_separator()
+                } else {
+                    " ".to_string()
+                };
+                return vec![attrs; count].join(&sep);
+            }
+        }
         let base_name = parse_array_subscript(name)
             .map(|(array_name, _)| array_name)
             .unwrap_or(name);

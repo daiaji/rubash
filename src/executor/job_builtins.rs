@@ -638,14 +638,27 @@ impl Executor {
             }
             let state_text = state_text_opt.unwrap_or_else(|| "Unknown".to_string());
 
+            // GNU jobs.c:2207 pretty_print_job: the job flag column is `+`
+            // for the current job, `-` for the previous job, and a space
+            // otherwise; a second space follows for the standard format and
+            // the state field pads to LONGEST_SIGNAL_DESC (27, jobs.h:43).
+            let marker = match self.job_table.pid_to_job.get(&pid) {
+                Some(job_id) if self.job_table.current_job() == Some(*job_id) => '+',
+                Some(job_id) if self.job_table.previous_job() == Some(*job_id) => '-',
+                _ => ' ',
+            };
+
             if options.pids_only {
-                output.push_str(&format!("{pid}\n"));
+                output.push_str(&format!("{pid}
+"));
             } else if options.long {
                 output.push_str(&format!(
-                    "[{job_number}]  {pid} {state_text:<22} {source} &\n"
+                    "[{job_number}]{marker}  {pid} {state_text:<27}{source} &
+"
                 ));
             } else {
-                output.push_str(&format!("[{job_number}]  {state_text:<22} {source} &\n"));
+                output.push_str(&format!("[{job_number}]{marker}  {state_text:<27}{source} &
+"));
             }
             if options.changed_only {
                 self.last_notified_job_ids.insert(job_number);

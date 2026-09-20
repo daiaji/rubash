@@ -205,6 +205,16 @@ impl Executor {
         if let Some(pre) = preexpanded_stdin_body(body) {
             return pre.to_string();
         }
+        if std::env::var("RUBASH_DEBUG_HD").is_ok() {
+            eprintln!("[hd-expand] {:?}", &body[..body.len().min(40)]);
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let mut shown = 0;
+            for line in bt.lines().filter(|l| l.contains("rubash::")) {
+                eprintln!("   {}", line.trim());
+                shown += 1;
+                if line.contains("execute_command") || shown > 12 { break; }
+            }
+        }
         let quoted = body.starts_with(crate::lexer::QUOTED_HEREDOC_MARKER);
         let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));
         if quoted {
@@ -243,6 +253,16 @@ impl Executor {
     pub(in crate::executor) fn expand_heredoc_body(&self, body: &str) -> String {
         if let Some(pre) = preexpanded_stdin_body(body) {
             return pre.to_string();
+        }
+        if std::env::var("RUBASH_DEBUG_HD").is_ok() {
+            eprintln!("[hd-expand] {:?}", &body[..body.len().min(40)]);
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let mut shown = 0;
+            for line in bt.lines().filter(|l| l.contains("rubash::")) {
+                eprintln!("   {}", line.trim());
+                shown += 1;
+                if line.contains("execute_command") || shown > 12 { break; }
+            }
         }
         let quoted = body.starts_with(crate::lexer::QUOTED_HEREDOC_MARKER);
         let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));

@@ -1207,3 +1207,97 @@ ifs-posix 1、exp 4（`/src/cmd` 环境路径噪声）、new-exp 60、comsub 17�
   无法与 `redirects` 交错排序——架构项待修。
 - `${!@}`/`${!*}` 非 posix 下 bad substitution 缺口（`VALID_INDIR_PARAM`
   对 `@`/`*` 合法但 RB 间接路径未实现）。
+
+## 第二十七节：2026-09-21 new-exp/quotearray/comsub2 清零 + read 簇（fix/array6-patsub-quotes）
+
+**new-exp 60→0（GNU C 依据逐一对应）**：
+
+- **`{xxx}` 非保留字**（`parse.y`：`{` 仅独立成 token 才是保留字）：
+  scanner 对 `{` 后紧跟词字符的形态发普通词，`$({xxx}</dev/stdin)`
+  不再硬语法错误中止脚本（GNU 按 command-not-found 恢复）。
+- **引号 `${}` 内嵌 `$@`/`$*` 空展开保留一个空字段**
+  （`subst.c:12026` `had_quoted_null`）：`"${foo:-$@}"`、`"${foo-$@}"`、
+  `"${foo:-$*}"` 等算子词使用且展开为零字段时产出一个空字段；
+  `removes_unquoted_null_word` 增加 raw-quoted 门控。
+- **`${!PREFIX*}`/`${!PREFIX@}` 变量名前缀展开**（`subst.c:9978-10007`
+  `all_variables_matching_prefix` → `vapply` → `sort_variables`
+  strcmp 序）：`@` 形逐字段（W_DOLLARAT）、`*` 形按 IFS[0] 连接；
+  前缀形跳过 `@`/`:` 算子尾检查；空匹配 `@`→0 字段、`*`→1 空字段。
+- **`${@%%pat}` 空位置参数全位置丢弃**（恢复被 revert 的正确语义）。
+- **quoted `"${a[@]:N}"` 逐元素子串**：复合赋值 `\uE102` 原子路径
+  与 `\x1d` 路径均按 `[@]` 逐元素、`[*]` 按 IFS[0] 单字段连接。
+- **`@A`/`@a`/`@Q`/`@E`/`@P`/`@K` 变换矩阵**（`subst.c:8856`
+  `array_transform`）：`@A`/`@a`/`@K` 对数组/assoc 恒单次属性串
+  （`var_attribute_string` 语义，携带全部 `-a/-i/-l/-r/-u` flag）；
+  `storage.is_none()`（cell 未分配）空数组 `@a` 特判返回一次属性串，
+  `foo=()` 已分配空表逐元素→空；`${!var@Q}`/`${!var[@]%..@T}`
+  间接逐元素变换接通。
+- **`-u` 下空数组 cell 视为 unbound**：标量形 `${foo}`/`${foo@a}`/
+  `${!bar}`→空数组报 `foo: unbound variable`；`[@]`/`[*]` 形豁免；
+  `!` 间接报告 `!name`。
+- **`${$(…)}` 与无效 `@op` → bad substitution**（`subst.c:8944`
+  `valid_parameter_transform` + `expand_param_fatal`）：顶层与嵌套
+  `${c//${$((…))}/x/}` 均拦；`@C`/`@` 等无效变换在**已设**变量上
+  FORCE_EOF 致命（rc=1 中止脚本），未设变量 NULL 早退静默。
+- **标量 `${var[@]:N}` 退化为字符子串**（`subst.c` 标量走
+  单元素数组路径）。
+- **`declare -f` 在 comsub 内不再单行规整化重印**（删除伪输出烤死
+  路径，`$(<x)`/`(cat x1)` 序列表保真）。
+- **prompt `\[`/`\]` decode**（`parse.y` 字节语义）：`\[`→`\x01`、
+  `\]`→`\x02` 字面字节，修复外层循环变量遮蔽导致的恒 `\x02`。
+
+**quotearray 50→0**：
+
+- **assoc 下标 `\x1e` 预编码幂等**：`expand_arithmetic_assoc_subscripts`
+  对已编码 `\x1e` 下标透传，修 `eval_parameter_substring_offset{,_mut}`
+  与 `eval_arithmetic_expansion_value` 间的二次编码（`A[%]` 偏移 0 病）。
+- **`${!aref}` 无引号路径按 GNU 桶序**（`assoc_nbuckets`/`bash_assoc_order`）：
+  `indirect_target_values` 不再走插入序 `array_values`——单命令
+  `assoc[@]=at assoc[*]=star` 后 `star bang at` 序对齐。
+
+**comsub2 34→0**：命令替换输出/状态簇按 `subst.c:7143`
+`command_substitute` 与 `parse.y:4451 parse_comsub` 对齐。
+
+**read 44→环境残留（无真 diff）**：
+
+- **内建 `<` 重定向失败中止**（`redir.c:767 do_redirections` 先于
+  builtin 执行）：`{ read -t 0.5 a; } </nonexist` rc=1 且不赋值、
+  不污染后续 read 状态。
+- **共享 stdin 游标**（GNU fd 0 共享语义，`subst.c:7143`）：
+  `FUNCTION_STDIN_OFFSET` 贯通 read/外部命令/函数/命令替换——
+  `stdin_string_for_command` 返回剩余段；`function_call_stdin`
+  标记 carve 来源、函数返回时子游标折回父游标；comsub 子侧经
+  `Cell` 惰性回写（`apply_comsub_stdin_writeback`）；`cat` 快路径
+  裸调用回落真实管线；`run_external_command_substitution` 喂
+  FUNCTION_STDIN 余量。
+- **`read -a` 保留空字段**（`read.def` 非空白 IFS 分隔符产空字段）：
+  `split_read_array_words{,_backslash}` 委托 `split_read_field_ranges`，
+  `IFS=: read -a A <<< :::` → 3 空元素。
+- **`read -t` 超时仍赋已读部分**（`read.def:540-554`：retval=
+  128+SIGALRM 后 `goto assign_vars`）：`timed_read_followup_output`
+  改用真实变量存储做临时赋值/恢复，同组后续命令可见部分值。
+- **`read -t 0` 非终端立即可读 → rc 0**（GNU poll 语义）：
+  /dev/null、EOF 管道、文件均成功。
+- **原始字节分隔符**（`lib/sh/stringlib.c` 字节语义）：
+  `$'\200'` 等载体字节经 RAW_BYTE 标记对存储，分隔符派生与比较
+  全部按解码后字节码位——管道/`< <()`/`-u fd`/`-n` 组合全对齐。
+- **IFS 载体字节分词**（`read.def` IFS whitespace 判定）：
+  `read_split.rs` 分词器改逻辑单元（标记对解码为字节码位）比较，
+  `\f`(0x0c) 等载体字节在 IFS 与输入两侧正确识别修剪——
+  `IFS=$'\t\r\f\v'` 尾部空白裁剪对齐。
+
+**台账**（true-baseline.sh 同口径）：new-exp 60→0、quotearray 50→0、
+comsub2 34→0、read 44→0 真 diff（残留 25 行全环境性：Windows 无
+`/dev/tty` → RB rc=1 vs GNU 真实 tty 超时 142 及其连锁变量态 +
+GNU 侧 mkfifo `Operation not supported` 触发 124 截断）、
+ifs-posix 全量 6856/6856 通过（harness 短超时曾产空 rb.out 抖动）、
+comsub 17（预存：alias 注入未闭合 `$(`、`let --`、case-in-comsub）、
+exp 4（`/src/cmd` 环境路径噪声）、assoc 0、array 0、posixexp 0、
+braces 0、ifs 0、rhs-exp 0、arith 0。
+
+**read 已知环境残留**（非语义缺口）：
+- `read -t N </dev/tty`：RB 打不开 `/dev/tty`（rc=1）vs GNU 打开
+  控制台超时（rc>128）——Windows 无进程控制终端。
+- `read -e`（readline）超时族同理。
+- 套件 GNU 侧 mkfifo 循环（2000 次子 shell）+ `/dev/tty` 阻塞导致
+  GNU 输出在 harness 超时处截断，RB 多出的尾部行为 GNU 未执行区段。

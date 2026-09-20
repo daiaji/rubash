@@ -617,7 +617,7 @@ impl Executor {
     /// hex encoding of the expanded key. The parser reads it back untouched
     /// (`lvalue::parse_assoc_subscript`), which is what keeps
     /// `A['$v']` → `$v` and `k='$w'; A[$k]` → `$w` from expanding twice.
-    fn expand_arithmetic_assoc_subscripts(
+    pub(in crate::executor) fn expand_arithmetic_assoc_subscripts(
         &mut self,
         expression: &str,
         verbatim_keys: bool,
@@ -663,6 +663,20 @@ impl Executor {
                 let end = assoc_subscript_end(bytes, index);
                 if end > index + 1 && bytes.get(end - 1) == Some(&b']') {
                     let raw = &expression[index + 1..end - 1];
+                    if raw.starts_with(ARITH_ASSOC_KEY_MARKER) {
+                        // Caller already ran this pass (e.g. the substring
+                        // offset path pre-encodes before delegating to
+                        // eval_arithmetic_expansion_value, which encodes
+                        // again): re-encoding the marker text would make the
+                        // decoded key the encoded string itself, so the
+                        // lookup misses. The pass must be idempotent.
+                        output.push_str(name);
+                        output.push('[');
+                        output.push_str(raw);
+                        output.push(']');
+                        index = end;
+                        continue;
+                    }
                     // GNU expr.c:1171 expr_streval: under array_expand_once
                     // an EXP_EXPANDED operand (`let`/`[[` args, already
                     // word-expanded) takes AV_NOEXPAND — the subscript text
@@ -734,8 +748,11 @@ impl Executor {
                 if end > index + 1 && bytes.get(end - 1) == Some(&b']') {
                     let raw = &expression[index + 1..end - 1];
                     // A literally-empty `a[]` is a bad subscript, not an
-                    // expansion — leave it for the parser.
-                    if !raw.is_empty() {
+                    // expansion — leave it for the parser. An already
+                    // marker-encoded subscript is the caller's finished
+                    // product — pass it through so a second pass stays
+                    // idempotent (same rule as the assoc scanner above).
+                    if !raw.is_empty() && !raw.starts_with(ARITH_ASSOC_KEY_MARKER) {
                         let expanded = self.expand_arithmetic_expression_mut(raw);
                         output.push_str(name);
                         output.push('[');

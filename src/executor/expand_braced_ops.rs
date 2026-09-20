@@ -5,6 +5,19 @@ impl Executor {
         &self,
         name: &str,
     ) -> Option<String> {
+        // GNU subst.c:8927 parameter_brace_transform: for an unset variable
+        // the `@xform` transform returns NULL before the transform's
+        // validity is even checked, so `${unset@-d}` expands empty rather
+        // than letting `-d` parse as a default-value operator on `x@`.
+        // Set variables with an invalid xform were already reported as a
+        // fatal bad substitution by the parameter-error pre-scan.
+        if let Some(base) = invalid_at_transform_base(name) {
+            let is_set = self.parameter_error_value(base).is_some()
+                || self.env_vars.contains_key(base);
+            if !is_set {
+                return Some(String::new());
+            }
+        }
         if let Some((var_name, word)) = split_once_outside_subscript_str(name, ":=") {
             if self
                 .parameter_operator_value(var_name)
@@ -108,9 +121,6 @@ impl Executor {
             );
         }
         if let Some((var_name, word)) = split_once_outside_subscript(name, '-') {
-            if std::env::var_os("RB_DBG_DASH").is_some() {
-                eprintln!("[dash] name={name:?} word={word:?} expanded={:?}", self.expand_parameter_word(word));
-            }
             return Some(
                 self.parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))

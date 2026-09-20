@@ -1,4 +1,4 @@
-use super::{ArithLValue, ConditionalArithParser};
+use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser};
 use crate::executor::arithmetic::{assignment_operator_at, skip_arith_ws};
 use crate::executor::{
     is_marked_var, is_shell_name, is_shell_name_char, is_shell_name_start, strip_matching_quotes,
@@ -40,7 +40,7 @@ impl ConditionalArithParser<'_> {
         let resolved_name = self.resolved_lvalue_name(&name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
             // Associative arrays use the key verbatim; no deferred evaluation.
-            let key = self.parse_assoc_subscript()?;
+            let key = self.parse_assoc_subscript(&resolved_name)?;
             return Some(ArithLValue::Assoc {
                 name: resolved_name,
                 key,
@@ -142,7 +142,7 @@ impl ConditionalArithParser<'_> {
 
         let resolved_name = self.resolved_lvalue_name(&name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
-            let key = self.parse_assoc_subscript()?;
+            let key = self.parse_assoc_subscript(&resolved_name)?;
             return Some(ArithLValue::Assoc {
                 name: resolved_name,
                 key,
@@ -194,7 +194,7 @@ impl ConditionalArithParser<'_> {
         name.to_string()
     }
 
-    pub(super) fn parse_assoc_subscript(&mut self) -> Option<String> {
+    pub(super) fn parse_assoc_subscript(&mut self, name: &str) -> Option<String> {
         let start = self.pos;
         let mut depth = 0usize;
         while self.pos < self.input.len() {
@@ -215,10 +215,21 @@ impl ConditionalArithParser<'_> {
                     // A pre-expanded key (the Executor-side
                     // expand_subscript_string pass) is already the final
                     // string: use it verbatim and never expand it again.
-                    if let Some(literal) = super::super::decode_arithmetic_assoc_key(&key) {
-                        return Some(literal);
+                    let key = match super::super::decode_arithmetic_assoc_key(&key) {
+                        Some(literal) => literal,
+                        None => self.expand_assoc_subscript_key(&key),
+                    };
+                    if key.is_empty() {
+                        // GNU array_variable_part (arrayfunc.c): an assoc
+                        // subscript whose expand_subscript_string result is
+                        // empty is a bad subscript — diagnosed once here and
+                        // once in get_array_value, so the read reports it
+                        // twice (`A[$k]` with k unset -> `A[]: bad array
+                        // subscript` x2), then the element reads as 0.
+                        self.diags.push(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+                        self.diags.push(ArithEvalDiag::BadSubscript(format!("{name}[]")));
                     }
-                    return Some(self.expand_assoc_subscript_key(&key));
+                    return Some(key);
                 }
                 b']' => {
                     depth -= 1;

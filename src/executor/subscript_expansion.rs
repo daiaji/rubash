@@ -360,7 +360,13 @@ impl Executor {
         let Some((name, subscript)) = parse_array_subscript(operand) else {
             return Ok(operand.to_string());
         };
-        if !is_shell_name(name) || matches!(subscript, "@" | "*") {
+        let is_assoc =
+            assoc.unwrap_or_else(|| is_marked_var(&self.env_vars, ASSOC_VARS, name));
+        // GNU test.c/expr.c: for an ASSOCIATIVE base, `@` and `*` are
+        // ordinary subscript keys (`test -v 'assoc[@]'` tests the `@`
+        // element); only indexed arrays treat them as whole-array
+        // subscripts that bypass element resolution.
+        if !is_shell_name(name) || (!is_assoc && matches!(subscript, "@" | "*")) {
             return Ok(operand.to_string());
         }
         let source = match mode {
@@ -371,7 +377,7 @@ impl Executor {
             // assign_array_element_internal without ASS_NOEXPAND.
             OperandSubscriptMode::AlwaysExpand => SubscriptSource::Raw(subscript),
         };
-        if assoc.unwrap_or_else(|| is_marked_var(&self.env_vars, ASSOC_VARS, name)) {
+        if is_assoc {
             let key = self.resolve_array_subscript(source);
             return Ok(format!(
                 "{name}[{}]",

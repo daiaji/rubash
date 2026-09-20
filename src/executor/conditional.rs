@@ -589,8 +589,16 @@ impl Executor {
         op: &str,
         right: &str,
     ) -> i32 {
-        let left_expanded = self.expand_word_mut(left);
-        let right_expanded = self.expand_word_mut(right);
+        // GNU subst.c:11395-11404 expand_array_subscript: under Q_ARITH a
+        // `name[sub]` operand expands the subscript once and backslash-quotes
+        // the expansion products (abstab: [] $ ` ~ \ ' "), so a `]`/`~`/`$(`
+        // produced by `$key` never re-lexes as subscript syntax — `assoc[]]`
+        // resolves key `]`. Encoding the key to its opaque marker form here
+        // gives the evaluator the same "expanded once, then protected" text.
+        let left_encoded = self.expand_arithmetic_assoc_subscripts(left, false);
+        let right_encoded = self.expand_arithmetic_assoc_subscripts(right, false);
+        let left_expanded = self.expand_word_mut(&left_encoded);
+        let right_expanded = self.expand_word_mut(&right_encoded);
         // GNU execute_cmd.c:4049-4068 -> test.c:357-372 arithcomp -> evalexp:
         // the operands were word-expanded by cond_expand_word (mode 3,
         // Q_ARITH). Under compat>51 arithcomp passes eflag=0, so

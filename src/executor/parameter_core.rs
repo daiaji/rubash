@@ -455,7 +455,15 @@ impl Executor {
             })
             .unwrap_or(value)
             .trim();
-        let expression = self.expand_arithmetic_special_parameters(expression);
+        // GNU subst.c:11395-11404 expand_array_subscript (under Q_ARITH):
+        // a `name[sub]` inside the offset/length expands its subscript once
+        // and backslash-quotes the products (abstab), so `A[$k]` with
+        // k=`$(echo %)` keys on the literal `$(echo %)`. Encoding the assoc
+        // key FIRST matters: if the $-passes below ran on `A[$k2]` first,
+        // the raw `$(echo %)` product would sit inside the brackets and the
+        // encoder would execute it a second time.
+        let expression = self.expand_substring_assoc_subscripts(&expression);
+        let expression = self.expand_arithmetic_special_parameters(&expression);
         // Expand nested parameter expansions in the offset/length expression
         // first: `${v:${w:-4}}` has offset `${w:-4}` which must become `4`
         // before arithmetic evaluation (Bash evaluates the slice offset as
@@ -472,6 +480,58 @@ impl Executor {
             *self.arithmetic_last_error_expression.borrow_mut() = expression.to_string();
         }
         isize::try_from(evaluated?).ok()
+    }
+
+    /// `&self` counterpart of
+    /// [`Executor::expand_arithmetic_assoc_subscripts`] for the substring
+    /// offset/length scan: finds `name[sub]` references to associative
+    /// variables and replaces the subscript with the opaque encoded key
+    /// after one `expand_subscript_string` pass.
+    fn expand_substring_assoc_subscripts(&self, expression: &str) -> String {
+        let bytes = expression.as_bytes();
+        if !bytes.contains(&b'[') {
+            return expression.to_string();
+        }
+        let mut output = String::with_capacity(expression.len());
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let ch = bytes[index];
+            if !(ch.is_ascii_alphabetic() || ch == b'_') {
+                let next = expression[index..].chars().next().unwrap_or_default();
+                output.push(next);
+                index += next.len_utf8();
+                continue;
+            }
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            let name = &expression[start..index];
+            if index < bytes.len()
+                && bytes[index] == b'['
+                && is_marked_var(&self.env_vars, ASSOC_VARS, name)
+            {
+                if let Some(close) = expression[index..].find(']').map(|p| index + p) {
+                    let raw = &expression[index + 1..close];
+                    if !raw.is_empty() {
+                        let key = self.expand_subscript_string(raw);
+                        output.push_str(name);
+                        output.push('[');
+                        output.push_str(
+                            &crate::executor::arithmetic::encode_arithmetic_assoc_key(&key),
+                        );
+                        output.push(']');
+                        index = close + 1;
+                        continue;
+                    }
+                }
+            }
+            output.push_str(name);
+        }
+        output
     }
 
     pub(in crate::executor) fn parse_parameter_substring_mut<'a>(
@@ -568,7 +628,11 @@ impl Executor {
             })
             .unwrap_or(value)
             .trim();
-        let expression = self.expand_arithmetic_special_parameters(expression);
+        // Same expand_array_subscript protection as the &self variant:
+        // encode `name[sub]` assoc subscripts before the $-passes, so
+        // expansion products inside the subscript stay verbatim keys.
+        let expression = self.expand_arithmetic_assoc_subscripts(&expression, false);
+        let expression = self.expand_arithmetic_special_parameters(&expression);
         let expression = self.expand_embedded_parameters_mut(&expression);
         let evaluated = self.eval_arithmetic_expansion_value(&expression);
         if evaluated.is_none() {

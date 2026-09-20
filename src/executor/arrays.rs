@@ -499,12 +499,14 @@ pub(super) fn field_split_positional_values_with_ifs(
         .enumerate()
         .flat_map(|(index, value)| {
             let is_last = index + 1 == value_count;
+            // GNU subst.c: an unquoted `$@`/`$*` expansion produces one word
+            // per positional parameter, then field-splits each. An empty
+            // parameter yields no fields (subst.c list_string discards
+            // empty words from unquoted expansions), so drop it entirely
+            // rather than keeping a spurious empty field (new-exp `${@%%[!/]*}`
+            // where `.` becomes empty after pattern removal).
             let mut fields = if value.is_empty() {
-                if is_last {
-                    Vec::new()
-                } else {
-                    vec![value]
-                }
+                Vec::new()
             } else if let Some(ifs) = ifs.filter(|ifs| ifs.chars().any(|ch| !ch.is_whitespace())) {
                 if ifs.chars().any(is_ifs_whitespace) {
                     split_mixed_ifs(&value, ifs)

@@ -128,6 +128,12 @@ impl Executor {
             // parameter_brace_expand_indir); invalid-name environment
             // entries live in the separate invisible invalid_env table
             // (variables.c:3307) and never match (niubash issue #102).
+            // GNU subst.c:9978-10007 parameter_brace_expand: the prefix list
+            // comes from all_variables_matching_prefix, which vapply()s
+            // sort_variables — strcmp order (variables.c:4250-4262). `@`
+            // uses string_list_dollar_at and `*` string_list_dollar_star;
+            // unquoted both join with IFS[0] (' ' when unset/empty) and the
+            // caller's field split reproduces the per-name fields.
             let mut names: Vec<&str> = self
                 .env_vars
                 .keys()
@@ -135,7 +141,7 @@ impl Executor {
                 .filter(|name| is_shell_name(name) && name.starts_with(prefix))
                 .collect();
             names.sort_unstable();
-            return Some(names.join(" "));
+            return Some(names.join(&self.ifs_first_char_separator()));
         }
 
         if indirect_name == "#" {
@@ -200,6 +206,51 @@ impl Executor {
                 .unwrap_or_default()
         };
 
+        // GNU subst.c:7883-7935 parameter_brace_expand_indir: the indirect
+        // target is itself expanded as a variable reference, so a
+        // `name[@]`/`name[*]` target (`aref='assoc[@]'`) expands to ALL
+        // element values — space-joined for `@`, IFS[0]-joined for `*`
+        // (string_list_dollar_at / string_list_dollar_star).
+        if let Some(base) = target_name
+            .strip_suffix("[@]")
+            .or_else(|| target_name.strip_suffix("[*]"))
+        {
+            if let Some(resolved) = self.resolved_variable_name(base) {
+                if is_marked_var(&self.env_vars, ARRAY_VARS, &resolved)
+                    || is_marked_var(&self.env_vars, ASSOC_VARS, &resolved)
+                    || self.parameter_array_storage(&resolved).is_some()
+                {
+                    let separator = if target_name.ends_with("[*]") {
+                        self.ifs_first_char_separator()
+                    } else {
+                        " ".to_string()
+                    };
+                    return Some(
+                        self.parameter_array_storage(&resolved)
+                            .map(|value| {
+                                if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+                                    // GNU assoc_reference order follows the
+                                    // hash table's bucket order, not
+                                    // insertion order (hashlib.c).
+                                    let nbuckets =
+                                        assoc_nbuckets(&self.env_vars, &resolved);
+                                    bash_assoc_order(&assoc_entries(&value), nbuckets)
+                                        .into_iter()
+                                        .map(|(_, (_, entry_value))| entry_value)
+                                        .collect::<Vec<_>>()
+                                        .join(&separator)
+                                } else {
+                                    indexed_array_entries(&value)
+                                        .into_values()
+                                        .collect::<Vec<_>>()
+                                        .join(&separator)
+                                }
+                            })
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+        }
         if let Some(value) = self.array_element_parameter_value(&target_name) {
             return Some(value);
         }

@@ -396,6 +396,17 @@ impl<'a> Lexer<'a> {
                 let v = self.slice(start);
                 let kind = if is_brace_expansion(v) {
                     TokenKind::BraceExpand
+                } else if self.input[start + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| !"()<>;&| \t\n\r".contains(ch))
+                {
+                    // GNU parse.y: `{' is a reserved word only as a
+                    // standalone token — `{xxx}` (brace followed by a word
+                    // character) is an ordinary word, never a group
+                    // opener. The unclosed scan above applies the same
+                    // break-set test to decide whether `{' qualifies.
+                    TokenKind::Word
                 } else {
                     TokenKind::Keyword
                 };

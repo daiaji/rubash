@@ -191,6 +191,10 @@ impl Executor {
         if let Some((name, message, status)) = self.parameter_expansion_error(cmd) {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;
+            if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExitCode(1));
+            }
             self.exit_code = status;
             if status == 1 {
                 // GNU Bash 5.2: bad substitution and `substring expression
@@ -350,6 +354,10 @@ impl Executor {
         if let Some((name, message, status)) = self.parameter_expansion_error(cmd) {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;
+            if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExitCode(1));
+            }
             self.exit_code = status;
             if status == 1 {
                 // GNU 5.2 non-fatal word-expansion errors (bad substitution,
@@ -969,6 +977,35 @@ impl Executor {
                 .and_then(|spans| spans.first().map(|span| span.context))
                 .unwrap_or(SubstitutionQuoteContext::Unquoted)
         };
+        // GNU subst.c:9978-10007 parameter_brace_expand: "${!PREFIX@}"
+        // expands to the sorted matching variable names as one field per
+        // name (string_list_dollar_at -> W_DOLLARAT); an empty match list
+        // yields zero fields, like "$@". "${!PREFIX*}" is the IFS[0]-joined
+        // scalar and stays on the String path below.
+        if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
+            if let Some(body) = word
+                .strip_prefix('\x1d')
+                .filter(|w| {
+                    w.starts_with("${!") && w.ends_with('}') && braced_parameter_spans_whole_word(w)
+                })
+                .map(|w| &w[3..w.len() - 1])
+            {
+                if let Some(prefix) = body.strip_suffix('@') {
+                    if !prefix.is_empty() && is_shell_name(prefix) {
+                        let mut names: Vec<String> = self
+                            .env_vars
+                            .keys()
+                            .filter(|name| is_shell_name(name) && name.starts_with(prefix))
+                            .cloned()
+                            .collect();
+                        // all_variables_matching_prefix -> vapply ->
+                        // sort_variables: strcmp order (variables.c:4250).
+                        names.sort_unstable();
+                        return names;
+                    }
+                }
+            }
+        }
         // GNU marks literal word characters with CTLESC during expansion
         // (subst.c expand_word_internal), so only expansion results are
         // eligible for IFS splitting. Rubash's expansion does not carry
@@ -1191,9 +1228,6 @@ impl Executor {
     ) -> Option<Vec<String>> {
         let was_quoted = word.starts_with('\x1d');
         let word = word.strip_prefix('\x1d').unwrap_or(word);
-        if std::env::var_os("RB_DBG_BAV").is_some() {
-            eprintln!("[bav] word={word:?}");
-        }
         let Some(rest) = word.strip_prefix("${") else {
             return None;
         };
@@ -1322,7 +1356,16 @@ impl Executor {
             && !fragment_quoted
             && (alternate.contains("$@") || alternate.contains("${@}"))
         {
-            return Some(self.expand_alternate_word_fragment(&format!("\"{alternate}\"")));
+            // GNU subst.c:12026-12035 (expand_word_internal): the enclosing
+            // double-quoted ${...} retains one empty field when the used
+            // alternate expands to zero words (`"${foo-$@}"` with no
+            // positional parameters yields `argv[1] = <>`, not zero args).
+            let values = self.expand_alternate_word_fragment(&format!("\"{alternate}\""));
+            return Some(if values.is_empty() {
+                vec![String::new()]
+            } else {
+                values
+            });
         }
 
         // Posix interp 888 (subst.c string_list_pos_params:3047-3072): the
@@ -1499,7 +1542,15 @@ impl Executor {
             }
             return Some(self.field_split_values(&expanded));
         }
-        Some(self.expand_alternate_word_fragment(alternate))
+        // Same quoted-null retention as the `$@` branch above: a fully
+        // double-quoted `${...}` keeps one empty field when the used
+        // alternate expands to zero words (`"${foo-"$@"}"`, `"${foo:-${@}}"`,
+        // `"${foo-$@$@}"` with no positional parameters).
+        let values = self.expand_alternate_word_fragment(alternate);
+        if outer_double_quoted && values.is_empty() {
+            return Some(vec![String::new()]);
+        }
+        Some(values)
     }
 
     // Fully double-quoted `${op...$@...}` words (e.g. `"${1+  $@  }"`) carry
@@ -1510,9 +1561,6 @@ impl Executor {
     // text attaches to the first/last positional word, one word per
     // parameter. Returning None leaves every other form on its existing path.
     fn quoted_braced_alternate_positional_at_values(&mut self, word: &str) -> Option<Vec<String>> {
-        if std::env::var_os("RB_DBG_QBAV").is_some() {
-            eprintln!("[qbav] word={word:?}");
-        }
         let braced = word.strip_prefix('\x1d')?;
         if !braced.starts_with("${") || !braced.ends_with('}') {
             return None;
@@ -1609,7 +1657,15 @@ impl Executor {
         } else {
             format!("\"{alternate}\"")
         };
-        self.quoted_positional_at_word_values_with_raw(alternate, Some(&synthetic_raw), None)
+        let values = self
+            .quoted_positional_at_word_values_with_raw(alternate, Some(&synthetic_raw), None)?;
+        // GNU subst.c:12026-12035: this word is -marked (fully
+        // double-quoted), so a zero-field alternate still yields one empty
+        // field (`"${foo-$@}"` with no positional parameters -> `argv[1] = <>`).
+        if values.is_empty() {
+            return Some(vec![String::new()]);
+        }
+        Some(values)
     }
 
     pub(in crate::executor) fn expand_alternate_word_fragment(

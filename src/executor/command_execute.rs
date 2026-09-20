@@ -365,6 +365,9 @@ impl Executor {
         // with the same expand_word_error classification. Expand once here
         // and mark the results so the stdin paths return them verbatim
         // instead of re-running embedded substitutions.
+        if std::env::var("RUBASH_DEBUG_HD").is_ok() && (cmd.heredoc.is_some() || cmd.here_string.is_some() || !cmd.heredoc_redirects.is_empty()) {
+            eprintln!("[preexpand] words={:?} hd={:?} hdrs={:?}", cmd.words, cmd.heredoc.as_deref().map(|b| &b[..b.len().min(30)]), cmd.heredoc_redirects.iter().map(|r| (r.fd, r.body.as_deref().map(|b| &b[..b.len().min(30)]))).collect::<Vec<_>>());
+        }
         self.preexpand_command_stdin(&mut cmd);
         self.abort_on_expansion_errors()?;
 
@@ -646,6 +649,12 @@ impl Executor {
     /// second time. Quoted-delimiter bodies and `\x1d` ANSI-C bodies are
     /// left untouched: they take their own verbatim/decode paths.
     fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) {
+        // The parser stores an unnumbered `<<EOF` body in BOTH `heredoc` and
+        // `heredoc_redirects` (fd == None); it is one redirection, so expand
+        // it once and share the marked result between the two fields —
+        // otherwise embedded substitutions like `${ incr; }` would run
+        // twice (comsub23.sub `after here-doc: 1`).
+        let shared_raw = cmd.heredoc.clone();
         if let Some(body) = cmd.heredoc.take() {
             cmd.heredoc = Some(if Self::stdin_body_needs_expansion(&body) {
                 format!(
@@ -658,6 +667,10 @@ impl Executor {
         }
         for redirect in &mut cmd.heredoc_redirects {
             if let Some(body) = redirect.body.take() {
+                if redirect.fd.is_none() && shared_raw.as_deref() == Some(body.as_str()) {
+                    redirect.body = cmd.heredoc.clone();
+                    continue;
+                }
                 redirect.body = Some(if Self::stdin_body_needs_expansion(&body) {
                     format!(
                         "{PREEXPANDED_STDIN_BODY}{}",
