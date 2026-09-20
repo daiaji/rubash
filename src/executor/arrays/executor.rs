@@ -194,7 +194,17 @@ impl Executor {
                 }
             }
         } else {
-            strip_matching_quotes(&self.expand_arithmetic_special_parameters(key)).to_string()
+            // GNU subst.c array_variable_part expands the subscript in a
+            // double-quoted context: `"x"` loses its quotes before evalexp,
+            // while `'x'` survives as literal text (sq is data in dq context)
+            // and evalexp then rejects it as a string operand — `a[' ']`
+            // fails "' ': operand expected" where `a[" "]` resolves to 0.
+            let expanded = self.expand_arithmetic_special_parameters(key);
+            if expanded.len() >= 2 && expanded.starts_with('"') && expanded.ends_with('"') {
+                expanded[1..expanded.len() - 1].to_string()
+            } else {
+                expanded
+            }
         };
         if key.trim() == "*" || key.trim() == "@" {
             return None;

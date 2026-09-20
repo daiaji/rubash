@@ -14,6 +14,7 @@ pub(super) use storage::{
     normalize_array_expanded_value, parse_array_integer_subscript, parse_array_numeric_subscript,
     parse_array_subscript, quote_array_value, resolve_indexed_array_subscript, store_indexed_array,
 };
+pub(crate) use storage::{ansic_quote, ansic_shouldquote};
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -21,7 +22,7 @@ use super::{
     apply_parameter_case_mod, assoc_value_at, eval_arith_value, eval_conditional_arith_value,
     is_marked_var, is_shell_name, parse_indirect_pattern_removal, parse_parameter_case_mod,
     parse_parameter_replacement, parse_parameter_transform, remove_parameter_pattern,
-    split_indexed_tagged_token, split_storage_words, strip_matching_quotes, unquote_storage_value,
+    split_indexed_tagged_token, split_storage_words, unquote_storage_value,
     Executor, ParameterTransform, ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
 use crate::lexer::remove_shell_quotes;

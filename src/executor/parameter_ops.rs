@@ -11,6 +11,10 @@ pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
                 output.push('\'');
                 index += 1;
             }
+            '\x18' => {
+                output.push('"');
+                index += 1;
+            }
             '"' => {
                 index += 1;
                 while index < chars.len() {

@@ -545,14 +545,11 @@ impl Executor {
             return false;
         };
         if first == ':' {
-            let rest = &name[1..];
-            if rest.is_empty() {
-                return false;
-            }
-            return match rest.chars().next() {
-                Some('-' | '+' | '=' | '?') => rest.len() > 1,
-                _ => true,
-            };
+            // GNU 5.3 parameter_brace_expand: a `:`-led operator accepts an
+            // empty word — `${#:-}`/`${#:+}`/`${#:=}`/`${#:?}` are `$#` under
+            // the colon operator (more-exp `recho ${#:-}` -> `0`), unlike
+            // the colon-less `${#=}`/`${#+}` which stay bad substitution.
+            return !name[1..].is_empty();
         }
         matches!(
             first,

@@ -108,6 +108,9 @@ impl Executor {
             );
         }
         if let Some((var_name, word)) = split_once_outside_subscript(name, '-') {
+            if std::env::var_os("RB_DBG_DASH").is_some() {
+                eprintln!("[dash] name={name:?} word={word:?} expanded={:?}", self.expand_parameter_word(word));
+            }
             return Some(
                 self.parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))

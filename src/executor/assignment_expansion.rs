@@ -525,6 +525,20 @@ impl Executor {
     }
 
     fn expand_assignment_value_inner(&mut self, name: &str, value: &str) -> String {
+        // GNU expand_string_for_assignment (subst.c:4365) sets
+        // expand_no_split_dollar_star=1 for the whole assignment-RHS
+        // expansion, so `${*/a/x}` on the RHS joins with IFS[0]
+        // (string_list_dollar_star) instead of the unquoted dollar_at space
+        // join (array26.sub: `A=${*/a/x}` under IFS='' yields `xabb`).
+        struct AssignmentRhsGuard(bool);
+        impl Drop for AssignmentRhsGuard {
+            fn drop(&mut self) {
+                super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.set(self.0));
+            }
+        }
+        let _assignment_rhs = AssignmentRhsGuard(
+            super::expand_braced_replacement::ASSIGNMENT_RHS.with(|f| f.replace(true)),
+        );
         // One cross-pass subscript-eval memo scope per assignment value —
         // `${a[i++]:=x}` on an RHS is one GNU evaluation across the
         // pre-scan and the expansion below. Its own word context keeps

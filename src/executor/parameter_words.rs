@@ -6,8 +6,16 @@ impl Executor {
         // ${parameter:=word}, and ${parameter+word} has quote-aware expansion
         // flags. This covers tilde2.tests while the lexer still discards most
         // quote state.
+        let expanded = self.expand_embedded_parameters(word);
+        // GNU subst.c:4807 dequote_string: quote removal ran inside the
+        // expansion pass, so `'`/`"` left in its output are
+        // expansion-produced data, not syntax. Mark them \x17/\x18 before
+        // decode_parameter_word_quotes, whose quote rules would otherwise
+        // re-read a data `"` as an opener and drop it plus everything after
+        // (array6.sub: `X${dbg-'x"'}Y` -> `Ax"Y`, not `AxY`).
+        let expanded = expanded.replace('"', "\u{18}").replace('\'', "\u{17}");
         let expanded = unescape_remaining_shell_escapes(&decode_parameter_word_quotes(
-            &self.expand_embedded_parameters(word),
+            &expanded,
         ));
         tilde_expand::expand_assignment_tilde_value(&expanded, &self.env_vars, false)
     }
@@ -66,6 +74,24 @@ impl Executor {
         }
     }
 
+    /// GNU subst.c:9990-9993 + param_expand: for a list operand
+    /// (`name[@]`, `name[*]`, `@`, `*`) the `-`/`:-`/`+`/`:+` set/null test
+    /// applies to the operand's string form — string_list_dollar_at joins
+    /// [@]/@ with " ", string_list_dollar_star joins [*]/* with IFS[0] — so
+    /// `"<${A[*]:-X}>"` under IFS='' with A=('' '') joins to "" and yields
+    /// `X`, while `"${A[@]:-Y}"` joins to " " and expands (array22.sub).
+    /// Returns Some((joined_word, non_empty)) for list operands.
+    fn list_operand_joined_word(&self, var_name: &str) -> Option<(String, bool)> {
+        let (values, is_at) = self.braced_operator_list_values(var_name)?;
+        let separator = if is_at {
+            " ".to_string()
+        } else {
+            self.ifs_first_char_separator()
+        };
+        let non_empty = !values.is_empty();
+        Some((values.join(&separator), non_empty))
+    }
+
     pub(in crate::executor) fn expand_quoted_parameter_word(&self, word: &str) -> String {
         // TODO(subst.c/parse.y): Quoted parameter expansion should carry
         // CTLESC/CTLQUOTEMARK state from the parser. This preserves the
@@ -85,6 +111,18 @@ impl Executor {
             super::expand_braced_ops::split_once_outside_subscript_str(name, ":-")
         {
             if is_parameter_error_name(var_name) {
+                if let Some((joined, _)) = self.list_operand_joined_word(var_name) {
+                    if !joined.is_empty() {
+                        return joined;
+                    }
+                    return unescape_parameter_operator_result(
+                        &self.expand_embedded_parameters(
+                            &decode_double_quotes_in_quoted_parameter_word(default),
+                        ),
+                        SubstitutionQuoteContext::DoubleQuoted,
+                        self.env_vars.get("IFS").map(String::as_str),
+                    );
+                }
                 return self
                     .parameter_operator_value(var_name)
                     .filter(|value| !value.is_empty())
@@ -95,6 +133,7 @@ impl Executor {
                                 &decode_double_quotes_in_quoted_parameter_word(default),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
+                            self.env_vars.get("IFS").map(String::as_str),
                         )
                     });
             }
@@ -104,6 +143,18 @@ impl Executor {
             super::expand_braced_ops::split_once_outside_subscript_str(name, ":+")
         {
             if is_parameter_error_name(var_name) {
+                if let Some((joined, _)) = self.list_operand_joined_word(var_name) {
+                    if !joined.is_empty() {
+                        return unescape_parameter_operator_result(
+                            &self.expand_embedded_parameters(
+                                &decode_double_quotes_in_quoted_parameter_word(alternate),
+                            ),
+                            SubstitutionQuoteContext::DoubleQuoted,
+                            self.env_vars.get("IFS").map(String::as_str),
+                        );
+                    }
+                    return String::new();
+                }
                 if self
                     .parameter_operator_value(var_name)
                     .is_some_and(|value| !value.is_empty())
@@ -113,6 +164,7 @@ impl Executor {
                             &decode_double_quotes_in_quoted_parameter_word(alternate),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
+                        self.env_vars.get("IFS").map(String::as_str),
                     );
                 }
                 return String::new();
@@ -221,12 +273,25 @@ impl Executor {
             super::expand_braced_ops::split_once_outside_subscript(name, '+')
         {
             if is_parameter_error_name(var_name) {
+                if let Some((_, non_empty)) = self.list_operand_joined_word(var_name) {
+                    if non_empty {
+                        return unescape_parameter_operator_result(
+                            &self.expand_embedded_parameters(
+                                &decode_double_quotes_in_quoted_parameter_word(alternate),
+                            ),
+                            SubstitutionQuoteContext::DoubleQuoted,
+                            self.env_vars.get("IFS").map(String::as_str),
+                        );
+                    }
+                    return String::new();
+                }
                 if self.parameter_operator_value(var_name).is_some() {
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
                             &decode_double_quotes_in_quoted_parameter_word(alternate),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
+                        self.env_vars.get("IFS").map(String::as_str),
                     );
                 }
                 return String::new();
@@ -237,6 +302,18 @@ impl Executor {
             super::expand_braced_ops::split_once_outside_subscript(name, '-')
         {
             if is_parameter_error_name(var_name) {
+                if let Some((joined, non_empty)) = self.list_operand_joined_word(var_name) {
+                    if non_empty {
+                        return joined;
+                    }
+                    return unescape_parameter_operator_result(
+                        &self.expand_embedded_parameters(
+                            &decode_double_quotes_in_quoted_parameter_word(default),
+                        ),
+                        SubstitutionQuoteContext::DoubleQuoted,
+                        self.env_vars.get("IFS").map(String::as_str),
+                    );
+                }
                 return self
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
@@ -246,6 +323,7 @@ impl Executor {
                                 &decode_double_quotes_in_quoted_parameter_word(default),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
+                            self.env_vars.get("IFS").map(String::as_str),
                         )
                     });
             }
@@ -372,6 +450,20 @@ impl Executor {
             super::expand_braced_ops::split_once_outside_subscript_str(name, ":-")
         {
             if is_parameter_error_name(var_name) {
+                if let Some((joined, _)) = self.list_operand_joined_word(var_name) {
+                    if !joined.is_empty() {
+                        return joined;
+                    }
+                    let default = self.tilde_expand_operator_word(default, context);
+                    return unescape_parameter_operator_result(
+                        &self.expand_embedded_parameters_mut_with_context(
+                            &decode_double_quotes_in_quoted_parameter_word(&default),
+                            context,
+                        ),
+                        context,
+                        self.env_vars.get("IFS").map(String::as_str),
+                    );
+                }
                 return self
                     .parameter_operator_value(var_name)
                     .filter(|value| !value.is_empty())
@@ -384,6 +476,7 @@ impl Executor {
                                 context,
                             ),
                             context,
+                            self.env_vars.get("IFS").map(String::as_str),
                         )
                     });
             }
@@ -393,6 +486,20 @@ impl Executor {
             super::expand_braced_ops::split_once_outside_subscript_str(name, ":+")
         {
             if is_parameter_error_name(var_name) {
+                if let Some((joined, _)) = self.list_operand_joined_word(var_name) {
+                    if !joined.is_empty() {
+                        let alternate = self.tilde_expand_operator_word(alternate, context);
+                        return unescape_parameter_operator_result(
+                            &self.expand_embedded_parameters_mut_with_context(
+                                &decode_double_quotes_in_quoted_parameter_word(&alternate),
+                                context,
+                            ),
+                            context,
+                            self.env_vars.get("IFS").map(String::as_str),
+                        );
+                    }
+                    return String::new();
+                }
                 if self
                     .parameter_operator_value(var_name)
                     .is_some_and(|value| !value.is_empty())
@@ -404,6 +511,7 @@ impl Executor {
                             context,
                         ),
                         context,
+                        self.env_vars.get("IFS").map(String::as_str),
                     );
                 }
                 return String::new();
@@ -544,12 +652,26 @@ impl Executor {
             super::expand_braced_ops::split_once_outside_subscript(name, '+')
         {
             if is_parameter_error_name(var_name) {
+                if let Some((_, non_empty)) = self.list_operand_joined_word(var_name) {
+                    if non_empty {
+                        let alternate = self.tilde_expand_operator_word(alternate, context);
+                        let decoded = decode_double_quotes_in_quoted_parameter_word(&alternate);
+                        let expanded =
+                            self.expand_embedded_parameters_mut_with_context(&decoded, context);
+                        return unescape_parameter_operator_result(&expanded, context,
+                            self.env_vars.get("IFS").map(String::as_str),
+                        );
+                    }
+                    return String::new();
+                }
                 if self.parameter_operator_value(var_name).is_some() {
                     let alternate = self.tilde_expand_operator_word(alternate, context);
                     let decoded = decode_double_quotes_in_quoted_parameter_word(&alternate);
                     let expanded =
                         self.expand_embedded_parameters_mut_with_context(&decoded, context);
-                    let final_value = unescape_parameter_operator_result(&expanded, context);
+                    let final_value = unescape_parameter_operator_result(&expanded, context,
+                            self.env_vars.get("IFS").map(String::as_str),
+                        );
                     return final_value;
                 }
                 return String::new();
@@ -560,6 +682,20 @@ impl Executor {
             super::expand_braced_ops::split_once_outside_subscript(name, '-')
         {
             if is_parameter_error_name(var_name) {
+                if let Some((joined, non_empty)) = self.list_operand_joined_word(var_name) {
+                    if non_empty {
+                        return joined;
+                    }
+                    let default = self.tilde_expand_operator_word(default, context);
+                    return unescape_parameter_operator_result(
+                        &self.expand_embedded_parameters_mut_with_context(
+                            &decode_double_quotes_in_quoted_parameter_word(&default),
+                            context,
+                        ),
+                        context,
+                        self.env_vars.get("IFS").map(String::as_str),
+                    );
+                }
                 return self
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
@@ -571,6 +707,7 @@ impl Executor {
                                 context,
                             ),
                             context,
+                            self.env_vars.get("IFS").map(String::as_str),
                         )
                     });
             }
@@ -654,7 +791,9 @@ impl Executor {
             SubstitutionQuoteContext::DoubleQuoted,
         );
         let unescaped =
-            unescape_parameter_operator_result(&expanded, SubstitutionQuoteContext::DoubleQuoted);
+            unescape_parameter_operator_result(&expanded, SubstitutionQuoteContext::DoubleQuoted,
+                            self.env_vars.get("IFS").map(String::as_str),
+                        );
         unescaped.replace(PROTECTED_LITERAL_BACKSLASH, "\\")
     }
 
@@ -810,12 +949,21 @@ impl Executor {
 /// characters `-`, `+`, `=`, `?` and a word makes `#` the special parameter
 /// (positional parameter count) with that operator, not a length prefix.
 /// `${#-}` / `${#?}` (operator char alone before `}`) remain length of the
-/// special parameter. Returns true when the `#` length-prefix route should be
+/// special parameter. A `:`-led operator (`:-`, `:+`, `:=`, `:?`) makes `#`
+/// the parameter even with an empty word — `${#:-}` is `$#` under `:-`
+/// (more-exp `recho ${#:-}` -> `0`), while a bare `${#:}` is still a bad
+/// substitution. Returns true when the `#` length-prefix route should be
 /// skipped so the operator splits downstream handle the form.
 fn hash_is_special_param_with_operator(name: &str) -> bool {
     let Some(rest) = name.strip_prefix('#') else {
         return false;
     };
+    if let Some(colon_op) = rest.strip_prefix(':') {
+        return colon_op
+            .chars()
+            .next()
+            .is_some_and(|op| matches!(op, '-' | '+' | '=' | '?'));
+    }
     let Some(op) = rest.chars().next() else {
         return false;
     };
@@ -907,7 +1055,9 @@ fn scan_word_prefix_quote_state(prefix: &str, quoted_word: bool) -> (bool, bool)
     (top.in_double, stack.len() > 1)
 }
 
-fn decode_double_quotes_in_quoted_parameter_word(word: &str) -> String {
+pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
+    word: &str,
+) -> String {
     let mut output = String::new();
     let chars = word.chars().collect::<Vec<_>>();
     let mut index = 0usize;
@@ -1031,11 +1181,27 @@ fn unescape_double_quoted_backslashes(value: &str) -> String {
 // removal already ran on the raw alternate (decode_double_quotes...); the
 // expansion result itself is data and only needs its remaining escapes
 // resolved (GNU subst.c never quote-removes expansion results).
-fn unescape_parameter_operator_result(word: &str, context: SubstitutionQuoteContext) -> String {
-    if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
+pub(in crate::executor) fn unescape_parameter_operator_result(
+    word: &str,
+    context: SubstitutionQuoteContext,
+    ifs: Option<&str>,
+) -> String {
+    let unescaped = if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
         unescape_double_quoted_backslashes(word)
     } else {
         unescape_remaining_shell_escapes(word)
+    };
+    // GNU parameter_brace_expand carries `quoted` into the operator word's
+    // expansion (subst.c): inside "${name op word}" the whole result is
+    // quote-protected, so its IFS characters are data for field splitting --
+    // `"${x:-$(echo "foo bar")}"` stays one word (exp.tests:222).
+    if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
+        crate::executor::command_substitution_values::protect_ifs_field_chars(
+            &unescaped,
+            ifs,
+        )
+    } else {
+        unescaped
     }
 }
 

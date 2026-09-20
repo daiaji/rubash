@@ -262,7 +262,11 @@ impl Executor {
         // replaced by an opaque literal (see expand_arithmetic_assoc_subscripts)
         // so the ordinary expansion below cannot expand them a second time and
         // the parser stores the key verbatim.
-        let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression);
+        let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(
+            expression,
+            !expand
+                && crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once"),
+        );
         let expression = if expand {
             normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(&with_assoc_keys))
         } else {
@@ -423,7 +427,10 @@ impl Executor {
             } else {
                 self.expand_arithmetic_subscript_mut(resolved)
             };
-        let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(&reexpanded);
+        let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(
+            &reexpanded,
+            crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once"),
+        );
         let expression = normalize_arithmetic_quotes(&with_assoc_keys);
         *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
@@ -502,11 +509,14 @@ impl Executor {
     /// before evaluation (`$(( "1" + 1 ))` is `2`), while the command
     /// context (`for (( ... ))` headers) keeps them and rejects them.
     pub(crate) fn eval_arithmetic_expansion_value(&mut self, expression: &str) -> Option<i128> {
+        if std::env::var_os("RUBASH_DEBUG_ARITH").is_some() {
+            eprintln!("[aeav] expr={expression:?}");
+        }
         self.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
         self.env_vars.remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
-        let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression);
+        let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression, false);
         let expression =
             normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(&with_assoc_keys));
         *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
@@ -607,7 +617,11 @@ impl Executor {
     /// hex encoding of the expanded key. The parser reads it back untouched
     /// (`lvalue::parse_assoc_subscript`), which is what keeps
     /// `A['$v']` → `$v` and `k='$w'; A[$k]` → `$w` from expanding twice.
-    fn expand_arithmetic_assoc_subscripts(&mut self, expression: &str) -> String {
+    fn expand_arithmetic_assoc_subscripts(
+        &mut self,
+        expression: &str,
+        verbatim_keys: bool,
+    ) -> String {
         let bytes = expression.as_bytes();
         let mut output = String::with_capacity(expression.len());
         let mut index = 0usize;
@@ -649,7 +663,16 @@ impl Executor {
                 let end = assoc_subscript_end(bytes, index);
                 if end > index + 1 && bytes.get(end - 1) == Some(&b']') {
                     let raw = &expression[index + 1..end - 1];
-                    let key = self.expand_assoc_subscript_once(raw);
+                    // GNU expr.c:1171 expr_streval: under array_expand_once
+                    // an EXP_EXPANDED operand (`let`/`[[` args, already
+                    // word-expanded) takes AV_NOEXPAND — the subscript text
+                    // is used verbatim, so `a[" "]` keys on `" "` with the
+                    // quote characters kept as data (array25.sub 6/8).
+                    let key = if verbatim_keys {
+                        raw.to_string()
+                    } else {
+                        self.expand_assoc_subscript_once(raw)
+                    };
                     output.push_str(name);
                     output.push('[');
                     output.push_str(&encode_arithmetic_assoc_key(&key));

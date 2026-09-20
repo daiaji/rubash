@@ -872,6 +872,11 @@ impl Executor {
             if let Some(values) = self.quoted_braced_alternate_positional_at_values(word) {
                 return values;
             }
+            // A fully double-quoted "${a[@]:-y}" still expands to the
+            // element list when the array is set (array22.sub).
+            if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                return values;
+            }
             // A whole-word ${op...} the lexer marked wholly quoted but whose
             // raw word carries no outer quotes expands its alternate as an
             // unquoted word: quoted-empty spans survive as empty fields
@@ -1142,15 +1147,74 @@ impl Executor {
         Some(values)
     }
 
+    /// GNU parameter_brace_expand operand resolution for `name[@]`/`name[*]`
+    /// and the positional `@`/`*`: the element list plus whether it is the
+    /// per-element (`@`) form. Assoc arrays iterate in hash-slot order like
+    /// join_array_parameter_values.
+    pub(in crate::executor) fn braced_operator_list_values(
+        &self,
+        var_name: &str,
+    ) -> Option<(Vec<String>, bool)> {
+        if var_name == "@" {
+            return Some((self.positional_params.clone(), true));
+        }
+        if var_name == "*" {
+            return Some((self.positional_params.clone(), false));
+        }
+        let (base, is_at) = var_name
+            .strip_suffix("[@]")
+            .map(|base| (base, true))
+            .or_else(|| var_name.strip_suffix("[*]").map(|base| (base, false)))?;
+        let storage = self.parameter_array_storage(base)?;
+        let values = if is_marked_var(&self.env_vars, ASSOC_VARS, base) {
+            assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, base))
+        } else {
+            array_values(&storage)
+        };
+        Some((
+            values
+                .into_iter()
+                .map(normalize_array_expanded_value)
+                .collect(),
+            is_at,
+        ))
+    }
+
     fn braced_alternate_word_values(
         &mut self,
         word: &str,
         raw: Option<&str>,
     ) -> Option<Vec<String>> {
-        let name = word.strip_prefix("${")?.strip_suffix('}')?;
-        if !braced_parameter_spans_whole_word(word) {
-            return None;
+        let was_quoted = word.starts_with('\x1d');
+        let word = word.strip_prefix('\x1d').unwrap_or(word);
+        if std::env::var_os("RB_DBG_BAV").is_some() {
+            eprintln!("[bav] word={word:?}");
         }
+        let Some(rest) = word.strip_prefix("${") else {
+            return None;
+        };
+        // GNU parse.y's dolbrace state machine (POSIX mode, Austin Group
+        // Interp 221) treats a single quote inside a double-quoted ${...}
+        // as literal text, so the first `}` closes the expansion:
+        // "${IFS+'}'z}" is the word `'` plus trailing text `'z}`. The
+        // unconditional strip_suffix('}') below would pair the LAST `}` and
+        // misread the alternate as `'}'z` (posixexp2). In that context the
+        // brace must be matched with the quoting-aware scanner, and a word
+        // whose match is not the final character is not a whole-word
+        // ${op...} at all.
+        let posix_dq = was_quoted && self.posix_mode_enabled();
+        let name = if posix_dq {
+            let end = matching_parameter_brace_in_context(rest, true, true)?;
+            if end + 1 != rest.len() {
+                return None;
+            }
+            &rest[..end]
+        } else {
+            if !braced_parameter_spans_whole_word(word) {
+                return None;
+            }
+            rest.strip_suffix('}')?
+        };
 
         // `+`/`:+` use the word when the parameter is set (non-empty for
         // `:+`); `-`/`:-` use the word when it is unset (or empty for `:-`).
@@ -1170,7 +1234,52 @@ impl Executor {
                 return None;
             };
 
+        // GNU parameter_brace_expand (subst.c:9850-9960): for a list-valued
+        // operand — a[@], a[*], @, * — the "value used when set" of `-`/`:-`
+        // is the element list itself: [@]/@ yields one word per element
+        // (array22.sub: all-empty elements stay <><> instead of collapsing
+        // into " "), while [*]/* yields the single IFS[0]-joined word whose
+        // emptiness `:-` then tests. The scalar path joins [@] with spaces
+        // and cannot express the multi-word result, so list operands
+        // intercept here before the narrow gate.
+        let mut list_is_null_or_unset = false;
+        if !use_when_set {
+            if let Some((values, is_at)) = self.braced_operator_list_values(var_name) {
+                // GNU subst.c:9990-9993 + 10132: the `:-` null test applies
+                // to the operand's string form — string_list_dollar_at joins
+                // [@]/@ with " " while string_list_dollar_star joins [*]/*
+                // with IFS[0] — so `a[1]=` alone makes ${a[@]:-y} yield `y`
+                // while `a[0]= a[1]=` expands to two empty words, and under
+                // IFS='' `${A[*]:-X}` of A=('' '') yields `X` (array22.sub).
+                // `-` only tests whether the list is non-empty.
+                let separator = if is_at {
+                    " ".to_string()
+                } else {
+                    self.ifs_first_char_separator()
+                };
+                let joined = values.join(&separator);
+                let null = joined.is_empty();
+                if is_at {
+                    if !values.is_empty() && !(require_non_empty && null) {
+                        return Some(values);
+                    }
+                } else if !null || (!require_non_empty && !values.is_empty()) {
+                    return Some(vec![joined]);
+                }
+                // unset, or empty under `:-`: the alternate word is used.
+                // The scalar parameter_operator_value below cannot see a
+                // null-but-set list (${A[*]:-X} under IFS='' joins to ""),
+                // so force the alternate branch here.
+                list_is_null_or_unset = true;
+            }
+        }
+
+        let whole_array_alternate = alternate
+            .strip_prefix("${")
+            .and_then(|a| a.strip_suffix('}'))
+            .is_some_and(|inner| inner.ends_with("[*]") || inner.ends_with("[@]"));
         if narrow
+            && !whole_array_alternate
             && !alternate.contains("$@")
             && !alternate.contains("$*")
             && !alternate.contains("${*")
@@ -1186,7 +1295,9 @@ impl Executor {
         let word_used = if use_when_set {
             value.is_some() && (!require_non_empty || !value.unwrap_or_default().is_empty())
         } else {
-            value.is_none() || (require_non_empty && value.unwrap_or_default().is_empty())
+            list_is_null_or_unset
+                || value.is_none()
+                || (require_non_empty && value.unwrap_or_default().is_empty())
         };
         if !word_used {
             return None;
@@ -1281,6 +1392,45 @@ impl Executor {
                 }
             }
         }
+        // GNU param_expand routes the operator word through
+        // expand_string_for_rhs with PF_ASSIGNRHS: an array alternate
+        // `${name[*]}`/`${name[@]}` joins via string_list_dollar_star /
+        // string_list_dollar_at (IFS[0] for [*], space for [@]) and then
+        // field-splits per the ambient IFS; a set-empty IFS leaves the
+        // element list per-word (array24.sub: ${var-${A[*]}} under
+        // IFS='' yields abc / def ghi / jkl, not the concatenated
+        // "abcdef ghijkl").
+        if !outer_double_quoted && whole_array_alternate {
+            let inner = &alternate[2..alternate.len() - 1];
+            let base = &inner[..inner.len() - 3];
+            if let Some(storage) = self.parameter_array_storage(base) {
+                let values: Vec<String> = if is_marked_var(&self.env_vars, ASSOC_VARS, base) {
+                    assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, base))
+                } else {
+                    array_values(&storage)
+                }
+                .into_iter()
+                .map(normalize_array_expanded_value)
+                .collect();
+                if values.is_empty() {
+                    return Some(Vec::new());
+                }
+                match self.env_vars.get("IFS").map(String::as_str) {
+                    Some("") => return Some(values),
+                    ifs => {
+                        let separator = if inner.ends_with("[*]") {
+                            self.ifs_first_char_separator()
+                        } else {
+                            " ".to_string()
+                        };
+                        return Some(field_split_values_with_ifs(
+                            &values.join(&separator),
+                            ifs,
+                        ));
+                    }
+                }
+            }
+        }
         let positional_at = alternate.contains("$@")
             || alternate.contains("${@")
             || alternate.contains("$*")
@@ -1306,7 +1456,26 @@ impl Executor {
             .map(|ifs| ifs.chars().all(|ch| matches!(ch, ' ' | '\t' | '\n')))
             .unwrap_or(true);
         if !positional_at && !posix_literal_quotes && ifs_all_whitespace {
-            let expanded = self.expand_alternate_parameter_word(alternate);
+            // GNU param_expand passes the enclosing `quoted` down to the
+            // alternate word (subst.c:7840-7860): inside "${var-word}" the
+            // alternate expands in double-quote context — `"` toggles
+            // quoting and `'` is literal data ("${dbg-'"'hey}" -> ''hey,
+            // array6.sub:26). The unquoted path would treat `'` as an sq
+            // opener instead.
+            let expanded = if outer_double_quoted {
+                crate::executor::parameter_words::unescape_parameter_operator_result(
+                    &self.expand_embedded_parameters_mut_with_context(
+                        &crate::executor::parameter_words::decode_double_quotes_in_quoted_parameter_word(
+                            alternate,
+                        ),
+                        SubstitutionQuoteContext::DoubleQuoted,
+                    ),
+                    SubstitutionQuoteContext::DoubleQuoted,
+                    self.env_vars.get("IFS").map(String::as_str),
+                )
+            } else {
+                self.expand_alternate_parameter_word(alternate)
+            };
             // Quoted-empty spans in the alternate carry the quoted-null
             // marker: the splitter keeps each marker-only field as an empty
             // argument (quote2.sub: ${x:+"$e" "$e"} -> two empty args,
@@ -1336,6 +1505,9 @@ impl Executor {
     // text attaches to the first/last positional word, one word per
     // parameter. Returning None leaves every other form on its existing path.
     fn quoted_braced_alternate_positional_at_values(&mut self, word: &str) -> Option<Vec<String>> {
+        if std::env::var_os("RB_DBG_QBAV").is_some() {
+            eprintln!("[qbav] word={word:?}");
+        }
         let braced = word.strip_prefix('\x1d')?;
         if !braced.starts_with("${") || !braced.ends_with('}') {
             return None;
@@ -1421,7 +1593,17 @@ impl Executor {
                 .join(&self.ifs_first_char_separator())]);
         }
 
-        let synthetic_raw = format!("\"{alternate}\"");
+        // The outer `"${...}"` quoting carries into the alternate word
+        // (GNU param_expand passes `quoted` through), so the positional
+        // list must expand in a double-quoted context. An alternate that
+        // already carries its own quotes (`"$@"`) is scanned verbatim --
+        // wrapping it again (`""$@""`) would read the `$@` between the
+        // empty spans as a bare unquoted positional.
+        let synthetic_raw = if alternate.starts_with('"') && alternate.ends_with('"') {
+            alternate.to_string()
+        } else {
+            format!("\"{alternate}\"")
+        };
         self.quoted_positional_at_word_values_with_raw(alternate, Some(&synthetic_raw), None)
     }
 

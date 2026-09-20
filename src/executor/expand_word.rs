@@ -268,6 +268,9 @@ impl Executor {
             .strip_prefix("$((")
             .and_then(|rest| rest.strip_suffix("))"))
         {
+            if std::env::var_os("RUBASH_DEBUG_ARITH").is_some() {
+                eprintln!("[ww-arith] word={word:?}");
+            }
             let expression = self.expand_arithmetic_special_parameters(expression);
             if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
                 if let Some(name) = arithmetic_unbound_variable(&expression, &self.env_vars) {

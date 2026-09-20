@@ -610,11 +610,12 @@ impl Executor {
             quoted_positional_at_segments(raw).map(|segments| {
                 expand_quoted_positional_at_segments(
                     &segments,
+                    self.env_vars.get("IFS").map(String::as_str),
                     |segment| match segment {
-                        QuotedPositionalAtSegment::PositionalAt => {
+                        QuotedPositionalAtSegment::PositionalAt(_) => {
                             self.positional_params.clone()
                         }
-                        QuotedPositionalAtSegment::ArrayAt(name) => self
+                        QuotedPositionalAtSegment::ArrayAt(name, _) => self
                             .array_subscript_range_values(name, 0, None)
                             .unwrap_or_default(),
                         QuotedPositionalAtSegment::Literal { .. } => Vec::new(),
@@ -1000,11 +1001,17 @@ enum QuotedPositionalAtSegment {
         text: String,
         quoted: bool,
     },
-    PositionalAt,
-    /// A quoted `"${name[@]}"` span: expands with the same affix rules as
-    /// `"$@"` — one word per element, affixes attach to the first/last word
-    /// (GNU subst.c array_at word-list handling in expand_word_internal).
-    ArrayAt(String),
+    /// `quoted` distinguishes a `"$@"`/`"${@}"` span from a bare unquoted
+    /// `$@`/`${@}`: quoted elements' IFS characters are quote-protected data
+    /// (GNU CTLESC, subst.c:12273+ word splitting skips them); unquoted
+    /// elements field-split like any other unquoted expansion result.
+    PositionalAt(bool),
+    /// A `"${name[@]}"`/`${name[@]}` span: expands with the same affix rules
+    /// as `"$@"`/`$@` — one word per element, affixes attach to the
+    /// first/last word (GNU subst.c array_at word-list handling in
+    /// expand_word_internal). `quoted` carries the same split rule as
+    /// `PositionalAt`.
+    ArrayAt(String, bool),
 }
 
 fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegment>> {
@@ -1072,7 +1079,7 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                         &chars[literal_start..index],
                         false,
                     )?;
-                    segments.push(QuotedPositionalAtSegment::PositionalAt);
+                    segments.push(QuotedPositionalAtSegment::PositionalAt(true));
                     saw_positional_at = true;
                     index = end + 1;
                     literal_start = index;
@@ -1092,7 +1099,7 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                             &chars[literal_start..index],
                             false,
                         )?;
-                        segments.push(QuotedPositionalAtSegment::ArrayAt(array_name));
+                        segments.push(QuotedPositionalAtSegment::ArrayAt(array_name, true));
                         saw_positional_at = true;
                         index = end + 1;
                         literal_start = index;
@@ -1152,7 +1159,7 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                                 &chars[literal_start..index],
                                 false,
                             )?;
-                            segments.push(QuotedPositionalAtSegment::PositionalAt);
+                            segments.push(QuotedPositionalAtSegment::PositionalAt(false));
                             saw_positional_at = true;
                             index = raw[..=close_byte].chars().count();
                             literal_start = index;
@@ -1169,6 +1176,7 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                                 )?;
                                 segments.push(QuotedPositionalAtSegment::ArrayAt(
                                     array_name,
+                                    false,
                                 ));
                                 saw_positional_at = true;
                                 index = raw[..=close_byte].chars().count();
@@ -1192,7 +1200,7 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                     &chars[literal_start..index],
                     false,
                 )?;
-                segments.push(QuotedPositionalAtSegment::PositionalAt);
+                segments.push(QuotedPositionalAtSegment::PositionalAt(false));
                 saw_positional_at = true;
                 index += 2;
                 literal_start = index;
@@ -1243,7 +1251,7 @@ fn quoted_body_positional_at_segments(body: &[char]) -> Option<Vec<QuotedPositio
             '$' if body.get(index + 1) == Some(&'{') => {
                 if body.get(index + 2) == Some(&'@') && body.get(index + 3) == Some(&'}') {
                     push_body_piece(&mut segments, &body[piece_start..index])?;
-                    segments.push(QuotedPositionalAtSegment::PositionalAt);
+                    segments.push(QuotedPositionalAtSegment::PositionalAt(true));
                     saw_positional_at = true;
                     index += 4;
                     piece_start = index;
@@ -1258,7 +1266,7 @@ fn quoted_body_positional_at_segments(body: &[char]) -> Option<Vec<QuotedPositio
                         let name: String = token[..token.len() - 3].iter().collect();
                         if is_shell_name(&name) {
                             push_body_piece(&mut segments, &body[piece_start..index])?;
-                            segments.push(QuotedPositionalAtSegment::ArrayAt(name));
+                            segments.push(QuotedPositionalAtSegment::ArrayAt(name, true));
                             saw_positional_at = true;
                             index += 2 + close + 1;
                             piece_start = index;
@@ -1270,9 +1278,18 @@ fn quoted_body_positional_at_segments(body: &[char]) -> Option<Vec<QuotedPositio
                     return None;
                 }
             }
+            '$' if body.get(index + 1) == Some(&'(') => {
+                // GNU subst.c: a `$@`/`${@}` inside `$(...)`/`$((...))`
+                // belongs to the inner substitution's own expansion, not a
+                // top-level positional word-list source — `"A=$(( $@ ))"`
+                // expands the arith in place (array17.sub).
+                index =
+                    crate::lexer::skip_parenthesized_unit_corrected(body, index + 1)
+                        .unwrap_or(body.len());
+            }
             '$' if body.get(index + 1) == Some(&'@') => {
                 push_body_piece(&mut segments, &body[piece_start..index])?;
-                segments.push(QuotedPositionalAtSegment::PositionalAt);
+                segments.push(QuotedPositionalAtSegment::PositionalAt(true));
                 saw_positional_at = true;
                 index += 2;
                 piece_start = index;
@@ -1322,8 +1339,56 @@ fn push_quoted_positional_literal_segment(
     Some(())
 }
 
+/// Mark every IFS character in `text` with the `\x1c` protection carrier so
+/// field splitting treats it as data — the `\x1c` carrier stands in for the
+/// CTLESC protection GNU gives quoted expansion text (subst.c:12273+ word
+/// splitting skips quoted separators). Existing `\x1c` pairs pass through.
+pub(in crate::executor) fn protect_ifs_field_chars(text: &str, ifs: Option<&str>) -> String {
+    let ifs = ifs.unwrap_or(" \t\n");
+    if ifs.is_empty() || !text.contains(|ch| ifs.contains(ch)) {
+        return text.to_string();
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1c' {
+            output.push(ch);
+            if let Some(next) = chars.next() {
+                output.push(next);
+            }
+            continue;
+        }
+        if ifs.contains(ch) {
+            output.push('\x1c');
+        }
+        output.push(ch);
+    }
+    output
+}
+
+/// Decode `\x1c` protection pairs back to their literal characters for the
+/// no-splitting case (IFS explicitly empty).
+fn decode_protected_ifs_chars(text: &str) -> String {
+    if !text.contains('\x1c') {
+        return text.to_string();
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1c' {
+            if let Some(next) = chars.next() {
+                output.push(next);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
 fn expand_quoted_positional_at_segments<F, R>(
     segments: &[QuotedPositionalAtSegment],
+    ifs: Option<&str>,
     resolve_list: R,
     expand_literal: F,
 ) -> Vec<String>
@@ -1331,54 +1396,80 @@ where
     F: Fn(&str) -> String,
     R: Fn(&QuotedPositionalAtSegment) -> Vec<String>,
 {
-    let mut words = Vec::new();
+    // Each produced word carries a keep-empty flag: GNU drops empty fields
+    // from unquoted expansion but keeps an empty word that a quoted part
+    // contributed (had_quoted_null, subst.c:12026-12035).
+    let mut words: Vec<(String, bool)> = Vec::new();
     let mut current = String::new();
     let mut current_present = false;
+    let mut current_has_quoted = false;
     let mut saw_positional_at = false;
     let mut saw_non_empty_expansion = false;
 
     for (segment_index, segment) in segments.iter().enumerate() {
         match segment {
             QuotedPositionalAtSegment::Literal { text, quoted } => {
-                let expanded = expand_literal(text);
+                // GNU word splitting (subst.c:10649+ word_split) applies to
+                // expansion-produced text only — literal characters in the
+                // word are never split. Protecting the IFS characters of the
+                // RAW literal before expansion keeps e.g. `+"$@"` literal
+                // under IFS='+' while expansion-produced separators inside
+                // the literal's own `$v` text still split (more-exp
+                // `recho + "$@"` / `+"$@"` -> `+`).
+                let expanded = if *quoted {
+                    expand_literal(text)
+                } else {
+                    expand_literal(&protect_ifs_field_chars(text, ifs))
+                };
                 if !expanded.is_empty() {
                     saw_non_empty_expansion = true;
                 }
-                // Only an unquoted literal directly after $@ emulates the
-                // GNU unquoted-suffix rule where trailing IFS whitespace
-                // terminates the field instead of joining the next one
-                // (e.g. `"$@"$space`). Quoted-literal affixes are data and
-                // attach verbatim (GNU: `"  $@  "` keeps its spaces on the
-                // first/last positional word).
-                if !quoted
-                    && segment_index > 0
+                if *quoted {
+                    // Quoted literal affixes are data: their IFS characters
+                    // attach verbatim and never field-split (GNU: `"  $@  "`
+                    // keeps its spaces on the first/last positional word).
+                    current_has_quoted = true;
+                    current.push_str(&protect_ifs_field_chars(&expanded, ifs));
+                } else if segment_index > 0
                     && matches!(
                         segments.get(segment_index - 1),
-                        Some(QuotedPositionalAtSegment::PositionalAt)
-                            | Some(QuotedPositionalAtSegment::ArrayAt(_))
+                        Some(QuotedPositionalAtSegment::PositionalAt(_))
+                            | Some(QuotedPositionalAtSegment::ArrayAt(..))
                     )
                 {
+                    // Only an unquoted literal directly after $@ emulates the
+                    // GNU unquoted-suffix rule where trailing IFS whitespace
+                    // terminates the field instead of joining the next one
+                    // (e.g. `"$@"$space`).
                     current.push_str(expanded.trim_end_matches([' ', '\t', '\n']));
                 } else {
                     current.push_str(&expanded);
                 }
                 current_present = true;
             }
-            QuotedPositionalAtSegment::PositionalAt
-            | QuotedPositionalAtSegment::ArrayAt(_) => {
+            QuotedPositionalAtSegment::PositionalAt(quoted)
+            | QuotedPositionalAtSegment::ArrayAt(_, quoted) => {
                 saw_positional_at = true;
-                let values = resolve_list(segment);
+                let mut values = resolve_list(segment);
                 if values.is_empty() {
                     continue;
                 }
                 saw_non_empty_expansion = true;
+                current_has_quoted |= *quoted;
+                if *quoted {
+                    for value in &mut values {
+                        *value = protect_ifs_field_chars(value, ifs);
+                    }
+                }
                 current.push_str(&values[0]);
                 current_present = true;
 
                 if values.len() > 1 {
-                    words.push(std::mem::take(&mut current));
+                    let keep = current_has_quoted;
+                    words.push((std::mem::take(&mut current), keep));
+                    current_has_quoted = *quoted;
                     for value in &values[1..values.len() - 1] {
-                        words.push(value.clone());
+                        words.push((value.clone(), *quoted));
                     }
                     current.push_str(&values[values.len() - 1]);
                 }
@@ -1394,10 +1485,25 @@ where
         if saw_positional_at && !saw_non_empty_expansion {
             return Vec::new();
         }
-        words.push(current);
+        words.push((current, current_has_quoted));
     }
 
+    // GNU subst.c word splitting: the unquoted portions of each produced
+    // word field-split on IFS; \x1c-marked (quoted-sourced) IFS characters
+    // stay data. `$@$@` splits `def ghi` while `$@"$@"` keeps `ca b`
+    // (exp9.sub).
     words
+        .into_iter()
+        .flat_map(|(word, keep_empty)| {
+            if word.is_empty() {
+                return if keep_empty { vec![word] } else { Vec::new() };
+            }
+            if ifs.is_some_and(|ifs| ifs.is_empty()) {
+                return vec![decode_protected_ifs_chars(&word)];
+            }
+            field_split_values_with_ifs(&word, ifs)
+        })
+        .collect()
 }
 
 fn skip_double_quote(chars: &[char], mut index: usize) -> Option<usize> {
@@ -1405,6 +1511,26 @@ fn skip_double_quote(chars: &[char], mut index: usize) -> Option<usize> {
         match chars[index] {
             '"' => return Some(index),
             '\\' => index += 2,
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                // GNU parse_matched_pair (parse.y:3877): a `${...}` inside
+                // double quotes nests its own quoting — a `"` inside the
+                // expansion word does not close the outer span
+                // (`"${1-"$@"}"`).
+                let sub: String = chars[index + 2..].iter().collect();
+                match matching_parameter_brace(&sub) {
+                    Some(end_byte) => {
+                        index += 2 + sub[..end_byte].chars().count() + 1;
+                    }
+                    None => return None,
+                }
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                // `$(...)`/`$((...))` nests its own quoting as well: a `"`
+                // inside the substitution body does not close the outer
+                // span (parse.y parse_comsub).
+                index = crate::lexer::skip_parenthesized_unit_corrected(chars, index + 1)
+                    .unwrap_or(chars.len());
+            }
             _ => index += 1,
         }
     }

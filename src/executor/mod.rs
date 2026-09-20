@@ -181,6 +181,9 @@ use alias_helpers::*;
 use assignment_helpers::*;
 // Shared with builtins::declare for `declare -p` assoc rendering.
 pub(crate) use assignment_helpers::{assoc_nbuckets, bash_assoc_order};
+// Shared with builtins::declare for `declare -p` $'...' value rendering
+// (strtrans.c ansic_shouldquote/ansic_quote over the raw byte stream).
+pub(crate) use arrays::{ansic_quote, ansic_shouldquote};
 use builtin_names::*;
 use command_subst_helpers::*;
 use command_text::*;
