@@ -147,6 +147,29 @@ POSIX conformance suite 等一律不用，POSIX 与 GNU 存在分歧，对齐标
 **验收口径**：每层独立验证——子壳快照完整性用属性测试（随机状态组合下克隆
 隔离性）、并发用 ownership registry 单测、fd 用定向探针对拍 WSL GNU 5.3.0。
 
+**实测校准（2026-09-20，`exp/fork-hybrid` @74bf11dc，产物在
+`D:/repo/rubash-exp-fork/experiments/fork-hybrid/`）**：
+
+1. **fd 语义现状**：12 探针 6 个真实分歧，单一根因——fd 层是"逐条重定向重开
+   模拟"而非 open file description 表受控复制（典型：fd 偏移量不共享、子壳
+   `exec 3<&-` 穿透父壳、后台不继承 fd3）。`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
+   POC 通过（白名单继承、rogue 句柄不泄漏）。**校准**：HANDLE_LIST 只修继承面；
+   偏移量共享/关闭隔离需把 FdTable 改为记录真实 HANDLE——规模是 FdTable 重构
+   （中等工程），大于本节原估的"修排序"。
+2. **并发 registry POC 通过**（spawn <100ms 不阻塞、wait 回收 exit code、
+   shutdown 不挂死，5/5 测试）。**校准**：引擎 `&mut self` 单线程借用模型是
+   真正成本，建议先 registry 化记账、后评估状态共享；且与第 3 层有顺序依赖
+   ——必须先 HANDLE_LIST 化再线程化，否则 stdio 手术补偿的单线程 spawn 安全
+   论证失效。
+3. **ShellState 量化**：Executor 88 字段；`( )` 子壳 save/restore 清单仅 7 项、
+   命令替换 fresh-Executor 手工清单约 55 项——**两份清单已漂移**；实测打穿：
+   **alias 和 function 从子壳泄漏到父壳（GNU 干净）**，S6 家族现行证据。
+   工作量约 60 项语义状态 + 28 项瞬态分离，估 3–5 天机械重构 + 83 全量回归
+   （载体字节/$'...' 重点）。
+
+**优先级修订**：第一层（ShellState）提升为最高——alias/function 泄漏是现行
+bug 且不依赖其他层；fd 层规模上修；线程化必须在句柄层之后。
+
 ### 3.7 双层测试口径（引擎层 + 产品层）
 
 **真正的 shell 层是 niubash**（`D:/repo/niubash-*`，crate `niubash`，依赖
