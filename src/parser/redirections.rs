@@ -284,7 +284,7 @@ pub(super) fn assign_here_string_redirect_raw(
             gather_line: None,
         });
     } else {
-        command.here_string = Some(target.to_string());
+        command.here_string = Some(encode_stdin_body_enq(target));
     }
 }
 
@@ -521,7 +521,7 @@ pub(super) fn assign_heredoc_body(
     if fill_pending_heredoc_body_recursive(current_cmd, &body, gather_line) {
         return;
     }
-    current_cmd.heredoc = Some(body);
+    current_cmd.heredoc = Some(encode_stdin_body_enq(&body));
 }
 
 fn fill_pending_heredoc_body_recursive(
@@ -632,6 +632,38 @@ fn fill_pending_heredoc_body_in_commands(
         .any(|command| fill_pending_heredoc_body_recursive(command, body, gather_line))
 }
 
+/// A literal ENQ (0x05) byte in collected stdin-body text is
+/// indistinguishable from the executor's PREEXPANDED_STDIN_BODY sentinel
+/// (execution_misc.rs): a heredoc body starting with a raw 0x05 would look
+/// already-expanded and skip expansion entirely. Encode literal ENQ chars
+/// as raw-byte marker pairs; the marker decodes back to 0x05 at the byte
+/// boundary (substitution_metadata::shell_text_to_raw_bytes). Same for a
+/// here-string word, which expand_here_string_mut probes with the same
+/// sentinel check.
+fn encode_stdin_body_enq(text: &str) -> String {
+    if !text.contains('\u{5}') {
+        return text.to_string();
+    }
+    let mut output = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch == '\u{5}' {
+            output.push(
+                char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+                    .expect("sentinel is valid"),
+            );
+            output.push(
+                char::from_u32(
+                    crate::executor::substitution_metadata::RAW_BYTE_MARKER_FIRST + 0x05,
+                )
+                .expect("marker char is valid"),
+            );
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
 pub(super) fn fill_pending_heredoc_body(
     cmd: &mut CommandNode,
     body: &str,
@@ -645,10 +677,11 @@ pub(super) fn fill_pending_heredoc_body(
         return false;
     };
 
-    redirect.body = Some(body.to_string());
+    let body = encode_stdin_body_enq(body);
+    redirect.body = Some(body.clone());
     redirect.gather_line = Some(gather_line);
     if redirect.fd.is_none() {
-        cmd.heredoc = Some(body.to_string());
+        cmd.heredoc = Some(body);
         cmd.heredoc_delimiter = Some(redirect.delimiter.clone());
         cmd.heredoc_gather_line = Some(gather_line);
     }

@@ -635,18 +635,81 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Option<String> {
         self.apply_comsub_stdin_writeback();
-        if let Some(body) = cmd.heredoc.clone() {
-            return Some(self.expand_heredoc_body_mut(&body));
+        // fd-0 stdin source: GNU redir.c do_redirections applies
+        // redirections left to right, so the LAST fd-0 input redirect in
+        // cmd.redirects decides — `<<`, `0<<`, `<<<`, `0<<<`, `< file` and
+        // `<&N` all compete for fd 0 (`cat <<A 0<<B` reads B's body, `cat
+        // <<A <file` reads the file). When no ordered redirect info exists
+        // (synthesized commands), fall back to the legacy field checks.
+        let last_fd0 = fd0_stdin_redirect_winner(cmd);
+        let stdin_body_kind = match last_fd0 {
+            Some(kind) => match kind {
+                crate::parser::RedirectKind::HereDoc => Some(crate::parser::RedirectKind::HereDoc),
+                crate::parser::RedirectKind::HereString => Some(crate::parser::RedirectKind::HereString),
+                // A later `<`/`<&`/`<>`/`<&-` outranks the stdin bodies.
+                _ => return self.stdin_string_for_command(cmd),
+            },
+            None if cmd.heredoc.is_some()
+                || cmd.here_string.is_some()
+                || cmd.heredoc_redirects.iter().any(|r| r.fd == Some(0)) =>
+            {
+                None
+            }
+            None => None,
+        };
+        let wants_here_string = stdin_body_kind == Some(crate::parser::RedirectKind::HereString)
+            || (stdin_body_kind.is_none() && cmd.heredoc.is_none()
+                && !cmd.heredoc_redirects.iter().any(|r| {
+                    !r.here_string && (r.fd.is_none() || r.fd == Some(0))
+                }));
+        if !wants_here_string {
+            if let Some(body) = cmd
+                .heredoc_redirects
+                .iter()
+                .rev()
+                .find(|redirect| {
+                    !redirect.here_string
+                        && (redirect.fd.is_none() || redirect.fd == Some(0))
+                })
+                .and_then(|redirect| redirect.body.clone())
+            {
+                return Some(self.expand_heredoc_body_mut(&body));
+            }
+            if let Some(body) = cmd.heredoc.clone() {
+                return Some(self.expand_heredoc_body_mut(&body));
+            }
         }
         // Here-string content already had quote removal applied by the parser
         // (single quotes stripped); a literal " that lived inside them is now
         // bare data. Expand only substitutions with quotes-as-data semantics so
         // that literal survives (cat <<< 'double"quote' => double"quote).
-        if let Some(word) = cmd.here_string.clone() {
-            let decoded = decode_ansi_c_quoted_word(&word);
-            let mut input = decoded.unwrap_or_else(|| self.expand_here_string_mut(&word));
-            input.push('\n');
-            return Some(input);
+        // Numbered `0<<<` carries its word in heredoc_redirects instead.
+        if stdin_body_kind != Some(crate::parser::RedirectKind::HereDoc)
+            && cmd.heredoc.is_none()
+            || wants_here_string
+        {
+            if let Some(body) = cmd
+                .heredoc_redirects
+                .iter()
+                .rev()
+                .find(|redirect| redirect.here_string && redirect.fd == Some(0))
+                .and_then(|redirect| redirect.body.clone())
+            {
+                if let Some(word) = body.strip_prefix('\u{1d}') {
+                    let mut input = decode_ansi_c_quoted_word(word)
+                        .unwrap_or_else(|| self.expand_word(word));
+                    input.push('\n');
+                    return Some(input);
+                }
+                return Some(self.expand_heredoc_body_mut(&body));
+            }
+            if let Some(word) = cmd.here_string.clone() {
+                let decoded = decode_ansi_c_quoted_word(&word);
+                let mut input =
+                    decoded.unwrap_or_else(|| self.expand_here_string_mut(&word));
+                input.push('\n');
+                return Some(input);
+            }
         }
         let function_stdin_is_source = cmd.redirect_in.is_none()
             && self.virtual_fd_stdin_remaining(0).is_none()
@@ -670,8 +733,90 @@ impl Executor {
         &self,
         cmd: &CommandNode,
     ) -> Option<String> {
-        if let Some(body) = &cmd.heredoc {
-            return Some(self.expand_heredoc_body_readback(body).text_lossy());
+        // Same fd-0 ordering as the mut variant (GNU redir.c
+        // do_redirections): the last fd-0 input redirect in cmd.redirects
+        // decides stdin; a `<`/`<&` after `<<`/`<<<` outranks the bodies.
+        let last_fd0 = fd0_stdin_redirect_winner(cmd);
+        match last_fd0.as_ref() {
+            Some(crate::parser::RedirectKind::HereDoc) => {
+                if let Some(body) = cmd
+                    .heredoc_redirects
+                    .iter()
+                    .rev()
+                    .find(|redirect| {
+                        !redirect.here_string
+                            && (redirect.fd.is_none() || redirect.fd == Some(0))
+                    })
+                    .and_then(|redirect| redirect.body.as_deref())
+                {
+                    return Some(
+                        self.expand_heredoc_body_readback(body).text_lossy(),
+                    );
+                }
+            }
+            Some(crate::parser::RedirectKind::HereString) => {
+                if let Some(body) = cmd
+                    .heredoc_redirects
+                    .iter()
+                    .rev()
+                    .find(|redirect| redirect.here_string && redirect.fd == Some(0))
+                    .and_then(|redirect| redirect.body.as_deref())
+                {
+                    if let Some(word) = body.strip_prefix('\u{1d}') {
+                        let mut input = decode_ansi_c_quoted_word(word)
+                            .unwrap_or_else(|| self.expand_word(word));
+                        input.push('\n');
+                        return Some(input);
+                    }
+                    return Some(
+                        self.expand_heredoc_body_readback(body).text_lossy(),
+                    );
+                }
+                // Unnumbered `<<<` keeps its word in cmd.here_string; it is
+                // handled at the bottom of this function.
+                return cmd.here_string.as_ref().map(|word| {
+                    let mut input = if let Some(pre) = preexpanded_stdin_body(word) {
+                        pre.to_string()
+                    } else {
+                        decode_ansi_c_quoted_word(word).unwrap_or_else(|| {
+                            self.expand_embedded_parameters_for_heredoc(word)
+                        })
+                    };
+                    input.push('\n');
+                    input
+                });
+            }
+            // A later `< file` / `<&N` / `<>` outranks stdin bodies.
+            Some(_) => {}
+            // No ordered redirect info (synthesized commands): legacy
+            // body-first behavior.
+            None => {
+                if let Some(body) = cmd
+                    .heredoc_redirects
+                    .iter()
+                    .rev()
+                    .find(|redirect| {
+                        !redirect.here_string
+                            && (redirect.fd.is_none() || redirect.fd == Some(0))
+                    })
+                    .and_then(|redirect| redirect.body.as_deref())
+                {
+                    if let Some(word) = body.strip_prefix('\u{1d}') {
+                        let mut input = decode_ansi_c_quoted_word(word)
+                            .unwrap_or_else(|| self.expand_word(word));
+                        input.push('\n');
+                        return Some(input);
+                    }
+                    return Some(
+                        self.expand_heredoc_body_readback(body).text_lossy(),
+                    );
+                }
+                if let Some(body) = &cmd.heredoc {
+                    return Some(
+                        self.expand_heredoc_body_readback(body).text_lossy(),
+                    );
+                }
+            }
         }
 
         if let Some(redirect) = &cmd.redirect_in {
@@ -737,6 +882,31 @@ impl Executor {
         input.push('\n');
         Some(input)
     }
+}
+
+/// The fd-0 input redirect that wins under GNU left-to-right application
+/// (redir.c do_redirections): the last cmd.redirects entry targeting fd 0
+/// whose kind supplies stdin (`<`, `<&`, `<>`, `<&-`, `<<`, `<<<`).
+/// Returns None when the command carries no ordered redirect info.
+pub(in crate::executor) fn fd0_stdin_redirect_winner(
+    cmd: &CommandNode,
+) -> Option<crate::parser::RedirectKind> {
+    cmd.redirects
+        .iter()
+        .rev()
+        .find(|redirect| {
+            redirect.fd.unwrap_or(0) == 0
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::ReadWrite
+                        | crate::parser::RedirectKind::CloseInput
+                        | crate::parser::RedirectKind::HereDoc
+                        | crate::parser::RedirectKind::HereString
+                )
+        })
+        .map(|redirect| redirect.kind.clone())
 }
 
 pub(crate) fn write_stdout_bytes(output: &[u8]) -> io::Result<()> {

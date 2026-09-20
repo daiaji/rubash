@@ -229,6 +229,32 @@ impl Executor {
                 eprintln!("EMPTY-ASSIGN {name}={value:?}");
             }
             let assignment_result = self.expand_assignment_value_result(name, value);
+            // GNU subst.c:10277-10288: a bad substitution raised while
+            // expanding the assignment RHS is an expand_word_error. The
+            // flag is checked after word expansion in execute_command, but
+            // an assignment-only command expands its RHS here — without
+            // consuming the flag it leaks into the *next* command's check
+            // and discards an innocent command (v=${x-${'u'%'v'}} ate the
+            // following `echo`).
+            if self.parameter_bad_substitution.replace(false) {
+                if self.posix_mode_enabled()
+                    && self
+                        .env_vars
+                        .get("__RUBASH_INTERACTIVE")
+                        .map(String::as_str)
+                        != Some("1")
+                {
+                    let code = if self.env_vars.get("__RUBASH_IS_C").is_some() {
+                        127
+                    } else {
+                        1
+                    };
+                    self.exit_code = code;
+                    return Err(ExecuteError::ExitCode(code));
+                }
+                self.exit_code = 1;
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             let expanded_value = assignment_result.value;
             let substitution_status = assignment_result.substitution_status;
             if assignment_result.arithmetic_error && !assignment_result.arithmetic_nonfatal_error {
@@ -951,14 +977,14 @@ impl Executor {
         }
         // scan_substitution_spans only sees $()/backtick spans, so a plain
         // double-quoted "${...}" word reports Unquoted. Restore the lexer's
-        //  quote marker for the whole-word braced form so the operator
+        // \x1d quote marker for the whole-word braced form so the operator
         // expander can tell "${v:-~}" (no tilde) from ${v:-~} (tilde).
         let word = if raw.is_some_and(|raw| raw.starts_with('"') && raw.ends_with('"'))
-            && !word.starts_with('')
+            && !word.starts_with('\u{1d}')
             && word.starts_with("${")
             && word.ends_with('}')
         {
-            format!("{word}")
+            format!("\u{1d}{word}")
         } else {
             word.to_string()
         };
@@ -1659,7 +1685,7 @@ impl Executor {
         };
         let values = self
             .quoted_positional_at_word_values_with_raw(alternate, Some(&synthetic_raw), None)?;
-        // GNU subst.c:12026-12035: this word is -marked (fully
+        // GNU subst.c:12026-12035: this word is \x1d-marked (fully
         // double-quoted), so a zero-field alternate still yields one empty
         // field (`"${foo-$@}"` with no positional parameters -> `argv[1] = <>`).
         if values.is_empty() {

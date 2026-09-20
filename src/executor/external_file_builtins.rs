@@ -502,7 +502,7 @@ impl Executor {
 
         if cmd.heredoc.is_some() {
             let input = self.stdin_string_for_command_mut(cmd).unwrap_or_default();
-            let output = filter(input.as_bytes());
+            let output = filter(&crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input));
             if let Some(redirect) = &cmd.append {
                 let target = self.expand_word(&redirect.target);
                 let mut file = OpenOptions::new()
@@ -554,14 +554,14 @@ impl Executor {
         }
 
         if let Some(input) = self.stdin_string_for_command_mut(cmd) {
-            self.write_cat_output(cmd, &filter(input.as_bytes()))?;
+            self.write_cat_output(cmd, &filter(&crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input)))?;
             self.exit_code = 0;
             return Ok(true);
         }
 
         if !cat_has_file_operands(cmd) {
             if let Some(input) = self.read_function_stdin('\0', None, false) {
-                self.write_cat_output(cmd, &filter(input.as_bytes()))?;
+                self.write_cat_output(cmd, &filter(&crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input)))?;
                 self.exit_code = 0;
                 return Ok(true);
             }

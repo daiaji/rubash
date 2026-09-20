@@ -365,9 +365,6 @@ impl Executor {
         // with the same expand_word_error classification. Expand once here
         // and mark the results so the stdin paths return them verbatim
         // instead of re-running embedded substitutions.
-        if std::env::var("RUBASH_DEBUG_HD").is_ok() && (cmd.heredoc.is_some() || cmd.here_string.is_some() || !cmd.heredoc_redirects.is_empty()) {
-            eprintln!("[preexpand] words={:?} hd={:?} hdrs={:?}", cmd.words, cmd.heredoc.as_deref().map(|b| &b[..b.len().min(30)]), cmd.heredoc_redirects.iter().map(|r| (r.fd, r.body.as_deref().map(|b| &b[..b.len().min(30)]))).collect::<Vec<_>>());
-        }
         self.preexpand_command_stdin(&mut cmd);
         self.abort_on_expansion_errors()?;
 

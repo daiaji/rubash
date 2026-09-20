@@ -126,14 +126,16 @@ impl Executor {
     // without re-parsing quotes.
     pub(in crate::executor) fn expand_here_string_mut(&mut self, word: &str) -> String {
         if let Some(pre) = preexpanded_stdin_body(word) {
-            return pre.to_string();
+            return crate::executor::execution_misc::decode_stdin_body_enq(pre);
         }
-        self.expand_embedded_parameters_mut_inner(
-            word,
-            SubstitutionQuoteContext::Unquoted,
-            true,
-            false,
-            false,
+        crate::executor::execution_misc::decode_stdin_body_enq(
+            &self.expand_embedded_parameters_mut_inner(
+                word,
+                SubstitutionQuoteContext::Unquoted,
+                true,
+                false,
+                false,
+            ),
         )
     }
 

@@ -670,7 +670,14 @@ impl Executor {
             Ok(mut child) => {
                 if let Some(input) = self.stdin_string_for_command_mut(cmd) {
                     if let Some(mut stdin) = child.stdin.take() {
-                        stdin.write_all(input.as_bytes())?;
+                        // The input is shell text: raw-byte marker pairs
+                        // (heredoc bodies, expanded bytes) must decode to
+                        // real bytes for the child (GNU writes fd bytes).
+                        stdin.write_all(
+                            &crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                                &input,
+                            ),
+                        )?;
                     }
                 }
 

@@ -118,7 +118,7 @@ impl Executor {
         // alternate word reaches expansion only when that word is actually
         // evaluated (`${x-${'x1'%'t'}}` with x set is silent in GNU).
         if braced_name_ends_on_quote(name) {
-            eprintln!("{}{}: bad substitution", self.diagnostic_prefix(), word);
+            eprintln!("{}{}: bad substitution", self.diagnostic_prefix(), bad_substitution_display(word));
             self.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -401,5 +401,21 @@ pub(in crate::executor) fn braced_name_ends_on_quote(name: &str) -> bool {
             i += 1;
         }
     }
-    i < bytes.len() && matches!(bytes[i], b'\'' | b'"')
+    // \x17/\x18 are the SQ/DQ data sentinels: an operator word quote-
+    // decoded before re-expansion (decode_double_quotes_in_quoted_
+    // parameter_word, "${x-${'u'%'v'}}") reaches here with quote evidence
+    // erased; a sentinel at name position can only come from a source
+    // quote, which lands on the same bad-substitution default.
+    i < bytes.len() && matches!(bytes[i], b'\'' | b'"' | 0x17 | 0x18)
+}
+
+/// Renders a `${...}` word for the bad-substitution diagnostic: operator
+/// words quote-decoded before re-expansion carry data sentinels that
+/// must read back as the source characters like GNU's diagnostic.
+pub(in crate::executor) fn bad_substitution_display(word: &str) -> String {
+    word.replace('\u{17}', "'")
+        .replace('\u{18}', "\"")
+        .replace('\u{14}', "\\")
+        .replace('\u{1f}', "$")
+        .replace('\u{1a}', "`")
 }

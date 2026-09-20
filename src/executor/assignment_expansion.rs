@@ -525,9 +525,6 @@ impl Executor {
     }
 
     fn expand_assignment_value_inner(&mut self, name: &str, value: &str) -> String {
-        if std::env::var("RUBASH_DEBUG_AV").is_ok() {
-            eprintln!("[av] name={:?} value={:?}", name, value);
-        }
         // GNU expand_string_for_assignment (subst.c:4365) sets
         // expand_no_split_dollar_star=1 for the whole assignment-RHS
         // expansion, so `${*/a/x}` on the RHS joins with IFS[0]

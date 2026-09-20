@@ -1301,3 +1301,82 @@ braces 0、ifs 0、rhs-exp 0、arith 0。
 - `read -e`（readline）超时族同理。
 - 套件 GNU 侧 mkfifo 循环（2000 次子 shell）+ `/dev/tty` 阻塞导致
   GNU 输出在 harness 超时处截断，RB 多出的尾部行为 GNU 未执行区段。
+
+## 合并前审计修复（B1/B3/B4/B7；B2 单独立项）
+
+**B1 `\x05` PREEXPANDED_STDIN_BODY 碰撞（高）**——脚本文件是任意
+字节流，heredoc 体首字节可为原始 0x05，与执行器"已展开"哨兵碰撞
+导致跳过展开。修法：`parser/redirections.rs::encode_stdin_body_enq`
+在收集点（heredoc 体 + here-string 词）把字面 ENQ 编码为既有
+RAW_BYTE 标记对；`execution_misc.rs::decode_stdin_body_enq` 在
+`expand_heredoc_body{,_mut}`/`expand_here_string_mut` 返回边界把
+该对解码回字面 `\x05`（0x05 非载体字节，值域规范形态即字面 char，
+`$'\005'` 亦然）；字节边界统一走
+`substitution_metadata::shell_text_to_raw_bytes`——补齐了
+`external_inner::spawn_external_process` 与 `external_file_builtins::
+external_cat` 快路径原先 `input.as_bytes()` 直写泄漏 PUA 标记的缺口。
+GNU 锚点：heredoc 体为字节流（`parse.y` gather_here_documents +
+`redir.c` do_redirections 不区分字节值）。验证矩阵（RB vs WSL GNU
+5.3 字节级 od 对照）：体首/体中/体独占 0x05 × unquoted/quoted/
+`0<<`/`<<<`/comsub 捕获/`while read`/`grep` 全对齐；`$(cat <<EOF)`
+捕获值中 0x05 不再以 PUA UTF-8 泄漏。
+
+**B3 `cat 0<<EOF` 无输出（中）**——显式 fd-0 heredoc 只入
+`heredoc_redirects`（fd=Some(0)），stdin 取材只查 `cmd.heredoc`。
+修法：`shell_options.rs::stdin_string_for_command{,_mut}` 与
+`external_setup.rs::apply_external_stdin_redirect` 增加 fd-0 消费，
+`external_fd_heredoc_input` 提升为 executor 可见。顺带按 GNU
+`redir.c` do_redirections 左序语义修正 fd-0 输入源取舍：利用
+`cmd.redirects` 有序表取最后一条 fd-0 输入重定向为赢家——
+`cat <<A 0<<B`/`cat 0<<A <<B`/`cat <<A <<<w`/`cat <<<w <<A`/
+`cat <<A <file` 均与 GNU 对齐（同 fd 后写赢）。
+
+**B4 赋值命令 bad substitution 泄漏（中）**——
+`v=${x-${'u'%'v'}}` 两处缺口：①alternate 词经
+`decode_double_quotes_in_quoted_parameter_word` 把 `'` 编码为
+`\x17` 数据哨兵，`braced_name_ends_on_quote` 失配静默——现在把
+`\x17`/`\x18` 识别为源引号证据（该位置只可能来自源引号，
+GNU `subst.c:10277-10288 parameter_brace_expand` 同源），诊断经
+`bad_substitution_display` 还原哨兵为源字符；②
+`parameter_bad_substitution` 旗标在纯赋值命令
+（`execute_empty_words_command`）路径上不被消费，泄漏到下一命令才
+爆且错杀无辜命令行——赋值 RHS 展开后立即按 `abort_on_expansion_
+errors` 同型语义消费（非 posix：ExpansionFailure 丢当前命令 rc=1、
+脚本继续；posix 非交互：ExitCode fatal）。验证：`v=${x-${'u'%'v'}}`
+报错 rc=1、后续命令正常执行、`set -o posix` 下 fatal rc=1，均与
+GNU 5.3 一致。
+
+**B7 卫生**——移除 `RUBASH_DEBUG_HD`（command_execute/
+command_input_scope ×3）、`RUBASH_DEBUG_AV`（assignment_expansion）、
+`RB_DBG_*` 探针；`command_prepare.rs`/`expand_word.rs` 注释与代码
+字面量中的裸 0x1d/0x17/0x18 控制字节全部改转义写法；
+`execution_misc.rs` 上"0x05 不可能出现在体首"的错误断言注释已
+更正为编码不变式说明。
+
+**B2 单独立项（未动）**——`cat <<EOF &` 后台 heredoc 无输出：
+`command_text.rs::bash_command_text` 不渲染 heredoc 体，属命令
+文本重建路径，与本次 stdin 语义修复正交，留作独立任务。
+
+**预存非 UTF-8 脚本限制（新记录，非本批引入）**——含 0x80+ 等
+非法 UTF-8 字节的脚本文件整体被 "cannot execute binary file"
+拒绝（脚本按 UTF-8 解码进 String），GNU 按字节流接受。B1 的
+0x05 属合法 UTF-8 范围不受影响；非 UTF-8 脚本支持是独立的架构项。
+
+**台账**（true-baseline.sh 同口径）：heredoc 5、herestr 0、
+redir 46、vredir 24、comsub2 0、new-exp 0、quotearray 0、
+read 25（全环境性，见上节）、ifs 0、mapfile 60（harness 未拷贝
+`mapfile.data` 夹具，GNU 侧同样 No such file 报错）、comsub 17
+（预存解析簇）。heredoc/redir/vredir 残留均为预存簇（comsub 内
+heredoc 括号平衡、后台 heredoc=B2 族、$LINENO 漂移、`exec 0<&5-`
+/`|&` 重印），本批无回归。
+
+**新记录预存残留**（非本批引入，独立任务候选）：
+- lastpipe 5：嵌套 `while read` 管道外层只读首行
+  （`echo -e 'A
+B' | while read o; do echo -e '1
+2' | while read i;
+  do echo $o$i; done; done` GNU=A1 A2 B1 B2，RB=A1 A2）——无重定向
+  参与，属嵌套管道 FUNCTION_STDIN 游标族，与 B1/B3 正交。
+- 内建/复合命令侧"非赢家 fd-0 `<` 仍执行 open"未建模：
+  `cat <<A <missing` 外部路径已对齐（open 失败中止），内建 cat
+  快路径仍直接给 heredoc 体——属重定向逐条应用的架构项。

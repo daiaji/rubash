@@ -278,15 +278,40 @@ pub(in crate::executor) fn strip_quoted_heredoc_marker(body: &str) -> &str {
 /// do_redirections — after word expansion, before the command runs — so
 /// the executor expands them at the same point and stores the result with
 /// this prefix; the stdin paths return it verbatim instead of re-running
-/// embedded substitutions a second time. 0x05 is unused by every other
-/// sentinel layer and cannot appear at the start of a raw heredoc body or
-/// here-string word produced by the parser.
+/// embedded substitutions a second time. A raw 0x05 CAN appear at the start
+/// of a user heredoc body or here-string word (script files are arbitrary
+/// byte streams), so the parser encodes such bytes as raw-byte marker pairs
+/// at collection time (parser/redirections.rs encode_stdin_body_enq) and the
+/// expand/emit boundary decodes them back (decode_stdin_body_enq).
 pub(in crate::executor) const PREEXPANDED_STDIN_BODY: char = '\x05';
 
 /// Returns the pre-expanded text when `body` carries
 /// PREEXPANDED_STDIN_BODY.
 pub(in crate::executor) fn preexpanded_stdin_body(body: &str) -> Option<&str> {
     body.strip_prefix(PREEXPANDED_STDIN_BODY)
+}
+
+/// Inverse of parser encode_stdin_body_enq: once stdin text leaves the
+/// heredoc/here-string transport fields, a raw-byte marker pair for 0x05
+/// decodes back to the literal ENQ char — the canonical in-value
+/// representation, since 0x05 is not a carrier byte. Other marker pairs
+/// (carriers, >=0x80 bytes) must stay encoded, so only the 0x05 pair is
+/// touched.
+pub(in crate::executor) fn decode_stdin_body_enq(text: &str) -> String {
+    if !text.contains('\u{e000}') {
+        return text.to_string();
+    }
+    let pair = [
+        char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+            .expect("sentinel is valid"),
+        char::from_u32(
+            crate::executor::substitution_metadata::RAW_BYTE_MARKER_FIRST + 0x05,
+        )
+        .expect("marker char is valid"),
+    ]
+    .iter()
+    .collect::<String>();
+    text.replace(&pair, "\u{5}")
 }
 
 pub(in crate::executor) fn unterminated_heredoc_body_line_count(body: &str) -> usize {

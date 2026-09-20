@@ -123,7 +123,44 @@ impl Executor {
         cmd: &CommandNode,
         process: &mut Command,
     ) -> Result<(), ExecuteError> {
-        if cmd.heredoc.is_some() || cmd.here_string.is_some() {
+        // fd-0 stdin source obeys GNU left-to-right redirect order
+        // (redir.c do_redirections): the last fd-0 input redirect wins,
+        // so `cat <<A <file` must NOT pipe heredoc bytes over the file.
+        let stdin_body_wins = match crate::executor::shell_options::
+            fd0_stdin_redirect_winner(cmd)
+        {
+            Some(kind) => matches!(
+                kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ),
+            // No ordered redirect info: legacy field checks.
+            None => {
+                cmd.heredoc.is_some()
+                    || cmd.here_string.is_some()
+                    || cmd
+                        .heredoc_redirects
+                        .iter()
+                        .any(|redirect| redirect.fd == Some(0))
+            }
+        };
+        if stdin_body_wins {
+            // GNU applies every redirection in order (redir.c
+            // do_redirections): an earlier fd-0 `< file` still runs its
+            // open even though a later `<<` overrides fd 0, so a missing
+            // file aborts the command rather than silently yielding the
+            // heredoc body.
+            for redirect in cmd.redirects.iter() {
+                if redirect.fd.unwrap_or(0) == 0
+                    && redirect.kind == crate::parser::RedirectKind::Input
+                {
+                    let target = self.expand_word(&redirect.target);
+                    if redirect_target_fd(&target).is_none()
+                        && !is_closed_redirect_target(&target)
+                    {
+                        self.open_input_redirect(&target)?;
+                    }
+                }
+            }
             process.stdin(Stdio::piped());
         } else if let Some(ref redirect) = cmd.redirect_in {
             let target = self.expand_word(&redirect.target);
@@ -835,7 +872,7 @@ impl Executor {
         "0".to_string()
     }
 
-    fn external_fd_heredoc_input(&mut self, cmd: &CommandNode, fd: u32) -> Option<String> {
+    pub(in crate::executor) fn external_fd_heredoc_input(&mut self, cmd: &CommandNode, fd: u32) -> Option<String> {
         let body = cmd
             .heredoc_redirects
             .iter()
