@@ -189,6 +189,26 @@ hack。spawn 侧用 std `raw_attribute` 白名单传递。预估核心 FdTable �
 接入 redirect/spawn 路径，属 1–2 周工程；风险点在内建读 fd（read/mapfile）与
 stdio 载体路径的接线，需定向探针护航。
 
+**阶段 2 POC 实证（2026-09-20，`exp/fork-hybrid` @1c1108b9，
+`experiments/fork-hybrid/fdtable-poc/`）**：
+
+- FdTable 原型单测 8/8：dup 偏移量共享、close 隔离、整表复制不穿透、seek 跨槽
+  联动、管道缓冲跨 dup、dup2 替换即关闭、继承位——**DuplicateHandle 偏移量共享
+  假设实测成立**（dup 槽交叉读写互推偏移量，fork_table 后子表推进父表）。
+- 12 探针中 6 个失败场景在 FdTable 模型上重放 **6/6 消除**。
+- **修正**：std 的 `raw_attribute`/`spawn_with_attributes` 至今**从未进 stable**
+  （feature `windows_process_extensions_raw_attribute`，#114854）；stable 路径
+  手写 `STARTUPINFOEXW` 回退已验证 6/6。已知三坑：① attribute 传值必须裸
+  HANDLE 数组（传 Vec 结构体本身 → ERROR_87）；② 白名单上每个句柄须先标
+  可继承；③ `Stdio::piped()` 内部句柄进不了白名单（跨进程结果须经文件回传）。
+- 附带：匿名管道 EOF 时 `ReadFile` 返回 `ERROR_BROKEN_PIPE(109)` 而非 0 字节，
+  fd 层必须映射为 EOF。
+- **接入清单（约 1 周）**：① FdTable 移入引擎作 `fd` 模块（POC 直迁，~300 行）；
+  ② redir 打开路径删"重开模拟"改槽上真句柄（最大面，2–4 天 + redir 套件回归）；
+  ③ spawn 层白名单属性表替换 `spawn_with_isolated_std_handles` 补偿（顺带删除
+  单线程 spawn 假设、解锁线程化）；④ 后台/coproc 记账迁 FdTable + `fork_table`；
+  ⑤ 12 探针转正为引擎差分测试。
+
 ### 3.7 双层测试口径（引擎层 + 产品层）
 
 **真正的 shell 层是 niubash**（`D:/repo/niubash-*`，crate `niubash`，依赖
