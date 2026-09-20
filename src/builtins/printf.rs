@@ -255,13 +255,11 @@ fn valid_printf_array_target(name: &str, env_vars: &HashMap<String, String>) -> 
         return false;
     }
 
-    let Some((base, subscript)) = parse_printf_array_target(name) else {
-        return false;
-    };
-    if is_marked(env_vars, "__RUBASH_ASSOC_VARS", base) {
-        return true;
-    }
-    resolve_printf_indexed_subscript(env_vars, base, subscript).is_some()
+    // GNU valid_array_reference (arrayfunc.c) is purely syntactic: the
+    // subscript only has to be non-empty and quote-balanced. `a[@]` is a
+    // VALID reference — the `@`: bad array subscript diagnostic fires at
+    // bind time inside bind_variable -> assign_array_element, not here.
+    parse_printf_array_target(name).is_some()
 }
 
 /// GNU builtins/common.c:949 builtin_bind_variable -> bind_variable:
@@ -355,7 +353,16 @@ fn assign_printf_output(
             }
             assign_printf_indexed_element(env_vars, base, index, output);
         } else {
-            env_vars.insert(name.to_string(), output);
+            // GNU bind_variable -> assign_array_element -> array_expand_index:
+            // `@`/`*` (and any subscript the index expansion rejects) reports
+            // `name[sub]: bad array subscript` (builtin_error) and fails the
+            // assignment with status 1.
+            writeln!(
+                stderr,
+                "{}{name}: bad array subscript",
+                diagnostic_prefix(env_vars),
+            )?;
+            return Ok(Some(1));
         }
         return Ok(None);
     }
