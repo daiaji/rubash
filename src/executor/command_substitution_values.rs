@@ -720,7 +720,10 @@ impl Executor {
         // words into one field under a null IFS (array6.sub
         // `recho ${foo}"$@"` with IFS=).
         if let Some(values) = raw.and_then(|raw| {
-            quoted_positional_at_segments(raw).map(|segments| {
+            quoted_positional_at_segments(raw, &self.env_vars, &|name| {
+                self.nameref_target_name(name)
+            })
+            .map(|segments| {
                 expand_quoted_positional_at_segments(
                     &segments,
                     self.env_vars.get("IFS").map(String::as_str),
@@ -732,6 +735,12 @@ impl Executor {
 
                             .array_subscript_range_values(name, 0, None)
                             .unwrap_or_default(),
+                        // GNU string_list_dollar_star: `[*]` joins the
+                        // elements with IFS[0] into one word.
+                        QuotedPositionalAtSegment::ArrayStar(name, _) => vec![self
+                            .array_subscript_range_values(name, 0, None)
+                            .unwrap_or_default()
+                            .join(&self.ifs_first_char_separator())],
                         QuotedPositionalAtSegment::Literal { .. } => Vec::new(),
                     },
                     |literal| self.expand_embedded_parameters(literal),
@@ -1148,10 +1157,55 @@ enum QuotedPositionalAtSegment {
     /// expand_word_internal). `quoted` carries the same split rule as
     /// `PositionalAt`.
     ArrayAt(String, bool),
+    /// A `"${name[*]}"`-class span reached through indirection (`${!name}`
+    /// whose value is `arr[*]`, or a `$ref` nameref to `arr[*]`): GNU
+    /// joins the elements with IFS[0] into one word (subst.c
+    /// string_list_dollar_star), keeping the same affix rules.
+    ArrayStar(String, bool),
 
 }
 
-fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegment>> {
+/// `${!name}` where `name` holds `arr[@]`/`arr[*]`: the indirect expansion
+/// is the referenced array's element list (subst.c param_expand indirect
+/// name -> array_at), not the literal text. Returns (array_name, is_star).
+fn indirect_array_target(
+    env_vars: &std::collections::HashMap<String, String>,
+    name: &str,
+) -> Option<(String, bool)> {
+    if !is_shell_name(name) {
+        return None;
+    }
+    let target = env_vars.get(name)?;
+    if let Some(base) = target.strip_suffix("[@]") {
+        return Some((base.to_string(), false));
+    }
+    target
+        .strip_suffix("[*]")
+        .map(|base| (base.to_string(), true))
+}
+
+/// An unbraced `$name` whose nameref cell is `arr[@]`/`arr[*]` expands to
+/// the referenced array's elements (GNU find_variable_nameref — the
+/// whole-word `recho "$ref"` case in nameref18.sub; the same word-list
+/// expansion applies inside composite words).
+fn nameref_array_target(
+    nameref_target: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+) -> Option<(String, bool)> {
+    let target = nameref_target(name)?;
+    if let Some(base) = target.strip_suffix("[@]") {
+        return Some((base.to_string(), false));
+    }
+    target
+        .strip_suffix("[*]")
+        .map(|base| (base.to_string(), true))
+}
+
+fn quoted_positional_at_segments(
+    raw: &str,
+    env_vars: &std::collections::HashMap<String, String>,
+    nameref_target: &dyn Fn(&str) -> Option<String>,
+) -> Option<Vec<QuotedPositionalAtSegment>> {
     let chars = raw.chars().collect::<Vec<_>>();
     // Map char indices to byte offsets so `${...}` bodies can be skipped with
     // the canonical `matching_parameter_brace` scanner (parameter_ops.rs),
@@ -1249,7 +1303,9 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                 // to the first/last positional word (GNU subst.c expands the
                 // quoted span into a word list whose boundary words carry the
                 // surrounding quoted text; expand_word_internal 11723-11808).
-                if let Some(body_segments) = quoted_body_positional_at_segments(body) {
+                if let Some(body_segments) =
+                    quoted_body_positional_at_segments(body, env_vars, nameref_target)
+                {
                     push_quoted_positional_literal_segment(
                         &mut segments,
                         &chars[literal_start..index],
@@ -1304,6 +1360,31 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                             literal_start = index;
                             continue;
                         }
+                        if inner.first() == Some(&'!') {
+                            // `${!name}` where name's VALUE is `arr[@]` /
+                            // `arr[*]` is the array element list (subst.c
+                            // param_expand indirect expansion), e.g.
+                            // indir='arr[@]' in nameref18.sub.
+                            let ind_name: String = inner[1..].iter().collect();
+                            if let Some((base, star)) =
+                                indirect_array_target(env_vars, &ind_name)
+                            {
+                                push_quoted_positional_literal_segment(
+                                    &mut segments,
+                                    &chars[literal_start..index],
+                                    false,
+                                )?;
+                                segments.push(if star {
+                                    QuotedPositionalAtSegment::ArrayStar(base, false)
+                                } else {
+                                    QuotedPositionalAtSegment::ArrayAt(base, false)
+                                });
+                                saw_positional_at = true;
+                                index = raw[..=close_byte].chars().count();
+                                literal_start = index;
+                                continue;
+                            }
+                        }
                         if inner.len() > 3 && inner[inner.len() - 3..] == ['[', '@', ']'] {
                             let array_name: String =
                                 inner[..inner.len() - 3].iter().collect();
@@ -1331,6 +1412,36 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
                 // Unterminated `${...}`: skip to end.
                 index = chars.len();
                 continue;
+            }
+            '$' if chars
+                .get(index + 1)
+                .is_some_and(|ch| is_shell_name_start(*ch)) =>
+            {
+                // Unbraced `$name` whose nameref cell is `arr[@]`/`arr[*]`
+                // expands to the referenced array's element list
+                // (find_variable_nameref; nameref18.sub `recho $ref`).
+                let mut end = index + 1;
+                while end < chars.len() && is_shell_name_char(chars[end]) {
+                    end += 1;
+                }
+                let name: String = chars[index + 1..end].iter().collect();
+                if let Some((base, star)) = nameref_array_target(nameref_target, &name) {
+                    push_quoted_positional_literal_segment(
+                        &mut segments,
+                        &chars[literal_start..index],
+                        false,
+                    )?;
+                    segments.push(if star {
+                        QuotedPositionalAtSegment::ArrayStar(base, false)
+                    } else {
+                        QuotedPositionalAtSegment::ArrayAt(base, false)
+                    });
+                    saw_positional_at = true;
+                    index = end;
+                    literal_start = index;
+                    continue;
+                }
+                index += 1;
             }
             '$' if chars.get(index + 1) == Some(&'@') => {
                 // Bare unquoted `$@` inside a mixed word: same word-list
@@ -1381,7 +1492,11 @@ fn quoted_positional_at_segments(raw: &str) -> Option<Vec<QuotedPositionalAtSegm
 /// (the caller leaves the span as ordinary text) or when the body contains
 /// anything this narrow path must not guess at: other `${...}` operator
 /// forms, backticks, or backslash escapes.
-fn quoted_body_positional_at_segments(body: &[char]) -> Option<Vec<QuotedPositionalAtSegment>> {
+fn quoted_body_positional_at_segments(
+    body: &[char],
+    env_vars: &std::collections::HashMap<String, String>,
+    nameref_target: &dyn Fn(&str) -> Option<String>,
+) -> Option<Vec<QuotedPositionalAtSegment>> {
     let mut segments = Vec::new();
     let mut piece_start = 0usize;
     let mut index = 0usize;
@@ -1404,6 +1519,23 @@ fn quoted_body_positional_at_segments(body: &[char]) -> Option<Vec<QuotedPositio
                     // body (GNU subst.c: the `[@]` subscript produces one
                     // word per element inside double quotes).
                     let token = &body[index + 2..index + 2 + close];
+                    if token.first() == Some(&'!') {
+                        let ind_name: String = token[1..].iter().collect();
+                        if let Some((base, star)) =
+                            indirect_array_target(env_vars, &ind_name)
+                        {
+                            push_body_piece(&mut segments, &body[piece_start..index])?;
+                            segments.push(if star {
+                                QuotedPositionalAtSegment::ArrayStar(base, true)
+                            } else {
+                                QuotedPositionalAtSegment::ArrayAt(base, true)
+                            });
+                            saw_positional_at = true;
+                            index += 2 + close + 1;
+                            piece_start = index;
+                            continue;
+                        }
+                    }
                     if token.len() > 3 && token[token.len() - 3..] == ['[', '@', ']'] {
                         let name: String = token[..token.len() - 3].iter().collect();
                         if is_shell_name(&name) {
@@ -1429,6 +1561,28 @@ fn quoted_body_positional_at_segments(body: &[char]) -> Option<Vec<QuotedPositio
                 index =
                     crate::lexer::skip_parenthesized_unit_corrected(body, index + 1)
                         .unwrap_or(body.len());
+            }
+            '$' if body.get(index + 1).is_some_and(|ch| is_shell_name_start(*ch)) => {
+                // `"$ref"` inside a larger quoted body: a nameref cell of
+                // `arr[@]`/`arr[*]` is still a word-list source.
+                let mut end = index + 1;
+                while end < body.len() && is_shell_name_char(body[end]) {
+                    end += 1;
+                }
+                let name: String = body[index + 1..end].iter().collect();
+                if let Some((base, star)) = nameref_array_target(nameref_target, &name) {
+                    push_body_piece(&mut segments, &body[piece_start..index])?;
+                    segments.push(if star {
+                        QuotedPositionalAtSegment::ArrayStar(base, true)
+                    } else {
+                        QuotedPositionalAtSegment::ArrayAt(base, true)
+                    });
+                    saw_positional_at = true;
+                    index = end;
+                    piece_start = index;
+                    continue;
+                }
+                index += 1;
             }
             '$' if body.get(index + 1) == Some(&'@') => {
                 push_body_piece(&mut segments, &body[piece_start..index])?;
@@ -1593,7 +1747,8 @@ where
                 current_present = true;
             }
             QuotedPositionalAtSegment::PositionalAt(quoted)
-            | QuotedPositionalAtSegment::ArrayAt(_, quoted) => {
+            | QuotedPositionalAtSegment::ArrayAt(_, quoted)
+            | QuotedPositionalAtSegment::ArrayStar(_, quoted) => {
                 saw_positional_at = true;
                 let mut values = resolve_list(segment);
 

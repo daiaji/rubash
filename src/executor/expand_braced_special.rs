@@ -205,6 +205,16 @@ impl Executor {
                 .cloned()
                 .unwrap_or_default()
         };
+        // GNU subst.c:7955 parameter_brace_expand_indir re-expands the
+        // indirect target through parameter_brace_expand_word, whose
+        // find_variable follows namerefs: an indirect name landing on a
+        // nameref cell expands the RESOLVED target (`indir=ref`,
+        // `declare -n ref=arr` -> `${!indir}` reads arr[0]), not the
+        // cell's stored text. The ksh93 name-of shortcut above applies
+        // only when `name` itself is the nameref.
+        let target_name = self
+            .resolved_variable_name(&target_name)
+            .unwrap_or(target_name);
 
         // GNU subst.c:7883-7935 parameter_brace_expand_indir: the indirect
         // target is itself expanded as a variable reference, so a
