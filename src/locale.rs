@@ -312,7 +312,9 @@ pub fn decode_to_visible_text(text: &str) -> String {
         RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
     };
     use crate::executor::types::DEFERRED_COMPOUND_BODY;
-    use crate::lexer::{ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER};
+    use crate::lexer::{ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER, QUOTED_HEREDOC_MARKER};
+    use crate::executor::markers::COMSUB_PAYLOAD_PREFIX;
+    use crate::executor::types::COMPOUND_ASSIGNMENT_MARKER;
 
     const CTLESC: char = crate::executor::markers::CTLESC;
     // DATA_* sentinels owned by assignment_expansion.rs (declared as
@@ -447,6 +449,15 @@ pub fn decode_to_visible_text(text: &str) -> String {
         // intermediate passes. If it appears in output, the decode pass failed.
         debug_assert!(!out.contains(CTLESC),
             "CTLESC leaked to output");
+        // Golden assertion: named string markers must never leak to output
+        // These are multi-char protocol prefixes used in transport text.
+        // If they appear in output, the decode pass failed.
+        debug_assert!(!out.contains(QUOTED_HEREDOC_MARKER),
+            "QUOTED_HEREDOC_MARKER leaked to output");
+        debug_assert!(!out.contains(COMSUB_PAYLOAD_PREFIX),
+            "COMSUB_PAYLOAD_PREFIX leaked to output");
+        debug_assert!(!out.contains(COMPOUND_ASSIGNMENT_MARKER),
+            "COMPOUND_ASSIGNMENT_MARKER leaked to output");
     }
     out
 }
