@@ -102,15 +102,16 @@ impl Executor {
         // command_execute does not observe errors that already killed the
         // subshell (GNU: `x=$(echo $((b)))` under `set -u` prints the
         // diagnostic, leaves x empty, and keeps running; issue #67).
-        let saved_expansion_error = self.arithmetic_expansion_error.get();
-        let saved_nonfatal_error = self.arithmetic_nonfatal_error.get();
-        let saved_fatal_error = self.arithmetic_fatal_error.get();
-        let saved_nounset_error = self.arithmetic_nounset_error.get();
-        let saved_last_category = self.arithmetic_last_error_category.get();
+        // These fields are now in ShellState for proper isolation via clone.
+        let saved_expansion_error = self.shell_state.arithmetic_expansion_error.get();
+        let saved_nonfatal_error = self.shell_state.arithmetic_nonfatal_error.get();
+        let saved_fatal_error = self.shell_state.arithmetic_fatal_error.get();
+        let saved_nounset_error = self.shell_state.arithmetic_nounset_error.get();
+        let saved_last_category = self.shell_state.arithmetic_last_error_category.get();
         // Same subshell boundary for a mid-expansion `bad substitution`
         // (subst.c:10277): it kills the substitution's command list, never
         // the enclosing word's command.
-        let saved_bad_substitution = self.parameter_bad_substitution.replace(false);
+        let saved_bad_substitution = self.shell_state.parameter_bad_substitution.replace(false);
         self.shell_state.subshell_depth.set(old_depth + 1);
         // Bash evaluates BASH_COMMAND in a command substitution against the
         // substitution's own command source, rather than the outer word.
@@ -118,12 +119,12 @@ impl Executor {
         let result = self.expand_command_substitution_inner(source, context);
         *self.debug_trap_command.borrow_mut() = saved_command;
         self.shell_state.subshell_depth.set(old_depth);
-        self.arithmetic_expansion_error.set(saved_expansion_error);
-        self.arithmetic_nonfatal_error.set(saved_nonfatal_error);
-        self.arithmetic_fatal_error.set(saved_fatal_error);
-        self.arithmetic_nounset_error.set(saved_nounset_error);
-        self.arithmetic_last_error_category.set(saved_last_category);
-        self.parameter_bad_substitution.set(saved_bad_substitution);
+        self.shell_state.arithmetic_expansion_error.set(saved_expansion_error);
+        self.shell_state.arithmetic_nonfatal_error.set(saved_nonfatal_error);
+        self.shell_state.arithmetic_fatal_error.set(saved_fatal_error);
+        self.shell_state.arithmetic_nounset_error.set(saved_nounset_error);
+        self.shell_state.arithmetic_last_error_category.set(saved_last_category);
+        self.shell_state.parameter_bad_substitution.set(saved_bad_substitution);
         result
     }
 

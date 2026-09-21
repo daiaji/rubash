@@ -89,6 +89,21 @@ pub struct ShellState {
     /// subshell's `history` mutations cannot reach the parent — GNU gets
     /// the same isolation from the fork copy.
     pub(crate) session_history: Option<Rc<RefCell<SessionHistory>>>,
+    /// Arithmetic expansion error flags (subshell boundary).
+    /// GNU expr.c raises FORCE_EOF on unbound variable under `set -u`;
+    /// these flags isolate errors in command substitutions from the outer shell.
+    /// TODO: Move to ShellState::clone() for automatic isolation (requires &mut self API change)
+    pub(crate) arithmetic_expansion_error: Cell<bool>,
+    pub(crate) arithmetic_nonfatal_error: Cell<bool>,
+    pub(crate) arithmetic_fatal_error: Cell<bool>,
+    pub(crate) arithmetic_nounset_error: Cell<bool>,
+    pub(crate) arithmetic_last_error_category:
+        Cell<Option<crate::executor::arithmetic::ArithmeticErrorCategory>>,
+    /// Bad substitution flag (subshell boundary).
+    /// GNU subst.c:10277 - a mid-expansion bad substitution kills the
+    /// substitution's command list, never the enclosing word's command.
+    /// TODO: Move to ShellState::clone() for automatic isolation (requires &mut self API change)
+    pub(crate) parameter_bad_substitution: Cell<bool>,
 }
 
 impl Clone for ShellState {
@@ -127,6 +142,12 @@ impl Clone for ShellState {
                 .session_history
                 .as_ref()
                 .map(|s| Rc::new(RefCell::new(s.borrow().clone()))),
+            arithmetic_expansion_error: Cell::new(self.arithmetic_expansion_error.get()),
+            arithmetic_nonfatal_error: Cell::new(self.arithmetic_nonfatal_error.get()),
+            arithmetic_fatal_error: Cell::new(self.arithmetic_fatal_error.get()),
+            arithmetic_nounset_error: Cell::new(self.arithmetic_nounset_error.get()),
+            arithmetic_last_error_category: Cell::new(self.arithmetic_last_error_category.get()),
+            parameter_bad_substitution: Cell::new(self.parameter_bad_substitution.get()),
         }
     }
 }
