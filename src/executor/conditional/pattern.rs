@@ -34,7 +34,7 @@ fn pattern_contains_raw_byte_markers(pattern: &str) -> bool {
 /// Base for byte-char representation: U+E100 + byte value. This PUA range is
 /// disjoint from the raw-byte marker range (U+E000-U+E100) and from ASCII
 /// pattern syntax chars (*, ?, \), so byte-chars never collide with syntax.
-const BYTE_CHAR_BASE: u32 = 0xE100;
+pub(crate) const BYTE_CHAR_BASE: u32 = 0xE100;
 
 /// Flatten a pattern to byte-chars for byte-level matching. Pattern syntax
 /// chars (*, ?, \, CTLESC) are kept as-is; raw-byte markers become byte-chars;

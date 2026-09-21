@@ -62,7 +62,7 @@ mod declare_local;
 mod dynamic_arrays;
 mod exec_profile;
 pub(in crate::executor) use dynamic_arrays::env_derived_dynamic_parameter_value;
-mod embedded_mutations;
+pub(crate) mod embedded_mutations;
 mod embedded_parameters;
 mod expand_braced_indices;
 mod expand_braced_ops;

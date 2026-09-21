@@ -257,6 +257,122 @@ pub fn init_locale() {
     let _ = locale_request_active();
 }
 
+/// Decode rubash's internal transport text into user-visible text.
+///
+/// Rubash ports GNU's `CTLESC`/`CTLNUL` mechanism (parse.y:5694-5706
+/// `got_escaped_character`, subst.c:4692 `dequote_escapes`,
+/// subst.c:4807 `dequote_string`) as in-band carrier code points between
+/// the lexer, parser, and executor. Hosts that read token `value`/`raw`
+/// fields or word text before execution see those carriers; this function
+/// is the single boundary decoder that removes them and restores the
+/// source characters they protect.
+///
+/// This is the Phase 0 decode-at-boundary API of the host-semantic-layer
+/// elimination plan: `--dump-strings`/`--dump-po-strings` (GNU
+/// locale.c:550 `dump_translatable_strings`, shell.c:507-509) and host AST
+/// consumers must use it instead of hand-stripping individual markers.
+///
+/// Carrier table (decode is a single left-to-right pass):
+///
+/// | Transport | Meaning | Emits |
+/// |---|---|---|
+/// | `\x11` + c | CTLESC port: quoted glob char (`*?[@+!`) | `c` |
+/// | `\x03` | DEFERRED_COMPOUND_BODY protocol byte | nothing |
+/// | `\x13` | PARAM_NAME_END_MARKER (name boundary after quote removal) | nothing |
+/// | `\x14` | data backslash | `\` |
+/// | `\x16` | protected escaped single quote | `'` |
+/// | `\x17` | data single quote | `'` |
+/// | `\x18` | data double quote | `"` |
+/// | `\x1a` | data backtick | `` ` `` |
+/// | `\x1b`/`\x1c`/`\x1d` | word-level prefix markers (quoted tilde, IFS glue, storage/comsub tag) | nothing |
+/// | `\x1f` | data dollar | `$` |
+/// | `U+E002` | QUOTED_NULL_MARKER (empty quoted field) | nothing |
+/// | `U+E010`/`U+E011` | ANSI-C `$'...'` decoded `'`/`"` data | `'`/`"` |
+/// | `U+E000` + `U+E0xx` | raw-byte marker pair | byte `xx` as char |
+/// | `U+E000` + `U+E000` | escaped literal U+E000 | `U+E000` |
+/// | `U+E101`..=`U+E108` | assignment DATA_* sentinels (quote/backtick/backslash data) | the data char |
+/// | `U+E109` | COMPOUND_EXPANSION_WS_TAG (field-splitting glue) | nothing |
+/// | `U+E100`, `U+E10A`..=`U+E1FF` | conditional-pattern byte-chars | byte `(cp - E100)` as char |
+///
+/// Ordering follows the storage-boundary contract documented in
+/// assignment_expansion.rs: carriers are restored while raw-byte marker
+/// pairs are still tagged, then pairs decode to bytes — decoded output is
+/// appended directly and never rescanned, so a pair carrying byte 0x11
+/// cannot be mistaken for CTLESC.
+///
+/// Note: `U+E101`..=`U+E109` sit inside the BYTE_CHAR_BASE byte-char range
+/// (U+E100..=U+E1FF) — the same collision class as the retired E10A
+/// FAILED_SUBSCRIPT_SENTINEL. The DATA_* interpretation wins here because
+/// byte-chars for bytes 0x01-0x09 do not occur in token text.
+pub fn decode_to_visible_text(text: &str) -> String {
+    use crate::executor::conditional::pattern::BYTE_CHAR_BASE;
+    use crate::executor::embedded_mutations::{COMPOUND_EXPANSION_WS_TAG, QUOTED_NULL_MARKER};
+    use crate::executor::substitution_metadata::{
+        RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
+    };
+    use crate::executor::types::DEFERRED_COMPOUND_BODY;
+    use crate::lexer::{ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER};
+
+    const CTLESC: char = '\u{11}';
+    // DATA_* sentinels owned by assignment_expansion.rs (declared as
+    // fn-local consts there): data quote/backtick/backslash carriers.
+    const DATA_SINGLE_QUOTE: char = '\u{E101}';
+    const DATA_DOUBLE_QUOTE: char = '\u{E102}';
+    const DATA_BACKTICK: char = '\u{E103}';
+    const DATA_ESCAPED_DQUOTE: char = '\u{E104}';
+    const DATA_ESCAPED_SQUOTE: char = '\u{E105}';
+    const DATA_ESCAPED_BACKSLASH: char = '\u{E106}';
+    const HOISTED_SINGLE_QUOTE: char = '\u{E107}';
+    const HOISTED_BACKSLASH: char = '\u{E108}';
+
+    let byte_char = |code: u32| char::from_u32(code).expect("byte-char code point is valid");
+
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            CTLESC => {
+                if let Some(data) = chars.next() {
+                    out.push(data);
+                }
+            }
+            c if c as u32 == RAW_BYTE_MARKER_ESCAPE => match chars.next() {
+                Some(next) if next as u32 == RAW_BYTE_MARKER_ESCAPE => out.push(c),
+                Some(next)
+                    if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(next as u32)) =>
+                {
+                    out.push(byte_char(next as u32 - RAW_BYTE_MARKER_FIRST));
+                }
+                Some(next) => {
+                    out.push(c);
+                    out.push(next);
+                }
+                None => out.push(c),
+            },
+            DEFERRED_COMPOUND_BODY
+            | PARAM_NAME_END_MARKER
+            | QUOTED_NULL_MARKER
+            | COMPOUND_EXPANSION_WS_TAG
+            | '\u{1b}'
+            | '\u{1c}'
+            | '\u{1d}' => {}
+            '\u{14}' | HOISTED_BACKSLASH | DATA_ESCAPED_BACKSLASH => out.push('\\'),
+            '\u{16}' | '\u{17}' | ANSI_C_QUOTE_MARKER | DATA_SINGLE_QUOTE | DATA_ESCAPED_SQUOTE
+            | HOISTED_SINGLE_QUOTE => out.push('\''),
+            '\u{18}' | ANSI_C_DQUOTE_MARKER | DATA_DOUBLE_QUOTE | DATA_ESCAPED_DQUOTE => {
+                out.push('"')
+            }
+            '\u{1a}' | DATA_BACKTICK => out.push('`'),
+            '\u{1f}' => out.push('$'),
+            c if (BYTE_CHAR_BASE..BYTE_CHAR_BASE + 0x100).contains(&(c as u32)) => {
+                out.push(byte_char(c as u32 - BYTE_CHAR_BASE));
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_utf8_locale_name;
@@ -266,6 +382,84 @@ mod tests {
         assert!(is_utf8_locale_name("en_US.UTF-8"));
         assert!(is_utf8_locale_name("C.UTF-8"));
         assert!(is_utf8_locale_name("C.utf8"));
+    }
+
+    #[test]
+    fn decode_to_visible_text_restores_data_carriers() {
+        // The lexer encodes quote/backslash/dollar/backtick data as C0
+        // carriers; the decoder must render the source characters.
+        assert_eq!(super::decode_to_visible_text("a\u{17}b"), "a'b");
+        assert_eq!(super::decode_to_visible_text("a\u{18}b"), "a\"b");
+        assert_eq!(super::decode_to_visible_text("a\u{14}b"), "a\\b");
+        assert_eq!(super::decode_to_visible_text("a\u{1f}b"), "a$b");
+        assert_eq!(super::decode_to_visible_text("a\u{1a}b"), "a`b");
+        assert_eq!(super::decode_to_visible_text("a\u{16}b"), "a'b");
+    }
+
+    #[test]
+    fn decode_to_visible_text_ctlesc_protects_next_char() {
+        // Quoted glob chars travel as CTLESC + char (parse.y:5694-5706
+        // got_escaped_character port); decode emits the protected char.
+        assert_eq!(super::decode_to_visible_text("a\u{11}*b"), "a*b");
+        assert_eq!(super::decode_to_visible_text("\u{11}?"), "?");
+        // A trailing lone CTLESC decodes to nothing.
+        assert_eq!(super::decode_to_visible_text("a\u{11}"), "a");
+    }
+
+    #[test]
+    fn decode_to_visible_text_drops_structural_markers() {
+        // Word-level prefix/infix markers carry no user-visible character.
+        assert_eq!(super::decode_to_visible_text("\u{1b}~/x"), "~/x");
+        assert_eq!(super::decode_to_visible_text("a\u{1c} b"), "a b");
+        assert_eq!(super::decode_to_visible_text("\u{1d}(a b)"), "(a b)");
+        assert_eq!(super::decode_to_visible_text("a\u{13}b"), "ab");
+        assert_eq!(super::decode_to_visible_text("a\u{e002}b"), "ab");
+        assert_eq!(super::decode_to_visible_text("a\u{e109}b"), "ab");
+        assert_eq!(super::decode_to_visible_text("a\u{3}b"), "ab");
+    }
+
+    #[test]
+    fn decode_to_visible_text_restores_pua_quote_markers() {
+        assert_eq!(super::decode_to_visible_text("a\u{e010}b"), "a'b");
+        assert_eq!(super::decode_to_visible_text("a\u{e011}b"), "a\"b");
+        // Assignment DATA_* sentinels.
+        assert_eq!(super::decode_to_visible_text("a\u{e101}b"), "a'b");
+        assert_eq!(super::decode_to_visible_text("a\u{e102}b"), "a\"b");
+        assert_eq!(super::decode_to_visible_text("a\u{e103}b"), "a`b");
+        assert_eq!(super::decode_to_visible_text("a\u{e104}b"), "a\"b");
+        assert_eq!(super::decode_to_visible_text("a\u{e105}b"), "a'b");
+        assert_eq!(super::decode_to_visible_text("a\u{e106}b"), "a\\b");
+        assert_eq!(super::decode_to_visible_text("a\u{e107}b"), "a'b");
+        assert_eq!(super::decode_to_visible_text("a\u{e108}b"), "a\\b");
+    }
+
+    #[test]
+    fn decode_to_visible_text_decodes_raw_byte_pairs_last() {
+        // U+E000 + U+E0xx pair -> raw byte xx. The payload byte must not be
+        // re-interpreted as a carrier: byte 0x11 (CTLESC) decodes to the
+        // literal char U+0011 in output, it does not eat the next char.
+        assert_eq!(
+            super::decode_to_visible_text("a\u{e000}\u{e012}b"),
+            "a\u{11}b"
+        );
+        // Byte 0x41 = 'A'.
+        assert_eq!(super::decode_to_visible_text("\u{e000}\u{e042}"), "A");
+        // Doubled escape = literal U+E000.
+        assert_eq!(
+            super::decode_to_visible_text("\u{e000}\u{e000}"),
+            "\u{e000}"
+        );
+        // Conditional-pattern byte-chars: U+E100+byte.
+        assert_eq!(super::decode_to_visible_text("x\u{e141}y"), "xAy");
+    }
+
+    #[test]
+    fn decode_to_visible_text_leaves_plain_text_untouched() {
+        assert_eq!(
+            super::decode_to_visible_text("echo hello world"),
+            "echo hello world"
+        );
+        assert_eq!(super::decode_to_visible_text(""), "");
     }
 
     #[test]

@@ -410,9 +410,5 @@ pub(in crate::executor) fn braced_name_ends_on_quote(name: &str) -> bool {
 /// words quote-decoded before re-expansion carry data sentinels that
 /// must read back as the source characters like GNU's diagnostic.
 pub(in crate::executor) fn bad_substitution_display(word: &str) -> String {
-    word.replace('\u{17}', "'")
-        .replace('\u{18}', "\"")
-        .replace('\u{14}', "\\")
-        .replace('\u{1f}', "$")
-        .replace('\u{1a}', "`")
+    crate::locale::decode_to_visible_text(word)
 }

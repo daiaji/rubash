@@ -8,7 +8,7 @@ use crate::executor::parameter_core::word_contains_current_shell_command_substit
 // to the word text at 11940-11944 / 11841-11847, and list_string:3181-3186
 // keeps a QUOTED_NULL field as an empty argv entry). U+E000/U+E001 are
 // taken by the raw-byte and assignment data-quote sentinels; U+E002 free.
-pub(in crate::executor) const QUOTED_NULL_MARKER: char = '\u{E002}';
+pub(crate) const QUOTED_NULL_MARKER: char = '\u{E002}';
 
 // Whitespace that an expansion produced inside a quoted region of an
 // alternate word must survive field splitting (GNU carries CTLESC on

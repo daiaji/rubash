@@ -17,7 +17,7 @@ use crate::parser::QuoteKind;
 
 mod args;
 mod extglob;
-mod pattern;
+pub(crate) mod pattern;
 
 use args::{
     conditional_effective_len, conditional_logical_index, conditional_outer_parentheses,

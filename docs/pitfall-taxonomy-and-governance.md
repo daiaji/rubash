@@ -75,6 +75,17 @@ rubash 用带内哨兵（C0 字节 \x11–\x1f、PUA 码点 E000–E10C、命名
   **存储边界**（变量/数组赋值前统一还原）、**重解析边界**（eval/alias/comsub
   再解析前统一还原）。目标是把 50 文件的散布 decode 收敛到每边界一个入口。
 - 新路径接入时只允许调用边界入口，不允许自带 decode。
+- **宿主边界入口已落地（2026-09-22，Phase 0）**：`rubash::decode_to_visible_text`
+  （src/locale.rs，crate 根 re-export）是面向宿主的"内部传输文本→用户可见文本"
+  公开解码函数，供 niubash dump-strings 与 A1/A2 宿主改写删除使用。单遍解码
+  CTLESC、C0 数据载体、词级前缀标记（\x1b/\x1c/\x1d）、ANSI-C PUA 标记、
+  赋值 DATA_* 哨兵、raw-byte 标记对与条件模式字节字符；载体表见函数文档。
+  `bad_substitution_display` 已收敛到它。GNU 锚点：locale.c:550
+  `dump_translatable_strings`、shell.c:507-509、parse.y:5694-5706 CTLESC。
+- **C1 遗留登记**（niubash 计划文档同步）：c16 未闭合 `$"` 需要 EOF 诊断
+  （对齐 GNU parse.y 未终结引号 EOF 报告）；c20 `$"..."` 体内嵌套
+  `$(...)`/`${...}` 的 dump 需要 AST→源码 body 序列化器（与 niubash C2
+  `pretty_print_script` 同前置）。
 
 ### 3.3 语义唯一入口（按杠杆排序）
 
