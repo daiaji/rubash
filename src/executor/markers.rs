@@ -20,6 +20,17 @@
 //! - `user_reachable == true` markers can equal a byte the user can type or
 //!   pipe in; the entry point producing transport text MUST re-encode that
 //!   byte (raw-byte marker pair), or the marker silently corrupts data.
+//!
+//! ## Decode boundary entry points (governance 3.2)
+//!
+//! | Boundary | Entry point | Site |
+//! |---|---|---|
+//! | Output | `crate::locale::decode_to_visible_text` — the one sanctioned transport→visible decoder (echo paths additionally run `substitution_metadata::decode_raw_byte_markers` because echo input is already expansion-decoded text that can still carry raw-byte pairs) | `builtins/echo.rs`, `declare` printing, xtrace, `bad_substitution_display`, host `dump-strings` |
+//! | Storage | values reaching `env_vars`/array stores are already data bytes — the encoder side is `substitution_metadata` (`bytes_to_assignment_shell_text`, `push_escaped_text_with_carriers`) which pair-encodes every `user_reachable` byte at entry so storage never confuses a user byte with a carrier | variable/array assignment paths |
+//! | Reparse | marker bytes are the lexer's own protocol: text re-fed through `eval`, alias bodies and command-substitution bodies re-lex with markers intact; user bytes inside reparsed text were pair-encoded at the original entry so they decode as data, never as carriers | `eval`, alias expansion, comsub reparse |
+//!
+//! Golden rule: no `MARKERS` codepoint may appear in stdout, `declare -p`,
+//! or xtrace output — asserted by the leak tests in `locale.rs`/`markers.rs`.
 
 /// Decode boundary at which a carrier is restored.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -645,6 +656,40 @@ pub(crate) fn push_ctlesc_escaped(output: &mut String, data: char) {
     output.push(data);
 }
 
+// ==========================================================================
+// Literal-char escape — user-supplied chars that collide with the registry
+// zone are E400-prefixed at entry (the same rule as user bytes vs C0
+// carriers, B1 \x05 lesson). A dedicated introducer is required because the
+// raw-byte payload range E000-E0FF overlaps the zone itself: `E000+E0A0`
+// must stay byte 0xA0, so it cannot also mean literal U+E0A0. Decode:
+// `E400 + c` restores `c` verbatim; `E400` alone is emitted literally.
+// ==========================================================================
+
+/// First codepoint of the registry zone a user char must never carry raw.
+pub(crate) const MARKER_ZONE_FIRST: u32 = 0xE000;
+/// Last codepoint of the registry zone (reserves headroom past E318).
+pub(crate) const MARKER_ZONE_LAST: u32 = 0xE3FF;
+/// Introducer for the literal-char escape; sits just above the zone.
+pub(crate) const LITERAL_CHAR_ESCAPE: char = '\u{E400}';
+pub(crate) const LITERAL_CHAR_ESCAPE_STR: &str = "\u{E400}";
+
+/// True when `c` collides with a transport codepoint and therefore must
+/// be escaped when it arrives as user data: the whole registry zone plus
+/// the escape introducer itself.
+pub(crate) fn is_marker_zone_char(c: char) -> bool {
+    (MARKER_ZONE_FIRST..=MARKER_ZONE_LAST).contains(&(c as u32)) || c == LITERAL_CHAR_ESCAPE
+}
+
+/// Emit `c` as transport text: colliding chars get the `E400` literal
+/// prefix so a later decode boundary restores them verbatim instead of
+/// reading them as markers (E1xx byte-pair / UTF-8 mixed ambiguity fix).
+pub(crate) fn push_literal_char(output: &mut String, c: char) {
+    if is_marker_zone_char(c) {
+        output.push(LITERAL_CHAR_ESCAPE);
+    }
+    output.push(c);
+}
+
 
 
 #[cfg(test)]
@@ -685,6 +730,35 @@ mod tests {
         let before = pua.len();
         pua.dedup();
         assert_eq!(pua.len(), before, "duplicate PUA marker codepoint");
+    }
+
+    /// `E400` literal-char escape round-trips marker-zone chars so a user
+    /// `$'\uE314'` can never be read back as a guard.
+    #[test]
+    fn literal_char_escape_roundtrips_marker_zone() {
+        let mut out = String::new();
+        push_literal_char(&mut out, '\u{E314}');
+        assert_eq!(out, "\u{E400}\u{E314}");
+        let mut plain = String::new();
+        push_literal_char(&mut plain, 'q');
+        assert_eq!(plain, "q");
+        // Payload-range literal char: E0A0 must NOT use the E000 prefix
+        // (that would decode as raw byte 0xA0, not the PUA glyph).
+        let mut payload = String::new();
+        push_literal_char(&mut payload, '\u{E0A0}');
+        assert_eq!(payload, "\u{E400}\u{E0A0}");
+        // The escape introducer escapes itself.
+        let mut esc = String::new();
+        push_literal_char(&mut esc, '\u{E400}');
+        assert_eq!(esc, "\u{E400}\u{E400}");
+        // Every registered PUA codepoint is inside the zone.
+        for m in MARKERS {
+            assert!(
+                m.code < 0xE000 || is_marker_zone_char(char::from_u32(m.code).unwrap()),
+                "{} outside marker zone",
+                m.name
+            );
+        }
     }
 
     /// Every `_STR` companion must spell the same codepoint as its `char`.

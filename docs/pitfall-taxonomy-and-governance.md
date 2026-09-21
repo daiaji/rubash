@@ -78,8 +78,20 @@ rubash 用带内哨兵（C0 字节 \x11–\x1f、PUA 码点 E000–E317、命名
   迁入 **U+E310..=U+E317**，彻底脱离用户可达字节域。
 - M1 已完成：注册表 + 全部具名 const 别名化 + 碰撞区重编号 + 注册表
   自洽测试（无 E1xx 内哨兵、PUA 唯一性、char/_STR 一致性、pair roundtrip）。
-  待办：M2/M3 裸字面量迁移（\x1f/\x1d 高频优先）、M4 三边界收口、
-  M5 金标断言 + 全量基线。
+- **M2 已完成（c84bde92）**：`\x1f`/`\x1d` 高频字面量全部走注册表；
+  修复脚本迁移引入的双前缀 bug（`\x1d\x1d`）；**ARRAYREF_FLAG \x02→U+E318**
+  （与 PROMPT_IGNORE_END 撞码，注册表唯一性测试捕获）；decoder 补齐
+  PATSUB/guard/FAILED_SUBSCRIPT/ARRAYREF 映射。
+- **M3 已完成（34e204bf）**：其余 C0 字面量（\x11-\x1e、\x10、\x03、\x05、
+  \x12、\x01/\x02）全部迁移约 300 处；同码点异协议登记为诚实别名
+  （PATTERN_LITERAL_BACKSLASH=\x18 pattern 域、PARSE_ERROR_FIELD_SEP 与
+  HEREDOC_WARNED_BODY_PREFIX=\x1e）；数据字节（printf/ANSI-C 转义表、
+  [:space:] 字符类）保持字面量不误迁。
+- **M4 已完成**：三边界入口在注册表文档列明（输出=decode_to_visible_text、
+  存储=substitution_metadata 入口编码、重解析=词法器原生识别）；**字面
+  字符转义落地**——`E000+<非载荷字符>` 恢复字面字符，ANSI-C `\uXXXX`
+  入口对注册区码点（E000-E3FF）加 E000 前缀（push_literal_char），
+  解决用户 PUA 输入与标记的混排歧义（$'\uE314' 往返无损）。
 
 ### 3.2 解码收口
 
@@ -98,6 +110,11 @@ rubash 用带内哨兵（C0 字节 \x11–\x1f、PUA 码点 E000–E317、命名
   （对齐 GNU parse.y 未终结引号 EOF 报告）；c20 `$"..."` 体内嵌套
   `$(...)`/`${...}` 的 dump 需要 AST→源码 body 序列化器（与 niubash C2
   `pretty_print_script` 同前置）。
+- **金标断言已落地（M5，tests/marker_leak_golden.rs）**：6 个进程级断言——
+  echo/`declare -p`/xtrace/reparse 输出不得出现 PUA 注册区码点
+  （U+E000-U+EFFF UTF-8 序列）与 `__RUBASH_*` 命名串；用户 PUA 字符
+  （`$'\uE314'`）必须逐字往返。C0 载体字节在 stdout 中与合法用户数据
+  不可区分，故金标针对无歧义类别（PUA 码点与命名串）。
 
 ### 3.3 语义唯一入口（按杠杆排序）
 

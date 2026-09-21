@@ -350,9 +350,15 @@ fn push_ansi_c_codepoint(output: &mut String, value: u32) {
     // u32cconv as printf (lib/sh/unicode.c:239): wctomb on a 4-byte-wchar_t
     // UTF-8 platform encodes every value <= 0x7fffffff, including surrogates
     // (ED A0 80) and the 5/6-byte forms; larger values produce nothing.
-    output.push_str(&crate::executor::substitution_metadata::u32cconv_utf8_text(
-        value,
-    ));
+    let decoded = crate::executor::substitution_metadata::u32cconv_utf8_text(value);
+    // Registry-zone chars (U+E000..=U+E3FF) are user-reachable here —
+    // $'\uE314' is real data, but the same codepoint is a transport guard.
+    // E000-escape them at this entry so the decode boundary restores the
+    // char instead of reading it as a marker (governance 3.1 user_reachable
+    // rule; the E1xx byte-pair/UTF-8 mixed-decoding ambiguity).
+    for ch in decoded.chars() {
+        crate::executor::markers::push_literal_char(output, ch);
+    }
 }
 
 /// GNU strtrans.c ansicstr: `\xHH` and octal escapes emit one RAW byte

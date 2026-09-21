@@ -289,7 +289,7 @@ pub fn init_locale() {
 /// | `U+E002` | QUOTED_NULL_MARKER (empty quoted field) | nothing |
 /// | `U+E010`/`U+E011` | ANSI-C `$'...'` decoded `'`/`"` data | `'`/`"` |
 /// | `U+E000` + `U+E0xx` | raw-byte marker pair | byte `xx` as char |
-/// | `U+E000` + `U+E000` | escaped literal U+E000 | `U+E000` |
+/// | `U+E400` + `c` | literal-char escape (markers::push_literal_char) | `c` |
 /// | `U+E301`..=`U+E308` | assignment DATA_* sentinels (quote/backtick/backslash data) | the data char |
 /// | `U+E309` | COMPOUND_EXPANSION_WS_TAG (field-splitting glue) | nothing |
 /// | `U+E100`..=`U+E1FF` | conditional-pattern byte-chars | byte `(cp - E100)` as char |
@@ -337,6 +337,12 @@ pub fn decode_to_visible_text(text: &str) -> String {
                     out.push(data);
                 }
             }
+            crate::executor::markers::LITERAL_CHAR_ESCAPE => {
+                // E400 + c is the literal-char escape used for user data
+                // that would otherwise alias a registry marker
+                // (markers::push_literal_char): emit the char alone.
+                out.push(chars.next().unwrap_or(ch));
+            }
             c if c as u32 == RAW_BYTE_MARKER_ESCAPE => match chars.next() {
                 Some(next) if next as u32 == RAW_BYTE_MARKER_ESCAPE => out.push(c),
                 Some(next)
@@ -344,10 +350,9 @@ pub fn decode_to_visible_text(text: &str) -> String {
                 {
                     out.push(byte_char(next as u32 - RAW_BYTE_MARKER_FIRST));
                 }
-                Some(next) => {
-                    out.push(c);
-                    out.push(next);
-                }
+                // E000 + <non-payload char> is a stray introducer: emit
+                // the char alone (recovery; nothing produces this).
+                Some(next) => out.push(next),
                 None => out.push(c),
             },
             DEFERRED_COMPOUND_BODY
@@ -472,10 +477,22 @@ mod tests {
         );
         // Byte 0x41 = 'A'.
         assert_eq!(super::decode_to_visible_text("\u{e000}\u{e042}"), "A");
-        // Doubled escape = literal U+E000.
+        // E400 + c = literal-char escape for user data that would
+        // otherwise alias a registry marker
+        // (markers::push_literal_char). The char decodes verbatim and the
+        // escape is consumed — including payload-range chars like E0A0,
+        // which an E000 prefix could never carry unambiguously.
         assert_eq!(
-            super::decode_to_visible_text("\u{e000}\u{e000}"),
-            "\u{e000}"
+            super::decode_to_visible_text("\u{e400}\u{E314}X"),
+            "\u{E314}X"
+        );
+        assert_eq!(
+            super::decode_to_visible_text("a\u{e400}\u{E0A0}b"),
+            "a\u{E0A0}b"
+        );
+        assert_eq!(
+            super::decode_to_visible_text("a\u{e400}\u{e000}b"),
+            "a\u{e000}b"
         );
         // Conditional-pattern byte-chars: U+E100+byte.
         assert_eq!(super::decode_to_visible_text("x\u{e141}y"), "xAy");

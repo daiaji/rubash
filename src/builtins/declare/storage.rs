@@ -114,6 +114,15 @@ impl Parenthesized for String {
     }
 }
 
+/// Output boundary: stored values arrive as transport text (C0 carriers,
+/// PUA sentinels, E400 literal-char escapes). GNU prints the decoded
+/// value (subst.c:4807 dequote_string → strtrans.c ansic_quote), so
+/// decode to user-visible text before display quoting; the $'...' arm
+/// decodes raw-byte markers internally already.
+fn display_text(value: &str) -> String {
+    crate::locale::decode_to_visible_text(value)
+}
+
 pub(super) fn quote_declare_value(value: &str) -> String {
     // setattr.def:528-531 (show_var_attributes):
     //   if (ansic_shouldquote (value_cell (var)))
@@ -129,7 +138,7 @@ pub(super) fn quote_declare_value(value: &str) -> String {
     if gnu_ansic_shouldquote(value) {
         return gnu_ansic_quote(value);
     }
-    format!("\"{}\"", quote_double(value))
+    format!("\"{}\"", quote_double(&display_text(value)))
 }
 
 /// array.c array_to_assign element rule (964-968, same pair in
@@ -140,7 +149,7 @@ pub(super) fn quote_array_element_value(value: &str) -> String {
     if gnu_ansic_shouldquote(value) {
         return gnu_ansic_quote(value);
     }
-    format!("\"{}\"", quote_double(value))
+    format!("\"{}\"", quote_double(&display_text(value)))
 }
 
 /// Storage roundtrip for element values: decode the full escape set
@@ -262,13 +271,14 @@ fn quote_assoc_display_key(key: &str) -> String {
     if gnu_ansic_shouldquote(key) {
         return gnu_ansic_quote(key);
     }
-    if gnu_sh_contains_shell_metas(key) {
-        return format!("\"{}\"", quote_double(key));
+    let key = display_text(key);
+    if gnu_sh_contains_shell_metas(&key) {
+        return format!("\"{}\"", quote_double(&key));
     }
-    if key.len() == 1 && matches!(key, "*" | "@") {
+    if key.len() == 1 && matches!(key.as_str(), "*" | "@") {
         return format!("\"{key}\"");
     }
-    key.to_string()
+    key
 }
 
 /// assoc.c assoc_to_assign value rule (setattr.def:528 uses the same pair
@@ -278,5 +288,5 @@ fn quote_declare_display_value(value: &str) -> String {
     if gnu_ansic_shouldquote(value) {
         return gnu_ansic_quote(value);
     }
-    format!("\"{}\"", quote_double(value))
+    format!("\"{}\"", quote_double(&display_text(value)))
 }

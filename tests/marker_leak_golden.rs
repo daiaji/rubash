@@ -1,0 +1,142 @@
+use std::process::{Command, Stdio};
+
+/// Golden leak assertions (governance 3.1/3.2): transport marker codepoints
+/// must never appear in stdout, `declare -p`, or xtrace output. C0 carrier
+/// bytes are indistinguishable from legitimate user data at the byte level,
+/// so the checks target the unambiguous classes: PUA codepoints (registry
+/// zone U+E000..=U+E3FF, UTF-8 lead EF 80..8F) and the named protocol
+/// strings (`__RUBASH_*`).
+
+fn run(args: &[&str]) -> Vec<u8> {
+    let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rubash");
+    child.wait_with_output().expect("wait rubash").stdout
+}
+
+fn assert_no_pua_marker(out: &[u8], ctx: &str) {
+    // U+E000..U+EFFF encodes as EF 80 80 .. EF BF BF; the registry zone is
+    // a subset but any private-use char reaching stdout is a leak signal.
+    for w in out.windows(3) {
+        if w[0] == 0xEF && (0x80..=0xBF).contains(&w[1]) {
+            let cp = 0xE000 + (((w[1] & 0x3F) as u32) << 6) + ((w[2] & 0x3F) as u32);
+            panic!("{ctx}: PUA codepoint U+{cp:04X} leaked into output: {out:?}");
+        }
+    }
+}
+
+fn assert_no_named_marker(out: &[u8], ctx: &str) {
+    let text = String::from_utf8_lossy(out);
+    assert!(
+        !text.contains("__RUBASH_"),
+        "{ctx}: named protocol string leaked into output: {text:?}"
+    );
+}
+
+fn assert_clean(out: &[u8], ctx: &str) {
+    assert_no_pua_marker(out, ctx);
+    assert_no_named_marker(out, ctx);
+}
+
+/// Marker-heavy word shapes through echo: escaped glob chars, quoted
+/// words, ANSI-C decoded carrier bytes, storage words, subscripts.
+#[test]
+fn echo_stdout_carries_no_markers() {
+    let out = run(&[
+        "-c",
+        concat!(
+            "v='a\\$b'\"'\"'c'\"'\"'`d`$e'; echo \"$v\"; ",
+            "echo a\\*b \"c d\" 'e$f' $'g\\x11h\\x14i\\x1fj'; ",
+            "arr=(\"$v\" $'\\x03\\x05\\x10'); echo \"${arr[@]}\"; ",
+            "echo ${v/a\\$b/R} ${#v} ${v:1:3}; declare -A A=([k]=$v); echo \"${A[k]}\""
+        ),
+    ]);
+    assert_clean(&out, "echo");
+}
+
+/// `declare -p` must render storage bytes, never transport sentinels.
+#[test]
+fn declare_p_carries_no_markers() {
+    let out = run(&[
+        "-c",
+        concat!(
+            "v='x\\y'\"'\"'z'\"'\"'; declare -p v; ",
+            "arr=($'a\\x11b' $'c\\x1fd' 'e$f'); declare -p arr; ",
+            "declare -A A=([$'k\\x14']=$'v\\x18'); declare -p A; ",
+            "compound=(a=1 b='two words'); declare -p compound"
+        ),
+    ]);
+    assert_clean(&out, "declare -p");
+}
+
+/// xtrace echoes expanded words — every marker must be decoded first.
+#[test]
+fn xtrace_carries_no_markers() {
+    let out = run(&[
+        "-c",
+        "set -x; v='a\\$b'; echo \"$v\" 'q q' $'\\x11\\x1f'; arr=(1 2); echo \"${arr[@]}\"; set +x",
+    ]);
+    let child_err = {
+        let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+            .args([
+                "-c",
+                "set -x; v='a\\$b'; echo \"$v\" 'q q' $'\\x11\\x1f'; arr=(1 2); echo \"${arr[@]}\"; set +x",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rubash");
+        child.wait_with_output().expect("wait rubash").stderr
+    };
+    assert_clean(&out, "xtrace stdout");
+    assert_clean(&child_err, "xtrace stderr");
+}
+
+/// Reparse boundary: eval / alias / command-substitution bodies that
+/// carry marker bytes must not leak them when reparsed.
+#[test]
+fn reparse_boundary_carries_no_markers() {
+    let out = run(&[
+        "-c",
+        concat!(
+            "shopt -s expand_aliases; ",
+            "v='a\\$b'; eval 'echo \"$v\"'; ",
+            "alias p='echo \"$v\"'; p; ",
+            "t=$(echo \"$v\"); echo \"t=$t\"; ",
+            "eval \"echo $'\\x11X\\x1fY'\""
+        ),
+    ]);
+    assert_clean(&out, "reparse");
+}
+
+/// User-supplied registry-zone chars ($'\uE314') are data: they must
+/// round-trip as literal chars, never trigger marker semantics.
+#[test]
+fn user_pua_chars_roundtrip_as_data() {
+    let out = run(&[
+        "-c",
+        "v=$'\\uE314X\\uE301Y'; printf '%s' \"$v\"; printf '\\n'",
+    ]);
+    // U+E314 + 'X' + U+E301 + 'Y' — the guard/ DATA_* codepoints must be
+    // emitted literally, not decoded as markers (which would eat X/Y).
+    assert_eq!(
+        out,
+        "\u{E314}X\u{E301}Y\n".as_bytes(),
+        "user PUA chars must round-trip literally"
+    );
+}
+
+/// printf %b / %q output paths.
+#[test]
+fn printf_paths_carry_no_markers() {
+    let out = run(&[
+        "-c",
+        "v='a\\$b'; printf '%q\\n' \"$v\"; printf '%s\\n' \"${v//\\\\/X}\"; printf '%b\\n' 'a\\x41b'",
+    ]);
+    assert_clean(&out, "printf");
+}

@@ -1624,7 +1624,7 @@ impl Executor {
                             let text = stdin_remaining.take().unwrap_or_default();
                             let bytes = if show_nonprinting {
                                 crate::executor::external_file_builtins::cat_v_filter(
-                                    text.as_bytes(),
+                                    &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&text),
                                 )
                             } else {
                                 text.into_bytes()
@@ -1661,8 +1661,15 @@ impl Executor {
                     return Ok(Some((output, stderr, status)));
                 }
                 let output = if show_nonprinting {
-                    let bytes =
-                        crate::executor::external_file_builtins::cat_v_filter(input.as_bytes());
+                    // cat -v renders the user's byte stream: decode the
+                    // transport text first or marker escapes (E400 literal
+                    // prefix, E000 byte pairs) filter as stray M-^ bytes.
+                    let text = self
+                        .stdin_string_for_command_mut(command)
+                        .unwrap_or_else(|| input.to_string());
+                    let bytes = crate::executor::external_file_builtins::cat_v_filter(
+                        &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&text),
+                    );
                     crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
                 } else if let Some(input) = self.stdin_string_for_command_mut(command) {
                     input

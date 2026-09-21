@@ -4,10 +4,11 @@
 //! subst.c::read_comsub. Payload bytes remain data; lexical context is kept
 //! separately instead of being encoded in global C0 sentinels.
 //!
-//! Raw bytes travel as U+E000 sentinel + payload-char marker pairs; a literal
-//! U+E000 in payload text is escaped by doubling the sentinel, so private-use
-//! text (prompt glyphs such as U+E0A0) can never collide with the marker
-//! space and survives every encode/decode round trip byte-exact.
+//! Raw bytes travel as U+E000 sentinel + payload-char marker pairs; literal
+//! chars that collide with the registry zone (U+E000..=U+E3FF, and the
+//! escape introducer U+E400 itself) are E400-prefixed at entry, so
+//! private-use text (prompt glyphs such as U+E0A0) can never collide with
+//! the marker space and survives every encode/decode round trip byte-exact.
 
 use crate::executor::command_subst_helpers::trim_capture_terminator_bytes;
 
@@ -105,27 +106,16 @@ fn push_raw_byte_marker(output: &mut String, byte: u8) {
     output.push(char::from_u32(RAW_BYTE_MARKER_FIRST + byte as u32).expect("marker char is valid"));
 }
 
-/// Push shell text, escaping literal U+E000 sentinels by doubling them so
-/// decoders can tell payload sentinels apart from marker introducers.
-fn push_escaped_text(output: &mut String, text: &str) {
-    for ch in text.chars() {
-        if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
-            output.push(ch);
-        }
-        output.push(ch);
-    }
-}
-
+/// Escape literal registry-zone chars with the E000 literal-char prefix so
+/// decoders can tell payload chars apart from marker introducers
+/// (E000 doubles; other zone chars get one prefix).
 fn push_escaped_text_with_carriers(output: &mut String, text: &str) {
     for ch in text.chars() {
         let byte = ch as u32;
         if byte < 0x80 && is_carrier_byte(byte) {
             push_raw_byte_marker(output, byte as u8);
         } else {
-            if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
-                output.push(ch);
-            }
-            output.push(ch);
+            crate::executor::markers::push_literal_char(output, ch);
         }
     }
 }
@@ -295,6 +285,13 @@ pub(crate) fn shell_text_to_raw_bytes(text: &str) -> Vec<u8> {
     let mut output = Vec::new();
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
+        if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
+            // E400 + c is the literal-char escape: emit c verbatim.
+            let literal = chars.next().unwrap_or(ch);
+            let mut encoded = [0; 4];
+            output.extend_from_slice(literal.encode_utf8(&mut encoded).as_bytes());
+            continue;
+        }
         if ch as u32 != RAW_BYTE_MARKER_ESCAPE {
             let mut encoded = [0; 4];
             output.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
@@ -311,6 +308,13 @@ pub(crate) fn shell_text_to_raw_bytes(text: &str) -> Vec<u8> {
             {
                 chars.next();
                 output.push((next as u32 - RAW_BYTE_MARKER_FIRST) as u8);
+            }
+            // E000 + <non-payload char> is a stray introducer: emit the
+            // char, drop the escape (recovery; nothing produces this).
+            Some(next) => {
+                chars.next();
+                let mut encoded = [0; 4];
+                output.extend_from_slice(next.encode_utf8(&mut encoded).as_bytes());
             }
             _ => {
                 let mut encoded = [0; 4];
@@ -335,6 +339,22 @@ pub(crate) fn decode_raw_byte_markers(bytes: &[u8]) -> Vec<u8> {
             index += 1;
             continue;
         };
+        if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
+            // E400 + c is the literal-char escape: emit c verbatim.
+            match next_char(bytes, index + char_len) {
+                Some((_, next_len)) => {
+                    output.extend_from_slice(
+                        &bytes[index + char_len..index + char_len + next_len],
+                    );
+                    index += char_len + next_len;
+                }
+                None => {
+                    output.extend_from_slice(&bytes[index..index + char_len]);
+                    index += char_len;
+                }
+            }
+            continue;
+        }
         if ch as u32 != RAW_BYTE_MARKER_ESCAPE {
             output.extend_from_slice(&bytes[index..index + char_len]);
             index += char_len;
@@ -349,6 +369,12 @@ pub(crate) fn decode_raw_byte_markers(bytes: &[u8]) -> Vec<u8> {
                 if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(next_ch as u32)) =>
             {
                 output.push((next_ch as u32 - RAW_BYTE_MARKER_FIRST) as u8);
+                index += char_len + next_len;
+            }
+            // E000 + <non-payload char> is a stray introducer: emit the
+            // char, drop the escape (recovery; nothing produces this).
+            Some((_next_ch, next_len)) => {
+                output.extend_from_slice(&bytes[index + char_len..index + char_len + next_len]);
                 index += char_len + next_len;
             }
             _ => {
