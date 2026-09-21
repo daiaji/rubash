@@ -53,6 +53,20 @@ impl Token {
         }
     }
 
+    /// Whether this HereDocBody token never reached its delimiter. The
+    /// lexer marks unfinished bodies with a leading \x1f (behind the
+    /// quoted-heredoc marker when the delimiter was quoted). Hosts use
+    /// this for REPL input-completeness checks so they never have to
+    /// sniff the internal marker bytes themselves.
+    pub fn is_unterminated_heredoc_body(&self) -> bool {
+        self.kind == TokenKind::HereDocBody
+            && self
+                .value
+                .strip_prefix(crate::lexer::QUOTED_HEREDOC_MARKER)
+                .unwrap_or(&self.value)
+                .starts_with('\x1f')
+    }
+
     pub fn new_with_raw(kind: TokenKind, value: &str, raw: &str, position: usize) -> Self {
         Self {
             kind,
