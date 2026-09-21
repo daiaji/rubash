@@ -1,0 +1,14 @@
+P1: v=[ab]
+line2
+P2: u=[line1]
+P3: myfd=10 w=[dyn]
+P4: x=[a] y=[]
+P5: out=[pp]
+P6: r=[] s=[q=[]]
+P7: bg=[bg-data]
+e8
+P8: err=[line N: N: Bad file descriptor]
+P9: a=[] b=[first]
+P10: t=[still-open]
+P11: m=[]
+P12: o=[]
