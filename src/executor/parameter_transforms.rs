@@ -12,10 +12,10 @@ impl Executor {
             // form (new-exp.tests new-exp15: `declare -rl VAR1`).
             let resolved = self.resolved_variable_name(array_name);
             if let Some(resolved_name) = resolved.as_deref() {
-                if is_marked_var(&self.env_vars, ASSOC_VARS, resolved_name)
-                    || is_marked_array_var(&self.env_vars, resolved_name)
+                if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, resolved_name)
+                    || is_marked_array_var(&self.shell_state.env_vars, resolved_name)
                     || self
-                        .env_vars
+                        .shell_state.env_vars
                         .get(resolved_name)
                         .is_some_and(|value| is_array_storage(value))
                 {
@@ -30,7 +30,7 @@ impl Executor {
                 return String::new();
             };
             let Some(value) = self
-                .env_vars
+                .shell_state.env_vars
                 .get(&array_name)
                 .and_then(|value| array_value_at(value, index))
             else {
@@ -39,7 +39,7 @@ impl Executor {
                 let flags = self.variable_assignment_flags(&array_name, false);
                 return format!("declare {flags} {array_name}");
             };
-            let array_flag = if is_marked_var(&self.env_vars, ASSOC_VARS, &array_name) {
+            let array_flag = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &array_name) {
                 "-A"
             } else {
                 "-a"
@@ -54,12 +54,12 @@ impl Executor {
             let Some(array_name) = self.resolved_variable_name(array_name) else {
                 return String::new();
             };
-            if !is_marked_var(&self.env_vars, ASSOC_VARS, &array_name) {
+            if !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &array_name) {
                 return String::new();
             }
             let key = self.assoc_subscript_key(key);
             let Some(value) = self
-                .env_vars
+                .shell_state.env_vars
                 .get(&array_name)
                 .and_then(|value| assoc_value_at(value, &key))
             else {
@@ -86,12 +86,12 @@ impl Executor {
             return String::new();
         }
 
-        if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) {
             // GNU string_var_assignment on an assoc cell emits the full
             // var_attribute_string flag set (subst.c:8712), not just -A.
             let flags = self.variable_assignment_flags(name, true);
             if let Some(value) = self
-                .env_vars
+                .shell_state.env_vars
                 .get(name)
                 .and_then(|value| assoc_value_at(value, "0"))
             {
@@ -101,25 +101,25 @@ impl Executor {
         }
 
         if self
-            .env_vars
+            .shell_state.env_vars
             .get(name)
             .is_some_and(|value| is_array_storage(value))
-            || is_marked_array_var(&self.env_vars, name)
+            || is_marked_array_var(&self.shell_state.env_vars, name)
         {
             let flags = self.variable_assignment_flags(name, true);
             return self
-                .env_vars
+                .shell_state.env_vars
                 .get(name)
                 .and_then(|value| array_value_at(value, 0))
                 .map(|value| format!("declare -{flags} {name}={}", shell_reusable_quote(&value)))
                 .unwrap_or_else(|| format!("declare -{flags} {name}"));
         }
 
-        let readonly = is_marked_var(&self.env_vars, READONLY_VARS, name);
-        let exported = is_marked_var(&self.env_vars, EXPORTED_VARS, name);
-        let integer = is_marked_var(&self.env_vars, INTEGER_VARS, name);
-        let uppercase = is_marked_var(&self.env_vars, UPPERCASE_VARS, name);
-        let lowercase = is_marked_var(&self.env_vars, LOWERCASE_VARS, name);
+        let readonly = is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name);
+        let exported = is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name);
+        let integer = is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name);
+        let uppercase = is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, name);
+        let lowercase = is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, name);
 
         let mut flags = String::new();
         if integer {
@@ -138,7 +138,7 @@ impl Executor {
             flags.push('u');
         }
 
-        match self.env_vars.get(name) {
+        match self.shell_state.env_vars.get(name) {
             Some(value) => {
                 let rendered = shell_reusable_quote(value);
                 if flags.is_empty() {
@@ -170,25 +170,25 @@ impl Executor {
     ) -> String {
         let mut flags = String::new();
         if array_typed {
-            if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
+            if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) {
                 flags.push('A');
             } else {
                 flags.push('a');
             }
         }
-        if is_marked_var(&self.env_vars, INTEGER_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name) {
             flags.push('i');
         }
-        if is_marked_var(&self.env_vars, READONLY_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
             flags.push('r');
         }
-        if is_marked_var(&self.env_vars, EXPORTED_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name) {
             flags.push('x');
         }
-        if is_marked_var(&self.env_vars, LOWERCASE_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, name) {
             flags.push('l');
         }
-        if is_marked_var(&self.env_vars, UPPERCASE_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, name) {
             flags.push('u');
         }
         flags
@@ -212,17 +212,17 @@ impl Executor {
             let resolved = self
                 .resolved_variable_name(base)
                 .unwrap_or_else(|| base.to_string());
-            let allocated = self.env_vars.contains_key(&resolved)
-                && !is_marked_var(&self.env_vars, DECLARED_UNSET_VARS, &resolved);
+            let allocated = self.shell_state.env_vars.contains_key(&resolved)
+                && !is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, &resolved);
             if allocated {
                 let storage = self.parameter_array_storage(&resolved);
                 let count = storage
                     .as_ref()
                     .map(|storage| {
-                        if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+                        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved) {
                             assoc_hash_ordered_values(
                                 storage,
-                                assoc_nbuckets(&self.env_vars, &resolved),
+                                assoc_nbuckets(&self.shell_state.env_vars, &resolved),
                             )
                             .len()
                         } else {
@@ -256,15 +256,15 @@ impl Executor {
         // variable cell that exists, including a declared-unset one
         // (var_attribute_string); a name with no variable cell at all yields
         // no output (string_transform returns NULL when v == 0).
-        let has_cell = self.env_vars.contains_key(base_name)
-            || is_marked_var(&self.env_vars, DECLARED_UNSET_VARS, base_name)
-            || is_marked_var(&self.env_vars, READONLY_VARS, base_name)
-            || is_marked_var(&self.env_vars, EXPORTED_VARS, base_name)
-            || is_marked_var(&self.env_vars, INTEGER_VARS, base_name)
-            || is_marked_var(&self.env_vars, UPPERCASE_VARS, base_name)
-            || is_marked_var(&self.env_vars, LOWERCASE_VARS, base_name)
-            || is_marked_var(&self.env_vars, ASSOC_VARS, base_name)
-            || is_marked_array_var(&self.env_vars, base_name);
+        let has_cell = self.shell_state.env_vars.contains_key(base_name)
+            || is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, base_name)
+            || is_marked_var(&self.shell_state.env_vars, READONLY_VARS, base_name)
+            || is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, base_name)
+            || is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name)
+            || is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, base_name)
+            || is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, base_name)
+            || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name)
+            || is_marked_array_var(&self.shell_state.env_vars, base_name);
         if !has_cell {
             return String::new();
         }
@@ -272,41 +272,41 @@ impl Executor {
         // GNU var_attribute_string (builtins/setattr.def:421-457) emits the
         // flags in this fixed order: a A f i n r t x c l u.
         let mut attrs = String::new();
-        if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name) {
             attrs.push('A');
         } else if self
-            .env_vars
+            .shell_state.env_vars
             .get(base_name)
             .is_some_and(|value| is_array_storage(value))
-            || is_marked_array_var(&self.env_vars, base_name)
+            || is_marked_array_var(&self.shell_state.env_vars, base_name)
         {
             attrs.push('a');
         }
-        if self.functions.contains_key(base_name) {
+        if self.shell_state.functions.contains_key(base_name) {
             attrs.push('f');
         }
-        if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
+        if is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name) {
             attrs.push('i');
         }
-        if is_marked_var(&self.env_vars, NAMEREF_VARS, base_name) {
+        if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base_name) {
             attrs.push('n');
         }
-        if is_marked_var(&self.env_vars, READONLY_VARS, base_name) {
+        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, base_name) {
             attrs.push('r');
         }
-        if is_marked_var(&self.env_vars, TRACE_VARS, base_name) {
+        if is_marked_var(&self.shell_state.env_vars, TRACE_VARS, base_name) {
             attrs.push('t');
         }
-        if is_marked_var(&self.env_vars, EXPORTED_VARS, base_name) {
+        if is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, base_name) {
             attrs.push('x');
         }
-        if is_marked_var(&self.env_vars, CAPCASE_VARS, base_name) {
+        if is_marked_var(&self.shell_state.env_vars, CAPCASE_VARS, base_name) {
             attrs.push('c');
         }
-        if is_marked_var(&self.env_vars, LOWERCASE_VARS, base_name) {
+        if is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, base_name) {
             attrs.push('l');
         }
-        if is_marked_var(&self.env_vars, UPPERCASE_VARS, base_name) {
+        if is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, base_name) {
             attrs.push('u');
         }
         attrs
@@ -325,16 +325,16 @@ impl Executor {
             let Some(array_name) = self.resolved_variable_name(array_name) else {
                 return String::new();
             };
-            let Some(value) = self.env_vars.get(&array_name) else {
+            let Some(value) = self.shell_state.env_vars.get(&array_name) else {
                 return String::new();
             };
-            if is_marked_var(&self.env_vars, ASSOC_VARS, &array_name) {
+            if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &array_name) {
                 // GNU assoc_to_kvpair (assoc.c:346) appends a space after
                 // every `key "value"` element — including the last — while
                 // the indexed array_to_kvpair (array.c:896) only separates,
                 // and @k's string_list_pos_params path has no trailing pad.
                 let joined =
-                    assoc_hash_ordered_entries(value, assoc_nbuckets(&self.env_vars, &array_name))
+                    assoc_hash_ordered_entries(value, assoc_nbuckets(&self.shell_state.env_vars, &array_name))
                         .into_iter()
                         .map(|(key, value)| format_key_value_transform_part(&key, &value, quoted))
                         .collect::<Vec<_>>()
@@ -359,10 +359,10 @@ impl Executor {
             let Some(array_name) = self.resolved_variable_name(array_name) else {
                 return String::new();
             };
-            let Some(value) = self.env_vars.get(&array_name) else {
+            let Some(value) = self.shell_state.env_vars.get(&array_name) else {
                 return String::new();
             };
-            if is_marked_var(&self.env_vars, ASSOC_VARS, &array_name) {
+            if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &array_name) {
                 let key = self.assoc_subscript_key(key);
                 return assoc_value_at(value, &key)
                     .map(|value| shell_reusable_quote(&value))
@@ -379,13 +379,13 @@ impl Executor {
         let Some(name) = self.resolved_variable_name(name) else {
             return String::new();
         };
-        if let Some(value) = self.env_vars.get(&name) {
-            if is_marked_var(&self.env_vars, ASSOC_VARS, &name) {
+        if let Some(value) = self.shell_state.env_vars.get(&name) {
+            if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &name) {
                 return assoc_value_at(value, "0")
                     .map(|value| shell_reusable_quote(&value))
                     .unwrap_or_default();
             }
-            if is_marked_array_var(&self.env_vars, &name) || is_array_storage(value) {
+            if is_marked_array_var(&self.shell_state.env_vars, &name) || is_array_storage(value) {
                 return array_value_at(value, 0)
                     .map(|value| shell_reusable_quote(&value))
                     .unwrap_or_default();

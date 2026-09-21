@@ -13,19 +13,19 @@ impl Executor {
     ) {
         self.fd_table
             .open_input(fd, FdReadEndpoint::bytes(input.clone()), dynamic);
-        self.env_vars.insert(
+        self.shell_state.env_vars.insert(
             fd_stdin_key(fd),
             crate::executor::substitution_metadata::bytes_to_shell_text(&input),
         );
-        self.env_vars
+        self.shell_state.env_vars
             .insert(fd_stdin_offset_key(fd), "0".to_string());
         if dynamic {
-            self.env_vars
+            self.shell_state.env_vars
                 .insert(fd_dynamic_input_key(fd), "1".to_string());
         } else {
-            self.env_vars.remove(&fd_dynamic_input_key(fd));
+            self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
         }
-        self.env_vars.remove(&fd_closed_key(fd));
+        self.shell_state.env_vars.remove(&fd_closed_key(fd));
     }
 
     pub(in crate::executor) fn set_fd_output_file(
@@ -34,13 +34,13 @@ impl Executor {
         target: String,
         dynamic: bool,
     ) {
-        let path = shell_path_to_windows(&target, &self.env_vars);
+        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
         self.fd_table
             .open_output(fd, FdWriteEndpoint::File(path), dynamic);
-        self.env_vars.remove(&fd_closed_key(fd));
-        self.env_vars
+        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+        self.shell_state.env_vars
             .remove(&fd_output_process_substitution_key(fd));
-        self.env_vars.insert(fd_output_key(fd), target);
+        self.shell_state.env_vars.insert(fd_output_key(fd), target);
     }
 
     pub(in crate::executor) fn execute_eval(
@@ -85,7 +85,7 @@ impl Executor {
                 // line i sits at script line caller_line+i-1, and EOF inside
                 // the input reports at one past the last input line.
                 let caller_line: usize = self
-                    .env_vars
+                    .shell_state.env_vars
                     .get("__RUBASH_CURRENT_LINE")
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(1);
@@ -152,16 +152,16 @@ impl Executor {
                     .iter()
                     .any(|command| command.has_assignment("__RUBASH_PARSE_ERROR__"));
                 let saved_eval_context = self
-                    .env_vars
+                    .shell_state.env_vars
                     .insert("__RUBASH_EVAL_CONTEXT".to_string(), "1".to_string());
                 let result = self.execute_ast(&ast);
                 match saved_eval_context {
                     Some(previous) => {
-                        self.env_vars
+                        self.shell_state.env_vars
                             .insert("__RUBASH_EVAL_CONTEXT".to_string(), previous);
                     }
                     None => {
-                        self.env_vars.remove("__RUBASH_EVAL_CONTEXT");
+                        self.shell_state.env_vars.remove("__RUBASH_EVAL_CONTEXT");
                     }
                 }
                 match result {
@@ -195,7 +195,7 @@ impl Executor {
         exit_status: i32,
         redirect_cmd: Option<&CommandNode>,
     ) -> Result<i32, ExecuteError> {
-        let Some(action) = crate::builtins::trap::take_exit_trap(&mut self.env_vars) else {
+        let Some(action) = crate::builtins::trap::take_exit_trap(&mut self.shell_state.env_vars) else {
             return Ok(exit_status);
         };
         if action.is_empty() {
@@ -212,9 +212,9 @@ impl Executor {
         let has_command = self.debug_trap_command.borrow().is_none();
         if has_command {
             *self.debug_trap_command.borrow_mut() = self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_LAST_COMMAND")
-                .or_else(|| self.env_vars.get("__RUBASH_CURRENT_COMMAND"))
+                .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_COMMAND"))
                 .cloned();
         }
         let result = self.execute_ast(&ast);
@@ -241,7 +241,7 @@ impl Executor {
         if self.debug_trap_running {
             return Ok(false);
         }
-        let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG") else {
+        let Some(action) = crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG") else {
             return Ok(false);
         };
         if action.is_empty() {
@@ -250,7 +250,7 @@ impl Executor {
         self.debug_trap_running = true;
         *self.debug_trap_command.borrow_mut() = Some(command_text.to_string());
         let call_line = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok());
         let tokens = crate::lexer::tokenize(&action);
@@ -277,7 +277,7 @@ impl Executor {
         if self.return_trap_running {
             return Ok(());
         }
-        let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "RETURN") else {
+        let Some(action) = crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "RETURN") else {
             return Ok(());
         };
         if action.is_empty() {
@@ -293,7 +293,7 @@ impl Executor {
         // caller's line. Stamp the parsed action with that line, mirroring
         // run_debug_trap above.
         let call_line = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok());
         if let Some(call_line) = call_line {
@@ -327,8 +327,8 @@ impl Executor {
         if self.source_debug_suppressed {
             return false;
         }
-        if self.subshell_depth.get() > 0 {
-            return crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace");
+        if self.shell_state.subshell_depth.get() > 0 {
+            return crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "functrace");
         }
         true
     }
@@ -337,7 +337,7 @@ impl Executor {
     /// trap.def/execute_cmd.c trace_p(var)) making it inherit the DEBUG and
     /// RETURN traps even with the global functrace option off.
     pub(crate) fn function_has_trace_attribute(&self, name: &str) -> bool {
-        marked_env_names(&self.env_vars, FUNC_TRACE_FUNCTIONS)
+        marked_env_names(&self.shell_state.env_vars, FUNC_TRACE_FUNCTIONS)
             .iter()
             .any(|entry| entry == name)
     }
@@ -350,13 +350,13 @@ impl Executor {
     /// so nothing fires (dbg-support.tests:96/97: no `return lineno` when
     /// functrace is off, but `return lineno: 98 main` at the top level).
     pub(crate) fn return_trap_in_scope(&self) -> bool {
-        if self.function_depth == 0 {
+        if self.shell_state.function_depth == 0 {
             return true;
         }
         if self.debug_trap_running {
             return false;
         }
-        crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace")
+        crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "functrace")
     }
 
     pub(crate) fn set_source_debug_suppressed(&mut self, value: bool) {
@@ -368,7 +368,7 @@ impl Executor {
     }
 
     pub(crate) fn run_pending_signal_traps(&mut self) -> Result<(), ExecuteError> {
-        if self.signal_trap_running || self.subshell_depth.get() > 0 {
+        if self.signal_trap_running || self.shell_state.subshell_depth.get() > 0 {
             // Pending signals belong to the shell process. A subshell can target
             // the parent with $$, but must not consume its mailbox or dispatch
             // the parent's traps after resetting caught dispositions.
@@ -380,7 +380,7 @@ impl Executor {
             let Some(signal_name) = signal_trap_name(signal) else {
                 continue;
             };
-            let action = crate::builtins::trap::get_trap_action(&self.env_vars, &signal_name);
+            let action = crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, &signal_name);
             let Some(action) = action else {
                 // Bash's default disposition for SIGCHLD is to ignore it.
                 // Child completion/reaping notifications must not turn into
@@ -398,7 +398,7 @@ impl Executor {
             let saved_exit = self.exit_code;
             self.exit_code = saved_exit;
             self.signal_trap_running = true;
-            let old_signal_status = self.env_vars.insert(
+            let old_signal_status = self.shell_state.env_vars.insert(
                 "__RUBASH_SIGNAL_TRAP_STATUS".to_string(),
                 saved_exit.to_string(),
             );
@@ -407,58 +407,58 @@ impl Executor {
             // interp 1602). A "return" in a function CALLED by the action
             // uses the current $?, so record the action's entry
             // function_depth for the return builtin to compare.
-            let old_signal_depth = self.env_vars.insert(
+            let old_signal_depth = self.shell_state.env_vars.insert(
                 "__RUBASH_SIGNAL_TRAP_DEPTH".to_string(),
-                self.function_depth.to_string(),
+                self.shell_state.function_depth.to_string(),
             );
             // GNU trap.c _run_trap_internal:373-385 binds BASH_TRAPSIG to the
             // signal number of the trap being executed for the duration of
             // the action, restoring the previous value afterwards
             // (save_bash_trapsig/set_bash_trapsig/restore_bash_trapsig).
-            let old_bash_trapsig = self.env_vars.get("BASH_TRAPSIG").cloned();
-            self.env_vars
+            let old_bash_trapsig = self.shell_state.env_vars.get("BASH_TRAPSIG").cloned();
+            self.shell_state.env_vars
                 .insert("BASH_TRAPSIG".to_string(), signal.to_string());
             // BASH_TRAPSIG is bound unexported (bind_var_to_int attrs 0), but
             // command substitutions run as child processes that only receive
             // exported variables, so the trap action's $(kill -l
             // $BASH_TRAPSIG) would otherwise see nothing. Export it for the
             // duration of the action; this is invisible to the script.
-            let bash_trapsig_was_exported = marked_env_names(&self.env_vars, EXPORTED_VARS)
+            let bash_trapsig_was_exported = marked_env_names(&self.shell_state.env_vars, EXPORTED_VARS)
                 .iter()
                 .any(|name| name == "BASH_TRAPSIG");
             if !bash_trapsig_was_exported {
-                mark_env_name(&mut self.env_vars, EXPORTED_VARS, "BASH_TRAPSIG");
+                mark_env_name(&mut self.shell_state.env_vars, EXPORTED_VARS, "BASH_TRAPSIG");
             }
             let tokens = crate::lexer::tokenize(&action);
             let ast = crate::parser::parse(&tokens);
             let result = self.execute_ast(&ast);
             if !bash_trapsig_was_exported {
-                unmark_env_name(&mut self.env_vars, EXPORTED_VARS, "BASH_TRAPSIG");
+                unmark_env_name(&mut self.shell_state.env_vars, EXPORTED_VARS, "BASH_TRAPSIG");
             }
             match old_bash_trapsig {
                 Some(value) => {
-                    self.env_vars.insert("BASH_TRAPSIG".to_string(), value);
+                    self.shell_state.env_vars.insert("BASH_TRAPSIG".to_string(), value);
                 }
                 None => {
-                    self.env_vars.remove("BASH_TRAPSIG");
+                    self.shell_state.env_vars.remove("BASH_TRAPSIG");
                 }
             }
             match old_signal_depth {
                 Some(value) => {
-                    self.env_vars
+                    self.shell_state.env_vars
                         .insert("__RUBASH_SIGNAL_TRAP_DEPTH".to_string(), value);
                 }
                 None => {
-                    self.env_vars.remove("__RUBASH_SIGNAL_TRAP_DEPTH");
+                    self.shell_state.env_vars.remove("__RUBASH_SIGNAL_TRAP_DEPTH");
                 }
             }
             match old_signal_status {
                 Some(value) => {
-                    self.env_vars
+                    self.shell_state.env_vars
                         .insert("__RUBASH_SIGNAL_TRAP_STATUS".to_string(), value);
                 }
                 None => {
-                    self.env_vars.remove("__RUBASH_SIGNAL_TRAP_STATUS");
+                    self.shell_state.env_vars.remove("__RUBASH_SIGNAL_TRAP_STATUS");
                 }
             }
             self.signal_trap_running = false;
@@ -492,12 +492,12 @@ impl Executor {
             || command.and_or().is_some()
             || self.suppress_errexit != 0
             || self.error_trap_running
-            || (self.function_depth > 0
-                && !crate::builtins::set::shell_option_enabled(&self.env_vars, "errtrace"))
+            || (self.shell_state.function_depth > 0
+                && !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errtrace"))
         {
             return Ok(());
         }
-        let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "ERR") else {
+        let Some(action) = crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "ERR") else {
             return Ok(());
         };
         if action.is_empty() {
@@ -545,10 +545,10 @@ impl Executor {
                 .set(self.sigchld_notifications_pending.get() + 1);
             return Ok(());
         }
-        if self.subshell_depth.get() > 0 {
+        if self.shell_state.subshell_depth.get() > 0 {
             return Ok(());
         }
-        let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "SIGCHLD") else {
+        let Some(action) = crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "SIGCHLD") else {
             return Ok(());
         };
         if action.is_empty() {
@@ -593,11 +593,11 @@ impl Executor {
         // functrace flag alone (execute_cmd.c:5295 checks
         // function_trace_mode, not debugging_mode; shopt extdebug reaches it
         // only through the functrace it enables, shopt.def:621).
-        let traced = crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace");
+        let traced = crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "functrace");
         let function_scoped = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_RETURN_TRAP_FUNCTION")
-            .zip(self.function_name_stack.first())
+            .zip(self.shell_state.function_name_stack.first())
             .is_some_and(|(registered, current)| registered == current);
         if !traced && !function_scoped {
             return Ok(());
@@ -624,9 +624,9 @@ impl Executor {
             return;
         }
         if action == "-" {
-            self.env_vars.remove("__RUBASH_RETURN_TRAP_FUNCTION");
-        } else if let Some(function) = self.function_name_stack.first() {
-            self.env_vars.insert(
+            self.shell_state.env_vars.remove("__RUBASH_RETURN_TRAP_FUNCTION");
+        } else if let Some(function) = self.shell_state.function_name_stack.first() {
+            self.shell_state.env_vars.insert(
                 "__RUBASH_RETURN_TRAP_FUNCTION".to_string(),
                 function.clone(),
             );
@@ -662,7 +662,7 @@ impl Executor {
         {
             return target.to_string();
         }
-        let path = shell_path_to_windows(target, &self.env_vars);
+        let path = shell_path_to_windows(target, &self.shell_state.env_vars);
         if path.is_absolute() {
             return target.to_string();
         }
@@ -801,7 +801,7 @@ impl Executor {
             let mut stderr = Vec::new();
             let status = crate::builtins::exec::execute_with_io(
                 &cmd.words[1..],
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 &mut stdout,
                 &mut stderr,
             )?;
@@ -840,7 +840,7 @@ impl Executor {
                 let mut child_diag = file.try_clone()?;
                 return Ok(crate::builtins::exec::execute_with_child_stdio(
                     &cmd.words[1..],
-                    &self.env_vars,
+                    &self.shell_state.env_vars,
                     &mut file,
                     &mut child_diag,
                     child_stdout,
@@ -851,7 +851,7 @@ impl Executor {
             let child_stdout = Stdio::from(file.try_clone()?);
             return Ok(crate::builtins::exec::execute_with_child_stdio(
                 &cmd.words[1..],
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 &mut file,
                 &mut std::io::stderr().lock(),
                 child_stdout,
@@ -864,11 +864,11 @@ impl Executor {
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             let child_stdout = Stdio::from(file.try_clone()?);
             return Ok(crate::builtins::exec::execute_with_child_stdio(
                 &cmd.words[1..],
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 &mut file,
                 &mut std::io::stderr().lock(),
                 child_stdout,
@@ -882,7 +882,7 @@ impl Executor {
             let child_stderr = Stdio::from(file.try_clone()?);
             return Ok(crate::builtins::exec::execute_with_child_stdio(
                 &cmd.words[1..],
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 &mut std::io::stdout().lock(),
                 &mut file,
                 Stdio::inherit(),
@@ -895,11 +895,11 @@ impl Executor {
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             let child_stderr = Stdio::from(file.try_clone()?);
             return Ok(crate::builtins::exec::execute_with_child_stdio(
                 &cmd.words[1..],
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 &mut std::io::stdout().lock(),
                 &mut file,
                 Stdio::inherit(),
@@ -910,7 +910,7 @@ impl Executor {
         self.apply_no_output_builtin_redirects(cmd)?;
         Ok(crate::builtins::exec::execute(
             &cmd.words[1..],
-            &self.env_vars,
+            &self.shell_state.env_vars,
         )?)
     }
 
@@ -973,7 +973,7 @@ impl Executor {
                             self.close_dynamic_fd(name)?;
                         } else {
                             self.close_persistent_output_fd(fd)?;
-                            self.env_vars.insert(fd_closed_key(fd), "1".to_string());
+                            self.shell_state.env_vars.insert(fd_closed_key(fd), "1".to_string());
                         }
                         continue;
                     }
@@ -1013,7 +1013,7 @@ impl Executor {
                             OpenOptions::new()
                                 .create(true)
                                 .append(true)
-                                .open(shell_path_to_windows(&target, &self.env_vars))?;
+                                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                         } else {
                             self.create_redirect_output(&target, redirect.clobber)?;
                         }
@@ -1033,7 +1033,7 @@ impl Executor {
                     let fd = redirect.fd.unwrap_or(1);
                     if is_closed_redirect_target(&target) {
                         self.close_persistent_output_fd(fd)?;
-                        self.env_vars.insert(fd_closed_key(fd), "1".to_string());
+                        self.shell_state.env_vars.insert(fd_closed_key(fd), "1".to_string());
                         continue;
                     }
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
@@ -1064,13 +1064,13 @@ impl Executor {
                 crate::parser::RedirectKind::CloseOutput => {
                     let fd = redirect.fd.unwrap_or(1);
                     self.close_persistent_output_fd(fd)?;
-                    self.env_vars.insert(fd_closed_key(fd), "1".to_string());
+                    self.shell_state.env_vars.insert(fd_closed_key(fd), "1".to_string());
                 }
                 crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite => {
                     let fd = redirect.fd.unwrap_or(0);
                     if is_closed_redirect_target(&target) {
                         self.close_persistent_input_fd(fd);
-                        self.env_vars.insert(fd_closed_key(fd), "1".to_string());
+                        self.shell_state.env_vars.insert(fd_closed_key(fd), "1".to_string());
                         continue;
                     }
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
@@ -1112,7 +1112,7 @@ impl Executor {
                         continue;
                     }
 
-                    let path = shell_path_to_windows(&target, &self.env_vars);
+                    let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
                     if redirect.append {
                         // [N]<> opens the file for reading and writing
                         // (redir.c r_input_output, O_RDWR).
@@ -1138,7 +1138,7 @@ impl Executor {
                 crate::parser::RedirectKind::CloseInput => {
                     let fd = redirect.fd.unwrap_or(0);
                     self.close_persistent_input_fd(fd);
-                    self.env_vars.insert(fd_closed_key(fd), "1".to_string());
+                    self.shell_state.env_vars.insert(fd_closed_key(fd), "1".to_string());
                 }
                 crate::parser::RedirectKind::DuplicateInput => {
                     let fd = redirect.fd.unwrap_or(0);
@@ -1211,7 +1211,7 @@ impl Executor {
             }
             if is_closed_redirect_target(target) {
                 let _ = self.close_persistent_output_fd(target_fd);
-                self.env_vars
+                self.shell_state.env_vars
                     .insert(fd_closed_key(target_fd), "1".to_string());
                 return;
             }
@@ -1244,90 +1244,90 @@ impl Executor {
             if self.fd_table.dup_output(target_fd, source_fd).is_ok() {
                 match self.fd_table.output_endpoint(target_fd) {
                     Some(FdWriteEndpoint::Stdout) => {
-                        self.env_vars.remove(&fd_closed_key(target_fd));
-                        self.env_vars
+                        self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                        self.shell_state.env_vars
                             .insert(fd_output_key(target_fd), FD_STDOUT_TARGET.to_string());
-                        self.env_vars
+                        self.shell_state.env_vars
                             .remove(&fd_output_process_substitution_key(target_fd));
                     }
                     Some(FdWriteEndpoint::Stderr) => {
-                        self.env_vars.remove(&fd_closed_key(target_fd));
-                        self.env_vars
+                        self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                        self.shell_state.env_vars
                             .insert(fd_output_key(target_fd), FD_STDERR_TARGET.to_string());
-                        self.env_vars
+                        self.shell_state.env_vars
                             .remove(&fd_output_process_substitution_key(target_fd));
                     }
                     Some(FdWriteEndpoint::File(path)) => {
-                        self.env_vars.remove(&fd_closed_key(target_fd));
-                        self.env_vars.insert(
+                        self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                        self.shell_state.env_vars.insert(
                             fd_output_key(target_fd),
                             shell_display_path(&path.to_string_lossy()),
                         );
-                        self.env_vars
+                        self.shell_state.env_vars
                             .remove(&fd_output_process_substitution_key(target_fd));
                     }
                     Some(FdWriteEndpoint::CoprocStdin(pid)) => {
-                        self.env_vars.remove(&fd_closed_key(target_fd));
-                        self.env_vars.insert(
+                        self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                        self.shell_state.env_vars.insert(
                             fd_output_key(target_fd),
                             format!("{FD_COPROC_STDIN_TARGET_PREFIX}{pid}"),
                         );
-                        self.env_vars
+                        self.shell_state.env_vars
                             .remove(&fd_output_process_substitution_key(target_fd));
                     }
                     Some(FdWriteEndpoint::ProcessSubstitution { path, command }) => {
-                        self.env_vars.remove(&fd_closed_key(target_fd));
-                        self.env_vars.insert(
+                        self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                        self.shell_state.env_vars.insert(
                             fd_output_key(target_fd),
                             shell_display_path(&path.to_string_lossy()),
                         );
-                        self.env_vars
+                        self.shell_state.env_vars
                             .insert(fd_output_process_substitution_key(target_fd), command);
                     }
                     None => {}
                 }
             } else {
                 let _ = self.close_persistent_output_fd(target_fd);
-                self.env_vars
+                self.shell_state.env_vars
                     .insert(fd_closed_key(target_fd), "1".to_string());
             }
             return;
         }
-        if self.env_vars.contains_key(&fd_closed_key(source_fd)) {
+        if self.shell_state.env_vars.contains_key(&fd_closed_key(source_fd)) {
             let _ = self.close_persistent_output_fd(target_fd);
-            self.env_vars
+            self.shell_state.env_vars
                 .insert(fd_closed_key(target_fd), "1".to_string());
         } else if self.coproc_stdin_writers.contains_key(&source_fd) {
-            self.env_vars.remove(&fd_closed_key(target_fd));
-            self.env_vars.insert(
+            self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+            self.shell_state.env_vars.insert(
                 fd_output_key(target_fd),
                 format!("{FD_COPROC_STDIN_TARGET_PREFIX}{source_fd}"),
             );
-            self.env_vars
+            self.shell_state.env_vars
                 .remove(&fd_output_process_substitution_key(target_fd));
-        } else if let Some(target) = self.env_vars.get(&fd_output_key(source_fd)).cloned() {
-            self.env_vars.remove(&fd_closed_key(target_fd));
-            self.env_vars.insert(fd_output_key(target_fd), target);
+        } else if let Some(target) = self.shell_state.env_vars.get(&fd_output_key(source_fd)).cloned() {
+            self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+            self.shell_state.env_vars.insert(fd_output_key(target_fd), target);
             if let Some(source) = self
-                .env_vars
+                .shell_state.env_vars
                 .get(&fd_output_process_substitution_key(source_fd))
                 .cloned()
             {
-                self.env_vars
+                self.shell_state.env_vars
                     .insert(fd_output_process_substitution_key(target_fd), source);
             } else {
-                self.env_vars
+                self.shell_state.env_vars
                     .remove(&fd_output_process_substitution_key(target_fd));
             }
         } else if let Some(target) = stdio_output_target(source_fd) {
-            self.env_vars.remove(&fd_closed_key(target_fd));
-            self.env_vars
+            self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+            self.shell_state.env_vars
                 .insert(fd_output_key(target_fd), target.to_string());
-            self.env_vars
+            self.shell_state.env_vars
                 .remove(&fd_output_process_substitution_key(target_fd));
         } else {
             let _ = self.close_persistent_output_fd(target_fd);
-            self.env_vars.remove(&fd_closed_key(target_fd));
+            self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
         }
     }
 
@@ -1352,10 +1352,10 @@ impl Executor {
             },
             fd >= 10,
         );
-        self.env_vars.remove(&fd_closed_key(fd));
-        self.env_vars
+        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+        self.shell_state.env_vars
             .insert(fd_output_key(fd), path.to_string_lossy().into_owned());
-        self.env_vars
+        self.shell_state.env_vars
             .insert(fd_output_process_substitution_key(fd), source.to_string());
         Ok(true)
     }
@@ -1385,12 +1385,12 @@ impl Executor {
                 self.coproc_stdin_writers.remove(&pid);
             }
         }
-        let target = self.env_vars.remove(&fd_output_key(fd));
+        let target = self.shell_state.env_vars.remove(&fd_output_key(fd));
         let source = self
-            .env_vars
+            .shell_state.env_vars
             .remove(&fd_output_process_substitution_key(fd));
         if let (Some(target), Some(source)) = (target, source) {
-            let path = shell_path_to_windows(&target, &self.env_vars);
+            let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
             let input = fs::read_to_string(&path).unwrap_or_default();
             self.execute_persistent_output_process_substitution(&source, input)?;
             let _ = fs::remove_file(path);
@@ -1421,14 +1421,14 @@ impl Executor {
                 self.coproc_stdout_readers.remove(&pid);
             }
         }
-        self.env_vars.remove(&fd_stdin_key(fd));
-        self.env_vars.remove(&fd_stdin_offset_key(fd));
-        self.env_vars.remove(&fd_dynamic_input_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+        self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
     }
 
     fn mark_coproc_array_endpoint_closed(&mut self, pid: u32, fd: u32) {
         let names: Vec<String> = self
-            .env_vars
+            .shell_state.env_vars
             .iter()
             .filter_map(|(name, value)| {
                 (name.ends_with("_PID") && value.parse::<u32>().ok() == Some(pid))
@@ -1436,7 +1436,7 @@ impl Executor {
             })
             .collect();
         for name in names {
-            let Some(storage) = self.env_vars.get(&name).cloned() else {
+            let Some(storage) = self.shell_state.env_vars.get(&name).cloned() else {
                 continue;
             };
             let mut entries = indexed_array_entries(&storage);
@@ -1448,7 +1448,7 @@ impl Executor {
                 }
             }
             if changed {
-                self.env_vars
+                self.shell_state.env_vars
                     .insert(name, format_indexed_array_storage(entries));
             }
         }
@@ -1458,7 +1458,7 @@ impl Executor {
         self.close_persistent_output_fd(fd)?;
         self.close_persistent_input_fd(fd);
         self.fd_table.close(fd);
-        self.env_vars.insert(fd_closed_key(fd), "1".to_string());
+        self.shell_state.env_vars.insert(fd_closed_key(fd), "1".to_string());
         Ok(())
     }
 
@@ -1469,20 +1469,20 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         let tokens = crate::lexer::tokenize(source);
         let ast = crate::parser::parse(&tokens);
-        let old_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
-        let old_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        let old_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+        let old_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
         let old_fd0 = self.fd_table.entries.get(&0).cloned();
         let fd0_key = fd_stdin_key(0);
         let fd0_offset_key = fd_stdin_offset_key(0);
         let fd0_dynamic_key = fd_dynamic_input_key(0);
         let fd0_closed_key = fd_closed_key(0);
-        let old_fd0_stdin = self.env_vars.get(&fd0_key).cloned();
-        let old_fd0_offset = self.env_vars.get(&fd0_offset_key).cloned();
-        let old_fd0_dynamic = self.env_vars.get(&fd0_dynamic_key).cloned();
-        let old_fd0_closed = self.env_vars.get(&fd0_closed_key).cloned();
+        let old_fd0_stdin = self.shell_state.env_vars.get(&fd0_key).cloned();
+        let old_fd0_offset = self.shell_state.env_vars.get(&fd0_offset_key).cloned();
+        let old_fd0_dynamic = self.shell_state.env_vars.get(&fd0_dynamic_key).cloned();
+        let old_fd0_closed = self.shell_state.env_vars.get(&fd0_closed_key).cloned();
         self.set_fd_input_text(0, input.clone(), false);
-        self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-        self.env_vars
+        self.shell_state.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+        self.shell_state.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
         let result = self.execute_ast(&ast);
         match old_fd0 {
@@ -1493,12 +1493,12 @@ impl Executor {
                 self.fd_table.entries.remove(&0);
             }
         }
-        restore_optional_env_var(&mut self.env_vars, &fd0_key, old_fd0_stdin);
-        restore_optional_env_var(&mut self.env_vars, &fd0_offset_key, old_fd0_offset);
-        restore_optional_env_var(&mut self.env_vars, &fd0_dynamic_key, old_fd0_dynamic);
-        restore_optional_env_var(&mut self.env_vars, &fd0_closed_key, old_fd0_closed);
-        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
-        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN_OFFSET, old_offset);
+        restore_optional_env_var(&mut self.shell_state.env_vars, &fd0_key, old_fd0_stdin);
+        restore_optional_env_var(&mut self.shell_state.env_vars, &fd0_offset_key, old_fd0_offset);
+        restore_optional_env_var(&mut self.shell_state.env_vars, &fd0_dynamic_key, old_fd0_dynamic);
+        restore_optional_env_var(&mut self.shell_state.env_vars, &fd0_closed_key, old_fd0_closed);
+        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
+        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN_OFFSET, old_offset);
         result
     }
 
@@ -1618,7 +1618,7 @@ impl Executor {
                 return Ok(Some(0));
             }
 
-            let path = shell_path_to_windows(&target, &self.env_vars);
+            let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
             if redirect.append {
                 let _ = OpenOptions::new()
                     .create(true)
@@ -1652,7 +1652,7 @@ impl Executor {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
                 if self.dynamic_fd_variable_value(name).is_none()
-                    && crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset")
+                    && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
                 {
                     eprintln!("{}{name}: ambiguous redirect", self.diagnostic_prefix());
                     return Ok(Some(1));
@@ -1728,7 +1728,7 @@ impl Executor {
             OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             if readonly_blocked {
                 self.report_readonly_fd_assignment(name);
                 return Ok(Some(1));
@@ -1769,18 +1769,18 @@ impl Executor {
                     OpenOptions::new()
                         .create(true)
                         .append(true)
-                        .open(shell_path_to_windows(&target, &self.env_vars))?;
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                 }
                 crate::parser::RedirectKind::ReadWrite => {
                     OpenOptions::new()
                         .create(true)
                         .read(true)
                         .write(true)
-                        .open(shell_path_to_windows(&target, &self.env_vars))?;
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                 }
                 crate::parser::RedirectKind::Input => {
                     let _ = crate::executor::substitution_metadata::read_shell_input_file(
-                        shell_path_to_windows(&target, &self.env_vars),
+                        shell_path_to_windows(&target, &self.shell_state.env_vars),
                     )
                     .map_err(|io| crate::posix_errors::path_error(&target, io))?;
                 }
@@ -1795,7 +1795,7 @@ impl Executor {
             )));
         }
         let close_after_command =
-            auto_close && crate::builtins::shopt::option_enabled(&self.env_vars, "varredir_close");
+            auto_close && crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "varredir_close");
 
         let close_after_success = |executor: &mut Self, fd: u32| -> Result<(), ExecuteError> {
             if close_after_command {
@@ -1895,7 +1895,7 @@ impl Executor {
                     }
                 }
 
-                let path = shell_path_to_windows(&target, &self.env_vars);
+                let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
                 let input = if is_null_device(&target) {
                     String::new()
                 } else {
@@ -1949,7 +1949,7 @@ impl Executor {
                     OpenOptions::new()
                         .create(true)
                         .append(true)
-                        .open(shell_path_to_windows(&target, &self.env_vars))?;
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                 } else {
                     self.create_redirect_output(&target, redirect.clobber)?;
                 }
@@ -1979,43 +1979,43 @@ impl Executor {
                     .and_then(|entry| entry.read.clone())
                 {
                     Some(FdReadEndpoint::InheritedProcessStdin) => {
-                        self.env_vars
+                        self.shell_state.env_vars
                             .insert(fd_stdin_key(target_fd), FD_PROCESS_STDIN_TARGET.to_string());
-                        self.env_vars.remove(&fd_stdin_offset_key(target_fd));
-                        self.env_vars.remove(&fd_dynamic_input_key(target_fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_offset_key(target_fd));
+                        self.shell_state.env_vars.remove(&fd_dynamic_input_key(target_fd));
                     }
                     Some(FdReadEndpoint::Text(_))
                     | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
                         if let Some((input, offset)) = self.fd_table.input_snapshot(target_fd) {
-                            self.env_vars.insert(fd_stdin_key(target_fd), input);
-                            self.env_vars
+                            self.shell_state.env_vars.insert(fd_stdin_key(target_fd), input);
+                            self.shell_state.env_vars
                                 .insert(fd_stdin_offset_key(target_fd), offset.to_string());
-                            self.env_vars
+                            self.shell_state.env_vars
                                 .insert(fd_dynamic_input_key(target_fd), "1".to_string());
                         }
                     }
                     Some(FdReadEndpoint::File(path)) => {
-                        self.env_vars.insert(
+                        self.shell_state.env_vars.insert(
                             fd_stdin_key(target_fd),
                             shell_display_path(&path.to_string_lossy()),
                         );
-                        self.env_vars.remove(&fd_stdin_offset_key(target_fd));
-                        self.env_vars.remove(&fd_dynamic_input_key(target_fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_offset_key(target_fd));
+                        self.shell_state.env_vars.remove(&fd_dynamic_input_key(target_fd));
                     }
                     Some(FdReadEndpoint::CoprocStdout(pid)) => {
-                        self.env_vars.insert(
+                        self.shell_state.env_vars.insert(
                             fd_stdin_key(target_fd),
                             format!("{FD_COPROC_STDIN_TARGET_PREFIX}{pid}"),
                         );
-                        self.env_vars.remove(&fd_stdin_offset_key(target_fd));
-                        self.env_vars.remove(&fd_dynamic_input_key(target_fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_offset_key(target_fd));
+                        self.shell_state.env_vars.remove(&fd_dynamic_input_key(target_fd));
                     }
                     None => {}
                 }
-                self.env_vars.remove(&fd_closed_key(target_fd));
+                self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
             } else {
                 self.close_persistent_input_fd(target_fd);
-                self.env_vars
+                self.shell_state.env_vars
                     .insert(fd_closed_key(target_fd), "1".to_string());
             }
             return;
@@ -2026,7 +2026,7 @@ impl Executor {
     }
 
     fn open_files_limit(&self) -> Option<u32> {
-        let value = self.env_vars.get("__RUBASH_ULIMIT_N")?;
+        let value = self.shell_state.env_vars.get("__RUBASH_ULIMIT_N")?;
         if value == "unlimited" {
             return None;
         }
@@ -2067,7 +2067,7 @@ impl Executor {
             self.close_persistent_input_fd(fd);
             if !self.fd_table.is_open_for_write(fd) {
                 self.fd_table.close(fd);
-                self.env_vars.insert(fd_closed_key(fd), "1".to_string());
+                self.shell_state.env_vars.insert(fd_closed_key(fd), "1".to_string());
             }
         }
     }
@@ -2093,7 +2093,7 @@ impl Executor {
         self.close_persistent_output_fd(fd)?;
         if !self.fd_table.is_open_for_read(fd) {
             self.fd_table.close(fd);
-            self.env_vars.insert(fd_closed_key(fd), "1".to_string());
+            self.shell_state.env_vars.insert(fd_closed_key(fd), "1".to_string());
         }
         Ok(())
     }
@@ -2106,7 +2106,7 @@ impl Executor {
         }
 
         let storage_name = self.resolved_variable_name(name)?;
-        self.env_vars
+        self.shell_state.env_vars
             .get(&storage_name)
             .and_then(|value| value.parse::<u32>().ok())
     }
@@ -2118,7 +2118,7 @@ impl Executor {
         let resolved = self
             .resolved_variable_name(base_name)
             .unwrap_or_else(|| base_name.to_string());
-        is_marked_var(&self.env_vars, READONLY_VARS, &resolved)
+        is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &resolved)
     }
 
     fn report_readonly_fd_assignment(&mut self, name: &str) {

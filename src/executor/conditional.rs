@@ -101,11 +101,11 @@ impl Executor {
             [op, operand, end] if op == "-R" && end == "]]" => {
 
                 let name = self.expand_word_mut(operand);
-                i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, &name))
+                i32::from(!is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &name))
             }
             [op, operand] if op == "-R" => {
                 let name = self.expand_word_mut(operand);
-                i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, &name))
+                i32::from(!is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &name))
 
             }
             [op, operand, end] if op == "-o" && end == "]]" => {
@@ -314,9 +314,9 @@ impl Executor {
         let left = self.expand_word_mut(left);
         let right = self.expand_word_mut(right);
         let right_pattern = right.clone();
-        let extglob = crate::builtins::shopt::option_enabled(&self.env_vars, "extglob")
+        let extglob = crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extglob")
             || contains_extglob_pattern(&right);
-        let nocasematch = crate::builtins::shopt::option_enabled(&self.env_vars, "nocasematch");
+        let nocasematch = crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "nocasematch");
         match op {
             "=" | "==" if extglob && nocasematch => {
                 extglob_case_pattern_matches_nocase(&right_pattern, &left)
@@ -409,14 +409,14 @@ impl Executor {
             raw.unwrap_or(operand),
             true,
             false,
-            &self.env_vars,
+            &self.shell_state.env_vars,
         );
         let cooked = self.expand_word_mut(operand);
         let rewritten = self.rewrite_conditional_v_operand(&cooked, arrayref)?;
 
         Ok(crate::builtins::test::variable_is_set(
             &rewritten,
-            &self.env_vars,
+            &self.shell_state.env_vars,
         ))
     }
 
@@ -434,8 +434,8 @@ impl Executor {
     /// in test.c as called from `cond_test`.
     fn report_conditional_error(&self, message: &str) {
         let prefix = if let (Some(script), Some(line)) = (
-            self.env_vars.get("__RUBASH_SCRIPT_NAME"),
-            self.env_vars.get("__RUBASH_CURRENT_LINE"),
+            self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"),
+            self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"),
         ) {
             format!("{script}: line {line}: [[: ")
         } else {
@@ -447,7 +447,7 @@ impl Executor {
     pub(super) fn conditional_shell_option_unary(&mut self, operand: &str) -> bool {
         let name = self.expand_word_mut(operand);
         crate::builtins::set::is_shell_option(&name)
-            && crate::builtins::set::shell_option_enabled(&self.env_vars, &name)
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, &name)
     }
 
     pub(super) fn conditional_file_unary(&mut self, op: &str, operand: &str) -> bool {
@@ -455,7 +455,7 @@ impl Executor {
             return result;
         }
         let args = vec![op.to_string(), self.expand_word_mut(operand)];
-        crate::builtins::test::execute(&args, false, &self.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
     }
 
     pub(super) fn conditional_file_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
@@ -464,7 +464,7 @@ impl Executor {
             op.to_string(),
             self.expand_word_mut(right),
         ];
-        crate::builtins::test::execute(&args, false, &self.env_vars).unwrap_or(1) == 0
+        crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
     }
 
     pub(super) fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
@@ -489,19 +489,19 @@ impl Executor {
                 capture.map(|matched| (index, matched.as_str().to_string()))
             })
             .collect();
-        self.env_vars.insert(
+        self.shell_state.env_vars.insert(
             "BASH_REMATCH".to_string(),
             format_indexed_array_storage(entries),
         );
-        mark_env_name(&mut self.env_vars, ARRAY_VARS, "BASH_REMATCH");
+        mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, "BASH_REMATCH");
     }
 
     pub(super) fn clear_bash_rematch(&mut self) {
-        self.env_vars.insert(
+        self.shell_state.env_vars.insert(
             "BASH_REMATCH".to_string(),
             format_indexed_array_storage(BTreeMap::new()),
         );
-        mark_env_name(&mut self.env_vars, ARRAY_VARS, "BASH_REMATCH");
+        mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, "BASH_REMATCH");
     }
 
     pub(super) fn conditional_regex_match_status(&mut self, left: &str, right: &str) -> i32 {
@@ -547,7 +547,7 @@ impl Executor {
         let pattern = translate_posix_bracket_classes(pattern);
         regex::RegexBuilder::new(&pattern)
             .case_insensitive(crate::builtins::shopt::option_enabled(
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 "nocasematch",
             ))
             .build()
@@ -699,8 +699,8 @@ impl Executor {
         let left_eval = self.expand_arith_indexed_subscripts(&left_expanded);
         let (Some(left_val), _) = eval_mutable_arith_value_with_random_flags(
             &left_eval,
-            &mut self.env_vars,
-            Some(&self.random_state),
+            &mut self.shell_state.env_vars,
+            Some(&self.shell_state.random_state),
             true,
         ) else {
             self.flush_arith_diags(Some("[["));
@@ -711,8 +711,8 @@ impl Executor {
         let right_eval = self.expand_arith_indexed_subscripts(&right_expanded);
         let (Some(right_val), _) = eval_mutable_arith_value_with_random_flags(
             &right_eval,
-            &mut self.env_vars,
-            Some(&self.random_state),
+            &mut self.shell_state.env_vars,
+            Some(&self.shell_state.random_state),
             true,
         ) else {
             self.flush_arith_diags(Some("[["));

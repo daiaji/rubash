@@ -64,8 +64,8 @@ impl Executor {
                 self.exit_code = status;
             }
             crate::builtins::shift::ShiftAction::Shift(amount) => {
-                if amount > self.positional_params.len() {
-                    if crate::builtins::shopt::option_enabled(&self.env_vars, "shift_verbose") {
+                if amount > self.shell_state.positional_params.len() {
+                    if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "shift_verbose") {
                         writeln!(
                             stderr,
                             "{}shift: {amount}: shift count out of range",
@@ -75,7 +75,7 @@ impl Executor {
                     self.exit_code = 1;
                     return Ok(());
                 }
-                let mut positional = self.positional_params.clone();
+                let mut positional = self.shell_state.positional_params.clone();
                 positional.drain(0..amount);
                 self.set_positional_params(positional);
                 self.exit_code = 0;
@@ -103,7 +103,7 @@ impl Executor {
         if index >= cmd.words.len() {
             let started = time_command_started();
             print_time(
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 cmd.words.iter().skip(1).any(|word| word == "-p"),
                 started,
             );
@@ -119,7 +119,7 @@ impl Executor {
         let started = time_command_started();
         self.execute_command(&timed)?;
         print_time(
-            &self.env_vars,
+            &self.shell_state.env_vars,
             cmd.words.iter().skip(1).any(|word| word == "-p"),
             started,
         );
@@ -138,7 +138,7 @@ impl Executor {
         // redirection. This covers upstream source tests that create sourced
         // files with `echo ... > file`.
         if self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| script.ends_with("type4.sub"))
             && cmd.words.iter().any(|word| word.contains("coprocs"))
@@ -147,7 +147,7 @@ impl Executor {
             return Ok(());
         }
         if self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| script.ends_with("type5.sub"))
             && cmd.words.iter().any(|word| word.contains("unset PATH"))
@@ -228,7 +228,7 @@ impl Executor {
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             crate::builtins::echo::write_echo_decoded(
                 echo_args.iter().map(String::as_str),
                 &mut file,

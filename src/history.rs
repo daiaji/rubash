@@ -44,7 +44,7 @@ pub type SharedHistoryProvider = Rc<RefCell<dyn HistoryProvider>>;
 /// plus the bash-level bookkeeping: history_base, lines added this session,
 /// the last-line-added flag that "history -s" consults, and the expansion
 /// engine state that persists across expansions.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SessionHistory {
     /// Oldest-to-newest entry lines. Entry N (1-based) lives at
     /// entries[N - base].

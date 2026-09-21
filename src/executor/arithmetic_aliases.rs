@@ -14,7 +14,7 @@ impl Executor {
             ) {
                 continue;
             }
-            let Some(alias) = self.aliases.get(&token.value) else {
+            let Some(alias) = self.shell_state.aliases.get(&token.value) else {
                 continue;
             };
             let value = alias.value.trim();
@@ -143,7 +143,7 @@ impl Executor {
     /// error`, not `((: a[$(...)]`). The evaluator records that text in
     /// __RUBASH_ARITH_SUBSCRIPT_EXPR (lvalue.rs / value.rs).
     fn report_subscript_eval_failure(&self) -> bool {
-        let Some(subscript) = self.env_vars.get("__RUBASH_ARITH_SUBSCRIPT_EXPR") else {
+        let Some(subscript) = self.shell_state.env_vars.get("__RUBASH_ARITH_SUBSCRIPT_EXPR") else {
             return false;
         };
         let subscript = subscript.clone();
@@ -224,7 +224,7 @@ impl Executor {
         &mut self,
         label: Option<&str>,
     ) -> bool {
-        let Some(value) = self.env_vars.remove("__RUBASH_ARITH_NAMEREF_ERROR") else {
+        let Some(value) = self.shell_state.env_vars.remove("__RUBASH_ARITH_NAMEREF_ERROR") else {
             return false;
         };
         match label {
@@ -405,11 +405,11 @@ impl Executor {
                 }
                 Some('@') | Some('*') => {
                     chars.next();
-                    output.push_str(&self.positional_params.join(" "));
+                    output.push_str(&self.shell_state.positional_params.join(" "));
                 }
                 Some('#') => {
                     chars.next();
-                    output.push_str(&self.positional_params.len().to_string());
+                    output.push_str(&self.shell_state.positional_params.len().to_string());
                 }
                 Some('-') => {
                     chars.next();
@@ -422,7 +422,7 @@ impl Executor {
                         output.push_str(&self.script_name_value());
                     } else {
                         output.push_str(
-                            self.positional_params
+                            self.shell_state.positional_params
                                 .get(index - 1)
                                 .map(String::as_str)
                                 .unwrap_or(""),
@@ -506,7 +506,7 @@ impl Executor {
             if expand_next {
                 let mut seen = Vec::new();
                 let (mut alias_words, alias_expand_next) = self.expand_alias_word(word, &mut seen);
-                if alias_words.is_empty() && !self.aliases.contains_key(word) {
+                if alias_words.is_empty() && !self.shell_state.aliases.contains_key(word) {
                     expanded.push(word.clone());
                 } else {
                     expanded.append(&mut alias_words);
@@ -542,7 +542,7 @@ impl Executor {
             if expand_next && !crate::executor::command_prepare::raw_word_is_quoted(raw) {
                 let mut seen = Vec::new();
                 let (mut alias_words, alias_expand_next) = self.expand_alias_word(word, &mut seen);
-                if alias_words.is_empty() && !self.aliases.contains_key(word) {
+                if alias_words.is_empty() && !self.shell_state.aliases.contains_key(word) {
                     expanded.push(word.clone());
                 } else {
                     expanded.append(&mut alias_words);
@@ -616,12 +616,12 @@ impl Executor {
         {
             return source.to_string();
         }
-        let Some(alias) = self.aliases.get(first) else {
+        let Some(alias) = self.shell_state.aliases.get(first) else {
             return source.to_string();
         };
         // AL_BEINGEXPANDED: a body already expanding this alias does not
         // recurse (parse.y alias_expand_token cycle guard).
-        if self.expanding_aliases.iter().any(|seen| seen == first) {
+        if self.shell_state.expanding_aliases.iter().any(|seen| seen == first) {
             return source.to_string();
         }
         let mut spliced = alias.value.replace('\x1f', "$");
@@ -654,7 +654,7 @@ impl Executor {
             return Ok(false);
         };
 
-        if self.expanding_aliases.iter().any(|alias| alias == word) {
+        if self.shell_state.expanding_aliases.iter().any(|alias| alias == word) {
             return Ok(false);
         }
 
@@ -670,7 +670,7 @@ impl Executor {
             return Ok(false);
         }
 
-        let Some(alias) = self.aliases.get(word).cloned() else {
+        let Some(alias) = self.shell_state.aliases.get(word).cloned() else {
             return Ok(false);
         };
 
@@ -687,7 +687,7 @@ impl Executor {
         }
         source.push_str(&cmd.words[1..].join(" "));
 
-        self.expanding_aliases.push(word.clone());
+        self.shell_state.expanding_aliases.push(word.clone());
         let tokens = crate::lexer::tokenize_with_options(
             &source,
             crate::lexer::TokenizeOptions {
@@ -697,7 +697,7 @@ impl Executor {
         );
         let ast = crate::parser::parse(&tokens);
         let result = self.execute_ast(&ast);
-        self.expanding_aliases.pop();
+        self.shell_state.expanding_aliases.pop();
         result.map(|_| true)
     }
 
@@ -736,7 +736,7 @@ impl Executor {
         if seen.iter().any(|seen_word| seen_word == word) {
             return None;
         }
-        let alias = self.aliases.get(word)?;
+        let alias = self.shell_state.aliases.get(word)?;
         if !needs_parser_level_alias_expansion(&alias.value)
             && !matches!(alias.value.trim(), "if" | "then" | "elif" | "else" | "fi")
         {
@@ -769,7 +769,7 @@ impl Executor {
             return (vec![word.to_string()], false);
         }
 
-        let Some(alias) = self.aliases.get(word) else {
+        let Some(alias) = self.shell_state.aliases.get(word) else {
             return (vec![word.to_string()], false);
         };
 
@@ -813,14 +813,14 @@ impl Executor {
 
     fn alias_defined_on_current_line(&self, word: &str) -> bool {
         let Some(current_line) = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
         else {
             return false;
         };
         let key = format!("__RUBASH_ALIAS_LINE_{word}");
-        self.env_vars
+        self.shell_state.env_vars
             .get(&key)
             .and_then(|line| line.parse::<usize>().ok())
             == Some(current_line)

@@ -37,17 +37,17 @@ impl Executor {
     pub(in crate::executor) fn dynamic_parameter_value(&self, name: &str) -> Option<String> {
         match name {
             "SECONDS" | "EPOCHSECONDS" | "EPOCHREALTIME" => {
-                env_derived_dynamic_parameter_value(&self.env_vars, name)
+                env_derived_dynamic_parameter_value(&self.shell_state.env_vars, name)
             }
             "RANDOM" => Some(self.next_random_value().to_string()),
             "SRANDOM" => Some(self.next_srandom_value().to_string()),
             "BASHPID" => Some(self.bashpid_value().to_string()),
-            "BASH_SUBSHELL" => Some(self.subshell_depth.get().to_string()),
+            "BASH_SUBSHELL" => Some(self.shell_state.subshell_depth.get().to_string()),
             "BASH_ARGV0" => Some(self.script_name_value()),
             "FUNCNAME" => Some(self.funcname_stack().first().cloned().unwrap_or_default()),
             "GROUPS" => self.group_value_at(0),
             "LINENO" => Some(
-                self.env_vars
+                self.shell_state.env_vars
                     .get("__RUBASH_CURRENT_LINE")
                     .cloned()
                     .unwrap_or_else(|| "1".to_string()),
@@ -56,12 +56,12 @@ impl Executor {
                 self.debug_trap_command
                     .borrow()
                     .clone()
-                    .or_else(|| self.env_vars.get("__RUBASH_CURRENT_COMMAND").cloned())
+                    .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_COMMAND").cloned())
                     .unwrap_or_default(),
             ),
-            "SHELLOPTS" => Some(crate::builtins::set::shellopts_value(&self.env_vars)),
-            "BASHOPTS" => Some(crate::builtins::shopt::bashopts_value(&self.env_vars)),
-            "PIPESTATUS" => Some(self.pipestatus.first().copied().unwrap_or(0).to_string()),
+            "SHELLOPTS" => Some(crate::builtins::set::shellopts_value(&self.shell_state.env_vars)),
+            "BASHOPTS" => Some(crate::builtins::shopt::bashopts_value(&self.shell_state.env_vars)),
+            "PIPESTATUS" => Some(self.shell_state.pipestatus.first().copied().unwrap_or(0).to_string()),
             _ => None,
         }
     }
@@ -71,7 +71,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn last_background_pid_value(&self) -> String {
-        self.last_background_pid
+        self.shell_state.last_background_pid
             .map(|pid| pid.to_string())
             .unwrap_or_default()
     }
@@ -81,13 +81,13 @@ impl Executor {
     /// no separator.
     pub(in crate::executor) fn positional_params_star_joined(&self) -> String {
         let ifs = self
-            .env_vars
+            .shell_state.env_vars
             .get("IFS")
             .cloned()
             .unwrap_or_else(|| " \t\n".to_string());
         match ifs.chars().next() {
-            Some(separator) => self.positional_params.join(&separator.to_string()),
-            None => self.positional_params.concat(),
+            Some(separator) => self.shell_state.positional_params.join(&separator.to_string()),
+            None => self.shell_state.positional_params.concat(),
         }
     }
 
@@ -121,8 +121,8 @@ impl Executor {
     /// script frame exists exactly when __RUBASH_SCRIPT_NAME is bound, the
     /// same condition FUNCNAME's synthetic "main" uses.
     pub(in crate::executor) fn bash_lineno_view(&self) -> Vec<String> {
-        let mut stack = self.bash_lineno_stack.clone();
-        if self.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
+        let mut stack = self.shell_state.bash_lineno_stack.clone();
+        if self.shell_state.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
             && stack.last().map(String::as_str) != Some("0")
         {
             stack.push("0".to_string());
@@ -136,10 +136,10 @@ impl Executor {
         match name {
             "PIPESTATUS" => return Some(format_indexed_array_values(self.pipestatus_values())),
             "FUNCNAME" => {
-                let mut stack = self.function_name_stack.clone();
+                let mut stack = self.shell_state.function_name_stack.clone();
                 // Bash exposes the script's top-level frame as `main`, but
                 // `bash -c` reports only real function frames.
-                if self.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
+                if self.shell_state.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
                     && !stack.is_empty()
                     && stack.last().map(String::as_str) != Some("main")
                 {
@@ -147,11 +147,11 @@ impl Executor {
                 }
                 return Some(format_indexed_array_values(stack));
             }
-            "BASH_ARGC" => return Some(format_indexed_array_values(self.bash_argc_stack.clone())),
-            "BASH_ARGV" => return Some(format_indexed_array_values(self.bash_argv_stack.clone())),
+            "BASH_ARGC" => return Some(format_indexed_array_values(self.shell_state.bash_argc_stack.clone())),
+            "BASH_ARGV" => return Some(format_indexed_array_values(self.shell_state.bash_argv_stack.clone())),
             "BASH_LINENO" => return Some(format_indexed_array_values(self.bash_lineno_view())),
             "BASH_SOURCE" => {
-                return Some(format_indexed_array_values(self.bash_source_stack.clone()))
+                return Some(format_indexed_array_values(self.shell_state.bash_source_stack.clone()))
             }
             _ => {}
         }
@@ -169,14 +169,14 @@ impl Executor {
         if name == "BASH_CMDS" {
             return Some(self.bash_cmds_storage());
         }
-        self.env_vars.get(name).cloned()
+        self.shell_state.env_vars.get(name).cloned()
     }
 
     pub(in crate::executor) fn is_assoc_parameter_array(&self, name: &str) -> bool {
         self.resolved_variable_name(name)
             .as_deref()
             .is_some_and(|name| {
-                is_marked_var(&self.env_vars, ASSOC_VARS, name)
+                is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
                     || self
                         .shell_state
                         .variables
@@ -192,7 +192,7 @@ impl Executor {
 
     pub(in crate::executor) fn dirstack_storage(&self) -> String {
         format_indexed_array_storage(
-            crate::builtins::pushd::load_stack(&self.env_vars)
+            crate::builtins::pushd::load_stack(&self.shell_state.env_vars)
                 .into_iter()
                 .enumerate()
                 .collect(),
@@ -201,7 +201,7 @@ impl Executor {
 
     pub(in crate::executor) fn bashpid_value(&self) -> u32 {
         let pid = std::process::id();
-        let depth = self.subshell_depth.get();
+        let depth = self.shell_state.subshell_depth.get();
         if depth == 0 {
             pid
         } else {
@@ -211,7 +211,7 @@ impl Executor {
 
     pub(in crate::executor) fn bash_aliases_storage(&self) -> String {
         let mut entries: Vec<_> = self
-            .aliases
+            .shell_state.aliases
             .iter()
             .map(|(name, alias)| (name.clone(), alias.value.clone()))
             .collect();
@@ -220,7 +220,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn bash_cmds_storage(&self) -> String {
-        format_assoc_storage(crate::builtins::hash::hashed_entries(&self.env_vars))
+        format_assoc_storage(crate::builtins::hash::hashed_entries(&self.shell_state.env_vars))
     }
 
     pub(in crate::executor) fn sync_dynamic_assoc_vars(&mut self) {
@@ -232,12 +232,12 @@ impl Executor {
         // empty in a shell that never named DIRSTACK (array.tests
         // `declare -a | ignore_builtin_arrays` lines). See
         // sync_dirstack_cell for the named-access materialization.
-        self.env_vars
+        self.shell_state.env_vars
             .insert("BASH_ALIASES".to_string(), self.bash_aliases_storage());
-        mark_env_name(&mut self.env_vars, ASSOC_VARS, "BASH_ALIASES");
-        self.env_vars
+        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_ALIASES");
+        self.shell_state.env_vars
             .insert("BASH_CMDS".to_string(), self.bash_cmds_storage());
-        mark_env_name(&mut self.env_vars, ASSOC_VARS, "BASH_CMDS");
+        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_CMDS");
     }
 
     /// Materializes the DIRSTACK array cell from the live directory stack.
@@ -247,39 +247,39 @@ impl Executor {
     /// the stored cell untouched (variables.c:1618 get_dirstack,
     /// builtins/pushd.def:669 get_directory_stack).
     pub(in crate::executor) fn sync_dirstack_cell(&mut self) {
-        self.env_vars
+        self.shell_state.env_vars
             .insert("DIRSTACK".to_string(), self.dirstack_storage());
-        mark_env_name(&mut self.env_vars, ARRAY_VARS, "DIRSTACK");
+        mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, "DIRSTACK");
     }
 
     pub(in crate::executor) fn funcname_stack(&self) -> Vec<String> {
-        self.function_name_stack.clone()
+        self.shell_state.function_name_stack.clone()
     }
 
     pub(in crate::executor) fn current_bash_source(&self) -> String {
-        self.bash_source_stack
+        self.shell_state.bash_source_stack
             .first()
             .cloned()
-            .or_else(|| self.env_vars.get("__RUBASH_SCRIPT_NAME").cloned())
+            .or_else(|| self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME").cloned())
             .unwrap_or_default()
     }
 
     pub(in crate::executor) fn next_random_value(&self) -> u32 {
-        next_random_from_state(&self.random_state)
+        next_random_from_state(&self.shell_state.random_state)
     }
 
     pub(in crate::executor) fn next_srandom_value(&self) -> u32 {
-        next_srandom_from_state(&self.random_state)
+        next_srandom_from_state(&self.shell_state.random_state)
     }
 
     pub(in crate::executor) fn script_name_value(&self) -> String {
-        self.env_vars
+        self.shell_state.env_vars
             .get("BASH_ARGV0")
-            .or_else(|| self.env_vars.get("__RUBASH_TOP_LEVEL_NAME"))
-            .or_else(|| self.env_vars.get("__RUBASH_SCRIPT_NAME"))
+            .or_else(|| self.shell_state.env_vars.get("__RUBASH_TOP_LEVEL_NAME"))
+            .or_else(|| self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"))
             // Embedded hosts provide their public shell identity here. Keep
             // this after script names so `niu foo.sh` still reports foo.sh.
-            .or_else(|| self.env_vars.get("__RUBASH_SHELL_NAME"))
+            .or_else(|| self.shell_state.env_vars.get("__RUBASH_SHELL_NAME"))
             .cloned()
             .unwrap_or_else(|| "rubash".to_string())
     }
@@ -388,9 +388,9 @@ impl Executor {
                     .unwrap_or(name);
                 let target_is_integer = match self.nameref_resolution(base) {
                     NamerefResolution::Target(ref target) => {
-                        is_marked_var(&self.env_vars, INTEGER_VARS, target)
+                        is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, target)
                     }
-                    _ => is_marked_var(&self.env_vars, INTEGER_VARS, base),
+                    _ => is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base),
                 };
                 if target_is_integer {
                     format!("{name}={}", self.eval_integer_assignment_value(value))

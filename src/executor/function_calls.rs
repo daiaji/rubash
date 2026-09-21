@@ -57,7 +57,7 @@ impl Executor {
         // function names (execute_cmd.c execute_intern_function only sets
         // pflags&1 under that ifdef). `!! () { fc -s "$@"; }` under
         // `set -o posix` defines the function (func.tests func5.sub).
-        if marked_env_names(&self.env_vars, READONLY_FUNCTIONS)
+        if marked_env_names(&self.shell_state.env_vars, READONLY_FUNCTIONS)
             .iter()
             .any(|name| name == &function.name)
         {
@@ -69,14 +69,14 @@ impl Executor {
             self.exit_code = 1;
             return Ok(());
         }
-        self.functions.insert(
+        self.shell_state.functions.insert(
             function.name.clone(),
             Rc::new(Ast {
                 commands: function.body.clone(),
             }),
         );
         if let Some(line) = cmd.line {
-            self.function_definition_locations.insert(
+            self.shell_state.function_definition_locations.insert(
                 function.name.clone(),
                 FunctionDefinitionLocation {
                     line,
@@ -85,7 +85,7 @@ impl Executor {
                 },
             );
         } else {
-            self.function_definition_locations.remove(&function.name);
+            self.shell_state.function_definition_locations.remove(&function.name);
         }
         if command_has_input_or_output_redirects(cmd) {
             let mut redirects = CommandNode::new();
@@ -96,15 +96,15 @@ impl Executor {
             redirects.redirect_err_append = cmd.redirect_err_append.clone();
             redirects.heredoc = cmd.heredoc.clone();
             redirects.here_string = cmd.here_string.clone();
-            self.function_definition_redirects
+            self.shell_state.function_definition_redirects
                 .insert(function.name.clone(), redirects);
         } else {
-            self.function_definition_redirects.remove(&function.name);
+            self.shell_state.function_definition_redirects.remove(&function.name);
         }
         // Print/roundtrip metadata: body kind plus the definition-level
         // redirect list (the generic `redirects` field collects `} >&2`
         // style trailing redirections at parse time).
-        self.function_def_infos.insert(
+        self.shell_state.function_def_infos.insert(
             function.name.clone(),
             FunctionDefInfo {
                 body_kind: Some(function.body_kind),
@@ -116,11 +116,11 @@ impl Executor {
     }
 
     pub(in crate::executor) fn function_name_for_command_word(&self, word: &str) -> Option<String> {
-        if self.functions.contains_key(word) {
+        if self.shell_state.functions.contains_key(word) {
             return Some(word.to_string());
         }
         let unescaped = word.replace("\\=", "=");
-        if unescaped != word && self.functions.contains_key(&unescaped) {
+        if unescaped != word && self.shell_state.functions.contains_key(&unescaped) {
             Some(unescaped)
         } else {
             None
@@ -133,7 +133,7 @@ impl Executor {
         args: &[String],
         call_cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
-        let Some(body) = self.functions.get(name).cloned() else {
+        let Some(body) = self.shell_state.functions.get(name).cloned() else {
             return Ok(());
         };
         // GNU Bash execute_cmd.c:5200 (execute_function) plus
@@ -143,7 +143,7 @@ impl Executor {
         // built-in default cap (func4.sub recurses to completion when unset).
         // The chosen limit is reported in the diagnostic.
         let funcnest: Option<usize> = self
-            .env_vars
+            .shell_state.env_vars
             .get("FUNCNEST")
             .and_then(|value| value.trim().parse::<usize>().ok());
         let nesting_limit: Option<usize> = match funcnest {
@@ -151,7 +151,7 @@ impl Executor {
             _ => None,
         };
         if let Some(nesting_limit) = nesting_limit {
-            if self.function_depth >= nesting_limit {
+            if self.shell_state.function_depth >= nesting_limit {
                 eprintln!(
                     "{}{}: maximum function nesting level exceeded ({})",
                     self.diagnostic_prefix(),
@@ -165,7 +165,7 @@ impl Executor {
         if self.execute_upstream_cprint_function(name) {
             return Ok(());
         }
-        let definition_redirects = self.function_definition_redirects.get(name).cloned();
+        let definition_redirects = self.shell_state.function_definition_redirects.get(name).cloned();
         let body_needs_redirects = definition_redirects
             .as_ref()
             .is_some_and(function_redirects_affect_body)
@@ -185,7 +185,7 @@ impl Executor {
         // FUNCTION_STDIN cursor before function_call_stdin carves the
         // remainder so the child's consumed prefix can fold back onto it.
         let parent_stdin_base = self
-            .env_vars
+            .shell_state.env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -199,20 +199,20 @@ impl Executor {
                 self.function_call_stdin(call_cmd)?
             };
         let (old_function, old_function_stdin, old_function_stdin_offset, old_positional_params) = {
-            let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
-            let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
-            let old_function_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-            let old_positional_params = self.positional_params.clone();
-            self.env_vars
+            let old_function = self.shell_state.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
+            let old_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+            let old_function_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+            let old_positional_params = self.shell_state.positional_params.clone();
+            self.shell_state.env_vars
                 .insert("__RUBASH_CURRENT_FUNCTION".to_string(), name.to_string());
             if let Some(input) = call_stdin {
-                self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-                self.env_vars
+                self.shell_state.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+                self.shell_state.env_vars
                     .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
             }
-            self.function_name_stack.insert(0, name.to_string());
+            self.shell_state.function_name_stack.insert(0, name.to_string());
             let call_line = self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_CURRENT_LINE")
                 .cloned()
                 .or_else(|| call_cmd.line.map(|line| line.to_string()))
@@ -223,9 +223,9 @@ impl Executor {
             // ${BASH_LINENO[1]} is "0" ("main()'s file is the same as the first caller",
             // dbg-support.tests) and `caller` sees the full caller chain
             // (probe: BASH_LINENO[1]=[] vs GNU [0]).
-            self.bash_lineno_stack.insert(0, call_line);
+            self.shell_state.bash_lineno_stack.insert(0, call_line);
             let source = self.current_bash_source();
-            self.bash_source_stack.insert(
+            self.shell_state.bash_source_stack.insert(
                 0,
                 if source.is_empty() {
                     "environment".to_string()
@@ -233,9 +233,9 @@ impl Executor {
                     source
                 },
             );
-            self.bash_argc_stack.insert(0, args.len().to_string());
+            self.shell_state.bash_argc_stack.insert(0, args.len().to_string());
             for arg in args {
-                self.bash_argv_stack.insert(0, arg.clone());
+                self.shell_state.bash_argv_stack.insert(0, arg.clone());
             }
             self.set_positional_params(args.to_vec());
             (
@@ -245,10 +245,10 @@ impl Executor {
                 old_positional_params,
             )
         };
-        self.local_var_scopes.push(HashMap::new());
-        self.local_attr_scopes.push(HashMap::new());
-        self.local_typed_scopes.push(HashMap::new());
-        self.function_depth += 1;
+        self.shell_state.local_var_scopes.push(HashMap::new());
+        self.shell_state.local_attr_scopes.push(HashMap::new());
+        self.shell_state.local_typed_scopes.push(HashMap::new());
+        self.shell_state.function_depth += 1;
         let old_debug_trap_function_line = self.debug_trap_function_line;
         if self.debug_trap_running {
             self.debug_trap_function_line = body.commands.first().and_then(|command| command.line);
@@ -262,18 +262,18 @@ impl Executor {
         // restore_default_signal(DEBUG_TRAP) removed it. run_debug_trap's own
         // in-progress guard keeps the DEBUG trap handler function itself from
         // firing (sigmodes[DEBUG_TRAP] & SIG_INPROGRESS).
-        let functrace = crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace");
+        let functrace = crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "functrace");
         let function_traced = functrace || self.function_has_trace_attribute(name);
         // GNU execute_cmd.c:5269-5278: save the inherited DEBUG action and
         // remove it for the body unless the function inherits the trap; the
         // body may still set a new DEBUG trap, which then fires for the
         // remaining body commands (trap.tests: "func[29] funcdebug").
-        let saved_debug_action = crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG");
+        let saved_debug_action = crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG");
         if saved_debug_action.is_some() && !function_traced {
-            crate::builtins::trap::clear_debug_trap(&mut self.env_vars);
+            crate::builtins::trap::clear_debug_trap(&mut self.shell_state.env_vars);
         }
         let definition_line = self
-            .function_definition_locations
+            .shell_state.function_definition_locations
             .get(name)
             .map(|location| location.line);
         if function_traced {
@@ -282,12 +282,12 @@ impl Executor {
                 .as_ref()
                 .and_then(|function| function.body_open_line)
                 .or(self
-                    .function_definition_locations
+                    .shell_state.function_definition_locations
                     .get(name)
                     .and_then(|location| location.body_open_line))
                 .or(definition_line);
             if let Some(line) = body_open_line {
-                self.env_vars
+                self.shell_state.env_vars
                     .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
             }
             // GNU's the_printed_command at the entry fire (execute_cmd.c:5387)
@@ -298,7 +298,7 @@ impl Executor {
             // is recorded by set_current_command from the pre-expansion node,
             // so it carries the same raw source text GNU prints.
             let command_text = self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_LAST_COMMAND")
                 .cloned()
                 .filter(|text| !text.is_empty() && !call_cmd.words.is_empty())
@@ -314,7 +314,7 @@ impl Executor {
         // (trap.tests listing shows the funcdebug action after func).
         if let Some(action) = saved_debug_action {
             if !function_traced {
-                crate::builtins::trap::maybe_restore_debug_trap(&mut self.env_vars, action);
+                crate::builtins::trap::maybe_restore_debug_trap(&mut self.shell_state.env_vars, action);
             }
         }
         self.debug_trap_function_line = old_debug_trap_function_line;
@@ -326,30 +326,30 @@ impl Executor {
         // "return lineno: 30 fn1" at fn1's exit).
         if result.is_ok() {
             if let Some(line) = definition_line {
-                self.env_vars
+                self.shell_state.env_vars
                     .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
             }
         }
         self.run_function_return_trap()?;
         {
-            self.function_depth -= 1;
+            self.shell_state.function_depth -= 1;
             self.restore_function_locals();
             self.set_positional_params(old_positional_params);
-            if !self.function_name_stack.is_empty() {
-                self.function_name_stack.remove(0);
+            if !self.shell_state.function_name_stack.is_empty() {
+                self.shell_state.function_name_stack.remove(0);
             }
-            if !self.bash_lineno_stack.is_empty() {
-                self.bash_lineno_stack.remove(0);
+            if !self.shell_state.bash_lineno_stack.is_empty() {
+                self.shell_state.bash_lineno_stack.remove(0);
             }
-            if !self.bash_source_stack.is_empty() {
-                self.bash_source_stack.remove(0);
+            if !self.shell_state.bash_source_stack.is_empty() {
+                self.shell_state.bash_source_stack.remove(0);
             }
-            if !self.bash_argc_stack.is_empty() {
-                self.bash_argc_stack.remove(0);
+            if !self.shell_state.bash_argc_stack.is_empty() {
+                self.shell_state.bash_argc_stack.remove(0);
             }
             for _ in args {
-                if !self.bash_argv_stack.is_empty() {
-                    self.bash_argv_stack.remove(0);
+                if !self.shell_state.bash_argv_stack.is_empty() {
+                    self.shell_state.bash_argv_stack.remove(0);
                 }
             }
             // Fold any deferred comsub write-back into the child's cursor
@@ -357,35 +357,35 @@ impl Executor {
             // the child's FUNCTION_STDIN buffer, so it must apply while
             // that buffer is still installed.
             self.apply_comsub_stdin_writeback();
-            restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_function_stdin);
+            restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_function_stdin);
             if stdin_carved_from_parent {
                 // The child's FUNCTION_STDIN_OFFSET is its cursor into the
                 // carved remainder; fold it back into the parent's cursor so
                 // input the function did not read stays readable after return
                 // (GNU: shared fd 0 position).
                 let child_offset = self
-                    .env_vars
+                    .shell_state.env_vars
                     .get(FUNCTION_STDIN_OFFSET)
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(0);
-                self.env_vars.insert(
+                self.shell_state.env_vars.insert(
                     FUNCTION_STDIN_OFFSET.to_string(),
                     (parent_stdin_base + child_offset).to_string(),
                 );
             } else {
                 restore_optional_env_var(
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     FUNCTION_STDIN_OFFSET,
                     old_function_stdin_offset,
                 );
             }
             match old_function {
                 Some(value) => {
-                    self.env_vars
+                    self.shell_state.env_vars
                         .insert("__RUBASH_CURRENT_FUNCTION".to_string(), value);
                 }
                 None => {
-                    self.env_vars.remove("__RUBASH_CURRENT_FUNCTION");
+                    self.shell_state.env_vars.remove("__RUBASH_CURRENT_FUNCTION");
                 }
             }
         }
@@ -498,9 +498,9 @@ impl Executor {
             // portion of that virtual stdin available to commands it invokes.
             // The nested shell must consume it instead of the host process
             // stdin (for example, input-line.sh/input-line.sub).
-            if let Some(input) = self.env_vars.get(FUNCTION_STDIN) {
+            if let Some(input) = self.shell_state.env_vars.get(FUNCTION_STDIN) {
                 let offset = self
-                    .env_vars
+                    .shell_state.env_vars
                     .get(FUNCTION_STDIN_OFFSET)
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(0);
@@ -521,7 +521,7 @@ impl Executor {
         Ok((
             Some(fs::read_to_string(shell_path_to_windows(
                 &target,
-                &self.env_vars,
+                &self.shell_state.env_vars,
             ))?),
             false,
         ))

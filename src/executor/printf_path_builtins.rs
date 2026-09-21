@@ -48,7 +48,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::printf::execute_with_io_and_store(
             words.iter().map(String::as_str),
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             Some(&mut self.shell_state.variables),
             &mut stdout,
             &mut stderr,
@@ -80,7 +80,7 @@ impl Executor {
         // GNU builtins/exit.def:79-90 (logout_builtin): only a login shell
         // may logout; anything else reports and continues.
         let login_shell = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_LOGIN_SHELL")
             .map(String::as_str)
             == Some("1");
@@ -94,10 +94,10 @@ impl Executor {
 
         // GNU exit.def:147,156-166 (exit_or_logout -> bash_logout): a login
         // shell sources ~/.bash_logout once before exiting.
-        if let Some(home) = self.env_vars.get("HOME").cloned() {
+        if let Some(home) = self.shell_state.env_vars.get("HOME").cloned() {
             let logout_file = format!("{home}/.bash_logout");
             if !self.bash_logout_sourced
-                && std::fs::metadata(shell_path_to_windows(&logout_file, &self.env_vars)).is_ok()
+                && std::fs::metadata(shell_path_to_windows(&logout_file, &self.shell_state.env_vars)).is_ok()
             {
                 self.bash_logout_sourced = true;
                 let mut node = CommandNode::default();
@@ -176,15 +176,15 @@ impl Executor {
             if is_null_device(&target) {
                 return Ok(crate::builtins::cd::execute_with_io(
                     cmd.words[1..].iter().map(String::as_str),
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     &mut std::io::sink(),
                     &mut super::WriteFileStderr,
                 )?);
             }
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            let mut file = File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             return Ok(crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &mut file,
                 &mut super::WriteFileStderr,
             )?);
@@ -195,10 +195,10 @@ impl Executor {
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             return Ok(crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &mut file,
                 &mut super::WriteFileStderr,
             )?);
@@ -210,7 +210,7 @@ impl Executor {
                 let mut stderr_buf = Vec::new();
                 let status = crate::builtins::cd::execute_with_io(
                     cmd.words[1..].iter().map(String::as_str),
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     &mut super::WriteFileStdout,
                     &mut stderr_buf,
                 )?;
@@ -220,15 +220,15 @@ impl Executor {
             if is_null_device(&target) {
                 return Ok(crate::builtins::cd::execute_with_io(
                     cmd.words[1..].iter().map(String::as_str),
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     &mut super::WriteFileStdout,
                     &mut std::io::sink(),
                 )?);
             }
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            let mut file = File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             return Ok(crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &mut super::WriteFileStdout,
                 &mut file,
             )?);
@@ -240,7 +240,7 @@ impl Executor {
                 let mut stderr_buf = Vec::new();
                 let status = crate::builtins::cd::execute_with_io(
                     cmd.words[1..].iter().map(String::as_str),
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     &mut super::WriteFileStdout,
                     &mut stderr_buf,
                 )?;
@@ -250,7 +250,7 @@ impl Executor {
             if is_null_device(&target) {
                 return Ok(crate::builtins::cd::execute_with_io(
                     cmd.words[1..].iter().map(String::as_str),
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     &mut super::WriteFileStdout,
                     &mut std::io::sink(),
                 )?);
@@ -258,23 +258,23 @@ impl Executor {
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             return Ok(crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &mut super::WriteFileStdout,
                 &mut file,
             )?);
         }
 
-        let status = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
+        let status = crate::builtins::cd::execute(&cmd.words[1..], &mut self.shell_state.env_vars)?;
         self.sync_cd_variables();
         Ok(status)
     }
 
     pub(in crate::executor) fn sync_cd_variables(&mut self) {
         for name in ["PWD", "OLDPWD"] {
-            let Some(value) = self.env_vars.get(name).cloned() else {
+            let Some(value) = self.shell_state.env_vars.get(name).cloned() else {
                 continue;
             };
             if let Some(variable) = self.shell_state.variables.get_mut(name) {

@@ -127,7 +127,7 @@ impl Executor {
         // A leading unquoted `~` tilde-expands; `x~` and `a:~` stay literal
         // and `"~"` never reaches here (its first character is the quote).
         if raw.starts_with('~') {
-            return tilde_expand::expand_word_prefix(&expanded, &self.env_vars).unwrap_or(expanded);
+            return tilde_expand::expand_word_prefix(&expanded, &self.shell_state.env_vars).unwrap_or(expanded);
         }
         expanded
     }
@@ -165,7 +165,7 @@ impl Executor {
                 resolved
             }
             SubscriptSource::ExpandedOnce(text) => {
-                if crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once") {
+                if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once") {
                     // VA_NOEXPAND / ASS_NOEXPAND: the first expansion was the
                     // word expansion; the consumer uses the text verbatim.
                     text.to_string()
@@ -263,7 +263,7 @@ impl Executor {
         }
         let overlaid =
             crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
-                &self.env_vars,
+                &self.shell_state.env_vars,
             );
         let (result, writes) = eval_conditional_arith_value_with_writes(&resolved, &overlaid);
         if !writes.is_empty() {
@@ -317,7 +317,7 @@ impl Executor {
         operand: &str,
     ) -> Result<String, ()> {
         let expand_once =
-            crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once");
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once");
         self.rewrite_operand_subscript_typed(
             operand,
             if expand_once {
@@ -344,7 +344,7 @@ impl Executor {
             operand,
             OperandSubscriptMode::ExpandedOnce,
             None,
-            crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once"),
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once"),
             oneword,
         )
     }
@@ -376,7 +376,7 @@ impl Executor {
         if !is_shell_name(name) {
             return Ok(operand.to_string());
         }
-        let assoc = is_marked_var(&self.env_vars, ASSOC_VARS, name);
+        let assoc = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name);
         // GNU test.def/test_variable: for an ASSOCIATIVE array `@`/`*` are
         // ordinary literal keys (`[[ -v assoc[@] ]]` tests key `@`); only an
         // indexed array's `@`/`*` mean the whole array.
@@ -397,7 +397,7 @@ impl Executor {
         let valid = if arrayref && assoc {
             !subscript.is_empty()
         } else {
-            valid_array_reference_env(&hoisted_operand, false, false, &self.env_vars)
+            valid_array_reference_env(&hoisted_operand, false, false, &self.shell_state.env_vars)
         };
         if !valid {
             return Ok(operand.to_string());
@@ -474,7 +474,7 @@ impl Executor {
             operand,
             mode,
             None,
-            crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once"),
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once"),
             false,
         )
     }
@@ -509,7 +509,7 @@ impl Executor {
             return Ok(operand.to_string());
         };
         let is_assoc =
-            assoc.unwrap_or_else(|| is_marked_var(&self.env_vars, ASSOC_VARS, name));
+            assoc.unwrap_or_else(|| is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name));
         // GNU test.c/expr.c: for an ASSOCIATIVE base, `@` and `*` are
         // ordinary subscript keys (`test -v 'assoc[@]'` tests the `@`
         // element); only indexed arrays treat them as whole-array
@@ -527,7 +527,7 @@ impl Executor {
             // identifier` (sh_invalidid) instead of binding `80s`. The
             // AlwaysExpand mode models GNU paths that never run this
             // operand check (declare-family assignment words).
-            if !valid_array_reference_env(operand, noexpand, oneword, &self.env_vars) {
+            if !valid_array_reference_env(operand, noexpand, oneword, &self.shell_state.env_vars) {
                 return Ok(operand.to_string());
             }
         }
@@ -868,7 +868,7 @@ impl Executor {
             // the command-word expander reproduces all of it, including the
             // multi-word result of a quoted "${d[@]}" element.
             for field in self.expand_alternate_word_fragment(token) {
-                let fields = match super::glob::pathname_expand_word(&field, &self.env_vars) {
+                let fields = match super::glob::pathname_expand_word(&field, &self.shell_state.env_vars) {
                     super::glob::PathnameExpansion::Matches(matches) => matches,
                     super::glob::PathnameExpansion::NoMatch => vec![field],
                     super::glob::PathnameExpansion::Fail(pattern) => {
@@ -1436,7 +1436,7 @@ impl Executor {
             .iter()
             .find(|metadata| metadata.word_index == index)
             .is_some_and(|metadata| {
-                valid_array_reference_env(&metadata.raw, false, false, &self.env_vars)
+                valid_array_reference_env(&metadata.raw, false, false, &self.shell_state.env_vars)
             })
     }
 }

@@ -39,7 +39,7 @@ const BT: char = '\u{60}';
 
 /// Expansion state persisting across expansions within one session
 /// (histexpand.c statics: search_string, search_match, subst_lhs, subst_rhs).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct HistEngineState {
     pub search_string: Option<String>,
     pub search_match: Option<String>,

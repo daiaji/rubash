@@ -15,7 +15,7 @@ impl Executor {
         if command.words.first().map(String::as_str) == Some("wait") {
             redirect_sources.extend(command.words.iter().map(String::as_str));
         }
-        self.env_vars
+        self.shell_state.env_vars
             .iter()
             .filter_map(|(key, value)| {
                 let name = key.strip_suffix("_PID")?;
@@ -76,21 +76,15 @@ impl Executor {
         }
 
         let mut index = 0;
-        let mut subshell_env: Option<HashMap<String, String>> = None;
-        let mut subshell_pipestatus: Option<Vec<i32>> = None;
-        let mut subshell_depth: Option<usize> = None;
-        let mut subshell_stdin: Option<(String, String)> = None;
-        // The subshell body runs in place on this executor, so the process
-        // cwd is part of the subshell environment too (niubash#100): a `cd`
-        // inside `f() ( cd X )`-style flat subshells must not leak out.
+        // GNU execute_cmd.c:1576 execute_in_subshell: the forked child's
+        // whole mutable state is a copy of the parent's. The flat `( )`
+        // region runs in place on this executor, so the boundary is the
+        // saved ShellState clone — aliases, functions, scopes, positional
+        // params, traps (env-carried), job bookkeeping and history all
+        // restore wholesale. The process cwd stays a shared in-place
+        // resource (niubash#100) and is restored separately.
+        let mut subshell_state: Option<crate::shell::ShellState> = None;
         let mut subshell_cwd: Option<PathBuf> = None;
-        // Same for the typed variable store, positional parameters, and loop
-        // depth: GNU's forked subshell owns copies of all of them, so an
-        // assignment or `set --` inside `f() ( ... )` must not reach the
-        // caller.
-        let mut subshell_variables = None;
-        let mut subshell_positional: Option<Vec<String>> = None;
-        let mut subshell_loop_depth: Option<usize> = None;
         // GNU execute_cmd.c: `exit` and an errexit trigger unwind the shell
         // via jump_to_top_level (exit.def:152 EXITBLTIN, execute_cmd.c:1174
         // ERREXIT) — they are never a plain command status. The jump stops
@@ -104,7 +98,7 @@ impl Executor {
         macro_rules! handle_exit_code {
             ($code:expr, $command:expr) => {{
                 let code = $code;
-                if self.parse_error_occurred || subshell_env.is_none() {
+                if self.parse_error_occurred || subshell_state.is_none() {
                     return Err(ExecuteError::ExitCode(code));
                 }
                 self.exit_code = code;
@@ -118,43 +112,15 @@ impl Executor {
                 } else if !$command.subshell_end {
                     return Err(ExecuteError::ExitCode(code));
                 }
-                if let Some((old_stdin, old_offset)) = subshell_stdin.take() {
-                    if old_stdin.is_empty() {
-                        self.env_vars.remove(FUNCTION_STDIN);
-                        self.env_vars.remove(FUNCTION_STDIN_OFFSET);
-                    } else {
-                        self.env_vars.insert(FUNCTION_STDIN.to_string(), old_stdin);
-                        self.env_vars
-                            .insert(FUNCTION_STDIN_OFFSET.to_string(), old_offset);
-                    }
-                }
-                if let Some(saved_env) = subshell_env.take() {
-                    self.restore_shell_env(saved_env);
-                }
-                if let Some(saved_pipestatus) = subshell_pipestatus.take() {
-                    self.pipestatus = saved_pipestatus;
-                }
-                if let Some(saved_depth) = subshell_depth.take() {
-                    self.subshell_depth.set(saved_depth);
-                }
-                if let Some(saved_dir) = subshell_cwd.take() {
-                    let _ = env::set_current_dir(saved_dir);
-                }
-                if let Some(saved_variables) = subshell_variables.take() {
-                    self.shell_state.variables = saved_variables;
-                }
-                if let Some(saved_positional) = subshell_positional.take() {
-                    self.set_positional_params(saved_positional);
-                }
-                if let Some(saved_loop_depth) = subshell_loop_depth.take() {
-                    self.loop_depth = saved_loop_depth;
+                if let Some(saved_state) = subshell_state.take() {
+                    self.restore_flat_subshell(saved_state, subshell_cwd.take());
                 }
                 // The dead subshell's status is a failing command status in
                 // the parent: under `set -e` it exits the script unless the
                 // command sits in a suppressing `!`/&&/|| context
                 // (execute_cmd.c:1170-1175, set-e1.sub `(exit 17)`).
                 if self.exit_code != 0
-                    && crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit")
+                    && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit")
                     && self.suppress_errexit == 0
                     && !$command.inverted
                     && $command.and_or().is_none()
@@ -184,38 +150,10 @@ impl Executor {
                 // `after` — verified GNU 5.3). The subshell's commands share
                 // this flat list, so discard forward and let the boundary
                 // marker restore the saved parent state.
-                if subshell_env.is_some() {
+                if subshell_state.is_some() {
                     if command.subshell_end {
-                        if let Some((old_stdin, old_offset)) = subshell_stdin.take() {
-                            if old_stdin.is_empty() {
-                                self.env_vars.remove(FUNCTION_STDIN);
-                                self.env_vars.remove(FUNCTION_STDIN_OFFSET);
-                            } else {
-                                self.env_vars.insert(FUNCTION_STDIN.to_string(), old_stdin);
-                                self.env_vars
-                                    .insert(FUNCTION_STDIN_OFFSET.to_string(), old_offset);
-                            }
-                        }
-                        if let Some(saved_env) = subshell_env.take() {
-                            self.restore_shell_env(saved_env);
-                        }
-                        if let Some(saved_pipestatus) = subshell_pipestatus.take() {
-                            self.pipestatus = saved_pipestatus;
-                        }
-                        if let Some(saved_depth) = subshell_depth.take() {
-                            self.subshell_depth.set(saved_depth);
-                        }
-                        if let Some(saved_dir) = subshell_cwd.take() {
-                            let _ = env::set_current_dir(saved_dir);
-                        }
-                        if let Some(saved_variables) = subshell_variables.take() {
-                            self.shell_state.variables = saved_variables;
-                        }
-                        if let Some(saved_positional) = subshell_positional.take() {
-                            self.set_positional_params(saved_positional);
-                        }
-                        if let Some(saved_loop_depth) = subshell_loop_depth.take() {
-                            self.loop_depth = saved_loop_depth;
+                        if let Some(saved_state) = subshell_state.take() {
+                            self.restore_flat_subshell(saved_state, subshell_cwd.take());
                         }
                         self.evalerror_pending.set(false);
                         self.evalerror_line.set(None);
@@ -224,7 +162,7 @@ impl Executor {
                     continue;
                 }
                 // The subshell-boundary error arm already tore the subshell
-                // down (subshell_env is None) but left this list's closing
+                // down (subshell_state is None) but left this list's closing
                 // marker behind: skip the marker and end the abort — GNU's
                 // jump_to_top_level(DISCARD) cannot cross the forked
                 // subshell boundary, so same-line parent commands still run
@@ -271,26 +209,8 @@ impl Executor {
             if self.noexec_enabled() {
                 self.exit_code = 0;
                 if command.subshell_end {
-                    if let Some(saved_env) = subshell_env.take() {
-                        self.restore_shell_env(saved_env);
-                    }
-                    if let Some(saved_pipestatus) = subshell_pipestatus.take() {
-                        self.pipestatus = saved_pipestatus;
-                    }
-                    if let Some(saved_depth) = subshell_depth.take() {
-                        self.subshell_depth.set(saved_depth);
-                    }
-                    if let Some(saved_dir) = subshell_cwd.take() {
-                        let _ = env::set_current_dir(saved_dir);
-                    }
-                    if let Some(saved_variables) = subshell_variables.take() {
-                        self.shell_state.variables = saved_variables;
-                    }
-                    if let Some(saved_positional) = subshell_positional.take() {
-                        self.set_positional_params(saved_positional);
-                    }
-                    if let Some(saved_loop_depth) = subshell_loop_depth.take() {
-                        self.loop_depth = saved_loop_depth;
+                    if let Some(saved_state) = subshell_state.take() {
+                        self.restore_flat_subshell(saved_state, subshell_cwd.take());
                     }
                 }
                 index += 1;
@@ -303,28 +223,22 @@ impl Executor {
             // the same isolation as the simple-command path below — GNU
             // executes the whole list in the forked subshell
             // (execute_cmd.c:1576 execute_in_subshell).
-            if command.subshell && subshell_env.is_none() {
-                subshell_env = Some(self.env_vars.clone());
+            if command.subshell && subshell_state.is_none() {
+                subshell_state = Some(self.shell_state.clone());
                 subshell_cwd = env::current_dir().ok();
-                subshell_variables = Some(self.shell_state.variables.clone());
-                subshell_positional = Some(self.positional_params.clone());
-                subshell_loop_depth = Some(self.loop_depth);
-                self.loop_depth = 0;
-                crate::builtins::trap::reset_for_subshell(&mut self.env_vars);
-                subshell_pipestatus = Some(self.pipestatus.clone());
-                let old_depth = self.subshell_depth.get();
-                subshell_depth = Some(old_depth);
-                self.subshell_depth.set(old_depth + 1);
-                // Feed subshell group stdin redirect to all body commands
-                let old_fn = self.env_vars.get(FUNCTION_STDIN).cloned();
-                let old_fno = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-                subshell_stdin = Some((old_fn.unwrap_or_default(), old_fno.unwrap_or_default()));
+                self.shell_state.loop_depth = 0;
+                crate::builtins::trap::reset_for_subshell(&mut self.shell_state.env_vars);
+                let old_depth = self.shell_state.subshell_depth.get();
+                self.shell_state.subshell_depth.set(old_depth + 1);
+                // Feed subshell group stdin redirect to all body commands;
+                // FUNCTION_STDIN lives in env_vars, so the wholesale state
+                // restore at the boundary reverts it.
                 for fwd in index + 1..ast.commands.len() {
                     let c = &ast.commands[fwd];
                     if c.subshell_end {
                         if let Some(input) = self.command_input_redirect(c) {
-                            self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-                            self.env_vars
+                            self.shell_state.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+                            self.shell_state.env_vars
                                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
                         }
                         break;
@@ -375,7 +289,7 @@ impl Executor {
                 || command.coproc_command.is_some()
                 || command.background_command.is_some()
                 || command_is_time_prefixed_compound(command);
-            let debug_trap_active = crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG")
+            let debug_trap_active = crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
                 .is_some_and(|action| !action.is_empty());
             // Do not fire for commands inside the trap action itself: Bash
             // does not re-enter the DEBUG trap while an action runs, and
@@ -545,7 +459,7 @@ impl Executor {
                 match execution_result {
                     Ok(()) => {}
                     Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
-                        if self.loop_depth == 0 =>
+                        if self.shell_state.loop_depth == 0 =>
                     {
                         self.exit_code = 0;
                     }
@@ -637,7 +551,7 @@ impl Executor {
                 match execution_result {
                     Ok(()) => {}
                     Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
-                        if self.loop_depth == 0 =>
+                        if self.shell_state.loop_depth == 0 =>
                     {
                         self.exit_code = 0;
                     }
@@ -695,7 +609,7 @@ impl Executor {
                 match execution_result {
                     Ok(()) => {}
                     Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
-                        if self.loop_depth == 0 =>
+                        if self.shell_state.loop_depth == 0 =>
                     {
                         self.exit_code = 0;
                     }
@@ -777,7 +691,7 @@ impl Executor {
                 match execution_result {
                     Ok(()) => {}
                     Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
-                        if self.loop_depth == 0 =>
+                        if self.shell_state.loop_depth == 0 =>
                     {
                         self.exit_code = 0;
                     }
@@ -831,7 +745,7 @@ impl Executor {
                     continue;
                 }
                 Ok(false) => {}
-                Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.loop_depth == 0 => {
+                Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.shell_state.loop_depth == 0 => {
                     self.exit_code = 0;
                 }
                 Err(ExecuteError::CommandNotFound(cmd)) => {
@@ -877,7 +791,7 @@ impl Executor {
                     continue;
                 }
                 Ok(None) => {}
-                Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.loop_depth == 0 => {
+                Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.shell_state.loop_depth == 0 => {
                     self.exit_code = 0;
                 }
                 Err(ExecuteError::CommandNotFound(cmd)) => {
@@ -921,7 +835,7 @@ impl Executor {
             };
             match execution_result {
                 Ok(()) => {}
-                Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.loop_depth == 0 => {
+                Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.shell_state.loop_depth == 0 => {
                     self.exit_code = 0;
                 }
                 // GNU expr.c: a fatal word-expansion error abandons the
@@ -933,9 +847,9 @@ impl Executor {
                 // `echo $((1/0)); echo same-line` never prints "same-line",
                 // the next line does).
                 Err(ExecuteError::ExpansionFailure(code))
-                    if self.loop_depth == 0
-                        && self.function_depth == 0
-                        && subshell_env.is_none()
+                    if self.shell_state.loop_depth == 0
+                        && self.shell_state.function_depth == 0
+                        && subshell_state.is_none()
                         && !self.inside_compound_condition.get() =>
                 {
                     self.exit_code = code;
@@ -996,7 +910,7 @@ impl Executor {
                 // fails inside the subshell the subshell exits with that
                 // status but the parent script continues. Catch the error at
                 // the subshell boundary instead of propagating it.
-                Err(ExecuteError::ExpansionFailure(code)) if subshell_env.is_some() => {
+                Err(ExecuteError::ExpansionFailure(code)) if subshell_state.is_some() => {
                     self.exit_code = code;
                     while index + 1 < ast.commands.len() && !ast.commands[index + 1].subshell_end {
                         index += 1;
@@ -1004,36 +918,8 @@ impl Executor {
                     if index + 1 < ast.commands.len() {
                         index += 1;
                     }
-                    if let Some((old_stdin, old_offset)) = subshell_stdin.take() {
-                        if old_stdin.is_empty() {
-                            self.env_vars.remove(FUNCTION_STDIN);
-                            self.env_vars.remove(FUNCTION_STDIN_OFFSET);
-                        } else {
-                            self.env_vars.insert(FUNCTION_STDIN.to_string(), old_stdin);
-                            self.env_vars
-                                .insert(FUNCTION_STDIN_OFFSET.to_string(), old_offset);
-                        }
-                    }
-                    if let Some(saved_env) = subshell_env.take() {
-                        self.restore_shell_env(saved_env);
-                    }
-                    if let Some(saved_pipestatus) = subshell_pipestatus.take() {
-                        self.pipestatus = saved_pipestatus;
-                    }
-                    if let Some(saved_depth) = subshell_depth.take() {
-                        self.subshell_depth.set(saved_depth);
-                    }
-                    if let Some(saved_dir) = subshell_cwd.take() {
-                        let _ = env::set_current_dir(saved_dir);
-                    }
-                    if let Some(saved_variables) = subshell_variables.take() {
-                        self.shell_state.variables = saved_variables;
-                    }
-                    if let Some(saved_positional) = subshell_positional.take() {
-                        self.set_positional_params(saved_positional);
-                    }
-                    if let Some(saved_loop_depth) = subshell_loop_depth.take() {
-                        self.loop_depth = saved_loop_depth;
+                    if let Some(saved_state) = subshell_state.take() {
+                        self.restore_flat_subshell(saved_state, subshell_cwd.take());
                     }
                     // A malformed subshell can leave the command list with
                     // no closing marker.  In that case there is no boundary
@@ -1051,7 +937,7 @@ impl Executor {
                     // the script (set-e1.sub), while `true && (exit 1)` and
                     // `! (exit 1)` contexts keep running.
                     if self.exit_code != 0
-                        && crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit")
+                        && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit")
                         && self.suppress_errexit == 0
                         && !command.inverted
                         && command.and_or().is_none()
@@ -1092,36 +978,8 @@ impl Executor {
                 // subshell (`( a[$bad]=v ); echo after` runs `after`).
                 self.evalerror_pending.set(false);
                 self.evalerror_line.set(None);
-                if let Some((old_stdin, old_offset)) = subshell_stdin.take() {
-                    if old_stdin.is_empty() {
-                        self.env_vars.remove(FUNCTION_STDIN);
-                        self.env_vars.remove(FUNCTION_STDIN_OFFSET);
-                    } else {
-                        self.env_vars.insert(FUNCTION_STDIN.to_string(), old_stdin);
-                        self.env_vars
-                            .insert(FUNCTION_STDIN_OFFSET.to_string(), old_offset);
-                    }
-                }
-                if let Some(saved_env) = subshell_env.take() {
-                    self.restore_shell_env(saved_env);
-                }
-                if let Some(saved_pipestatus) = subshell_pipestatus.take() {
-                    self.pipestatus = saved_pipestatus;
-                }
-                if let Some(saved_depth) = subshell_depth.take() {
-                    self.subshell_depth.set(saved_depth);
-                }
-                if let Some(saved_dir) = subshell_cwd.take() {
-                    let _ = env::set_current_dir(saved_dir);
-                }
-                if let Some(saved_variables) = subshell_variables.take() {
-                    self.shell_state.variables = saved_variables;
-                }
-                if let Some(saved_positional) = subshell_positional.take() {
-                    self.set_positional_params(saved_positional);
-                }
-                if let Some(saved_loop_depth) = subshell_loop_depth.take() {
-                    self.loop_depth = saved_loop_depth;
+                if let Some(saved_state) = subshell_state.take() {
+                    self.restore_flat_subshell(saved_state, subshell_cwd.take());
                 }
             }
 

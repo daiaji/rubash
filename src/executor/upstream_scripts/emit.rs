@@ -18,7 +18,7 @@ pub(super) fn normalize_crlf_bytes(bytes: &[u8]) -> Vec<u8> {
 
 impl Executor {
     pub(super) fn is_running_upstream_script(&self, script_name: &str) -> bool {
-        self.env_vars
+        self.shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some(script_name))
     }
@@ -30,7 +30,7 @@ impl Executor {
         output: &str,
         stream: UpstreamOutputStream,
     ) -> bool {
-        if self.env_vars.contains_key(done_key) || !self.is_running_upstream_script(script_name) {
+        if self.shell_state.env_vars.contains_key(done_key) || !self.is_running_upstream_script(script_name) {
             return false;
         }
 
@@ -39,7 +39,7 @@ impl Executor {
             UpstreamOutputStream::Stdout => print!("{output}"),
             UpstreamOutputStream::Stderr => eprint!("{output}"),
         }
-        self.env_vars.insert(done_key.to_string(), "1".to_string());
+        self.shell_state.env_vars.insert(done_key.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
@@ -50,13 +50,13 @@ impl Executor {
         script_name: &str,
         output: &[u8],
     ) -> bool {
-        if self.env_vars.contains_key(done_key) || !self.is_running_upstream_script(script_name) {
+        if self.shell_state.env_vars.contains_key(done_key) || !self.is_running_upstream_script(script_name) {
             return false;
         }
 
         let output = normalize_crlf_bytes(output);
         let _ = std::io::stdout().write_all(&output);
-        self.env_vars.insert(done_key.to_string(), "1".to_string());
+        self.shell_state.env_vars.insert(done_key.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }

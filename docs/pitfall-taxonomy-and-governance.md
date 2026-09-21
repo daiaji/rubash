@@ -209,6 +209,69 @@ stdio 载体路径的接线，需定向探针护航。
   单线程 spawn 假设、解锁线程化）；④ 后台/coproc 记账迁 FdTable + `fork_table`；
   ⑤ 12 探针转正为引擎差分测试。
 
+**S6 实施记录（2026-09-21，`master-fix` 分支）**：
+
+- `src/shell/state.rs` 扩为完整隔离边界：约 30 个语义字段（env_vars、aliases、
+  functions、function_def_* 三表、positional、pipestatus、local_*_scopes、
+  expanding_aliases、loop/function_depth、random_state、subshell_depth、
+  background_jobs、coproc_names、completion_specs、session_history 等）全部
+  移入 `ShellState`；Executor 只留 fd/进程资源与单命令瞬态。
+- 三处子壳路径（flat subshell region、嵌套 `( list )` 节点、命令替换
+  fresh-Executor）全部改为 `shell_state.clone()` 整快照恢复；两份手工清单
+  （7 项 / ~55 项）已删除。GNU 锚点：`execute_cmd.c:1576 execute_in_subshell`
+  ——fork 进程拷贝天然隔离全部语义状态。
+- 探针验证（WSL GNU 5.3.0 逐字节）：alias/function 定义、覆写、嵌套子壳均不
+  再泄漏；回归测试 `tests/issue_s6_subshell_state_isolation.rs`（8 例）。
+- 顺手拆分 E10A 码点双占用：`FAILED_SUBSCRIPT_SENTINEL` 迁至 U+E200（E100–E1FF
+  段已被 conditional/pattern.rs 的 BYTE_CHAR_BASE 字节编码占用）。
+- 基线暴露并修复一个 ab811d04 引入的回归：`word_level_quote_syntax` 门控正确化
+  后暴露了 `${x-word}` 默认值词在非双引号上下文被 `decode_double_quotes_in_
+  quoted_parameter_word` 误作 dq 句子解码（`o=${x-' '}` 存字面 `' '`、
+  `${f-'$HOME'}` 内 `$HOME` 被展开）。修法按 `subst.c:7663
+  parameter_brace_expand_word`：词按自身引号上下文展开——仅 DoubleQuoted/
+  HereDocument（Q_HERE_DOCUMENT 对 `${}` 词呈 dq 语义）走 dq 解码，非引号
+  上下文交回 walker 引号剥离。`embedded_mutations.rs` 通用 `\` 臂补非双引号
+  `'` → ANSI_C_QUOTE_MARKER 数据载体（`o=${c='q'}` → `'q'`）。
+  precedence 套件 +24 → 0，posixexp +2 → 0，quote/nquote/dstack/rhs-exp/
+  braces/new-exp/more-exp/posixexp2/exp 全部持平。
+- 已知残差（预存，非本次回归）：heredoc 体内 `${x-'q'}` 非 mut 路径
+  丢 heredoc 上下文（GNU 出 `'q'`，RB 出 `'q'`）；`declare -A 'a[$q]=v'`
+  空键接收 vs GNU bad-subscript。
+
+**台账修正记录（2026-09-22，`master-fix` 分支）**：
+
+- 用户复核发现 master `7e57003e` 上 `precedence`（40 行）与 `posixpipe`
+  （2 行）确定性分歧，而 9-21 台账记二者零差。根因查明：precedence 由
+  `ab811d04` 的 `${x-word}` 引号门控回归造成（已在 `6e29c031` 修复，非
+  pipeline stdin cursor 工作的副作用）；posixpipe 是 6-19 遗留的脚本名
+  硬编码 hack（`is_this_shell_posixpipe_time_count` 家族直接 `println!("4")`
+  并跳过管道），`tests/` 种子目录缺 `test-glue-functions` 等文件时套件
+  双侧同报 "No such file" 形成**假零差**掩盖了它——旧台账的 57 零差
+  因此作废。
+- 修复与真实缺口补齐：① 删除整个 posixpipe 硬编码 hack 族
+  （external_finish.rs/command_dispatch.rs/external_inner.rs/
+  pipeline_exec.rs/types.rs），真实管道机制实测零差；② `kill -n9`/
+  `-sNAME` 黏连信号规格（GNU `builtins/kill.def:134-142`）——缺失曾使
+  `jobs2.sub` 的 `kill -9` 无效、`wait` 空挂；③ `set -m` 映射 monitor
+  选项（support_names.rs `short_set_flag_option` 缺 'm' 项）；④ `fg`/`bg`
+  两级作业控制检查——shell 级 monitor 关→"no job control"，作业级
+  `J_JOBCONTROL` 未置→"job N started without job control"
+  （`builtins/fg_bg.def:108-113,154-160`，`JobEntry.job_control` 按注册时
+  monitor 状态打标）；⑤ `${THIS_SH}` 同进程子壳作业表进程边界
+  （`execute_cmd.c:6139-6233`：exec 模型清表、fork 模型快照恢复，
+  `background_children` 句柄停泊防子壳收割父进程）。
+- **修正后诚实台账：55 零差 / 799 原始行**；其中 `jobs` 31 + `history`
+  173 = 204 行为 harness 40s 超时双侧截断（GNU 侧 rc=124/137 同样被杀，
+  jobs.tests 含真实秒级 sleep、history 在 `env -i` 下交互挂起），真实
+  语义差 ≈595 行 / 26 套件。零差名单较作废台账：−nameref(1, coproc
+  时序噪音)、−posixexp(1)、−procsub(13, 种子补齐后暴露真差)、+mapfile(0)。
+- `jobs` 套件另观测到一次时序性静默退出（rb 进程于 `wait` 边界消失、
+  tasklist 无残留、孤儿 `sleep.exe` 存活），疑似后台子进程生命周期竞态，
+  与本次修复无关，需后续专项调查。
+- harness 加固：`scripts/true-baseline.sh` 改为每轮全量 gap-fill 种子
+  同步 + ELF magic 守卫（`recho` 二进制不再被 `tr` 误伤；`file` 对高位
+  字节文本误判 data，故改用 od 魔数判定）。
+
 ### 3.7 双层测试口径（引擎层 + 产品层）
 
 **真正的 shell 层是 niubash**（`D:/repo/niubash-*`，crate `niubash`，依赖

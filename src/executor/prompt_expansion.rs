@@ -23,7 +23,7 @@ impl Executor {
             return None;
         }
 
-        let target_expr = self.env_vars.get(ref_name)?;
+        let target_expr = self.shell_state.env_vars.get(ref_name)?;
         let values = self.indirect_target_values(target_expr);
         if values.is_empty() {
             return Some(String::new());
@@ -73,14 +73,14 @@ impl Executor {
             return self
                 .parameter_array_storage(array_name)
                 .map(|value| {
-                    if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+                    if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved) {
                         // GNU assoc_reference iterates the hash table in
                         // bucket order (hashlib.c), not storage order —
                         // `${!aref}` with aref=`assoc[@]` must match
                         // `${assoc[@]}` (quotearray4.sub).
                         assoc_hash_ordered_values(
                             &value,
-                            assoc_nbuckets(&self.env_vars, &resolved),
+                            assoc_nbuckets(&self.shell_state.env_vars, &resolved),
                         )
                     } else {
                         array_values(&value)
@@ -93,10 +93,10 @@ impl Executor {
             return vec![value];
         }
 
-        self.env_vars
+        self.shell_state.env_vars
             .get(target_expr)
             .map(|value| {
-                if is_array_storage(value) || is_marked_array_var(&self.env_vars, target_expr) {
+                if is_array_storage(value) || is_marked_array_var(&self.shell_state.env_vars, target_expr) {
                     array_value_at(value, 0).into_iter().collect()
                 } else {
                     vec![value.clone()]
@@ -137,22 +137,22 @@ impl Executor {
                 Some('A') => output.push_str(&self.prompt_time("%H:%M")),
                 Some('d') => output.push_str(&self.prompt_time("%a %b %d")),
                 Some('D') => output.push_str(&self.decode_prompt_date_escape(&mut chars)),
-                Some('u') => output.push_str(&prompt_username(&self.env_vars)),
-                Some('h') => output.push_str(&prompt_hostname(&self.env_vars, false)),
-                Some('H') => output.push_str(&prompt_hostname(&self.env_vars, true)),
+                Some('u') => output.push_str(&prompt_username(&self.shell_state.env_vars)),
+                Some('h') => output.push_str(&prompt_hostname(&self.shell_state.env_vars, false)),
+                Some('H') => output.push_str(&prompt_hostname(&self.shell_state.env_vars, true)),
                 Some('w') => output.push_str(&self.prompt_working_directory(false)),
                 Some('W') => output.push_str(&self.prompt_working_directory(true)),
-                Some('l') => output.push_str(&prompt_terminal_basename(&self.env_vars)),
+                Some('l') => output.push_str(&prompt_terminal_basename(&self.shell_state.env_vars)),
                 Some('s') => output.push_str("bash"),
-                Some('v') => output.push_str(&prompt_short_version(&self.env_vars)),
-                Some('V') => output.push_str(&prompt_release_version(&self.env_vars)),
+                Some('v') => output.push_str(&prompt_short_version(&self.shell_state.env_vars)),
+                Some('V') => output.push_str(&prompt_release_version(&self.shell_state.env_vars)),
                 Some('j') => output.push_str(&self.prompt_job_count().to_string()),
                 // GNU parse.y: the `\!' escape always renders the prompt
                 // history number (no POSIX gate here; the POSIX rule governs
                 // only a bare `!').
                 Some('!') => output.push_str(&self.prompt_history_number().to_string()),
                 Some('#') => output.push_str(&self.prompt_command_number().to_string()),
-                Some('$') => output.push(prompt_dollar(&self.env_vars)),
+                Some('$') => output.push(prompt_dollar(&self.shell_state.env_vars)),
                 Some('\\') => output.push('\\'),
                 Some(marker @ ('[' | ']')) => {
                     // GNU parse.y:6609-6622: \[ and \] emit the readline
@@ -160,8 +160,8 @@ impl Executor {
                     // when the line editor is active; with no_line_editing (a
                     // script without `set -o emacs`/`vi`) they are dropped
                     // entirely.
-                    if crate::builtins::set::shell_option_enabled(&self.env_vars, "emacs")
-                        || crate::builtins::set::shell_option_enabled(&self.env_vars, "vi")
+                    if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "emacs")
+                        || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "vi")
                     {
                         output.push(if marker == '[' { '\x01' } else { '\x02' });
                     }
@@ -254,8 +254,8 @@ impl Executor {
     }
 
     pub(in crate::executor) fn prompt_working_directory(&self, basename_only: bool) -> String {
-        let pwd = self.env_vars.get("PWD").cloned().unwrap_or_default();
-        let rendered = if let Some(home) = self.env_vars.get("HOME") {
+        let pwd = self.shell_state.env_vars.get("PWD").cloned().unwrap_or_default();
+        let rendered = if let Some(home) = self.shell_state.env_vars.get("HOME") {
             if pwd == *home {
                 "~".to_string()
             } else if let Some(rest) = pwd.strip_prefix(&format!("{home}/")) {
@@ -301,7 +301,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn prompt_time(&self, format: &str) -> String {
-        crate::builtins::printf::time::format_current_time(format, &self.env_vars)
+        crate::builtins::printf::time::format_current_time(format, &self.shell_state.env_vars)
     }
 
     fn decode_prompt_date_escape<I>(&self, chars: &mut std::iter::Peekable<I>) -> String
@@ -328,11 +328,11 @@ impl Executor {
         if value.contains('=') {
             return value.to_string();
         }
-        tilde_expand::expand_assignment_value(value, &self.env_vars)
+        tilde_expand::expand_assignment_value(value, &self.shell_state.env_vars)
     }
 
     pub(in crate::executor) fn home_value(&self) -> String {
-        tilde_expand::home_value(&self.env_vars)
+        tilde_expand::home_value(&self.shell_state.env_vars)
     }
 
     pub(in crate::executor) fn shell_option_flags(&self) -> String {
@@ -360,25 +360,25 @@ impl Executor {
             ('P', "physical"),
             ('T', "functrace"),
         ] {
-            if crate::builtins::set::shell_option_enabled(&self.env_vars, option) {
+            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, option) {
                 flags.push(flag);
             }
         }
         // Bash exposes `c` in `$-` while executing a command string passed
         // with `-c`; script-file and stdin execution do not set it.
-        if self.env_vars.contains_key("BASH_EXECUTION_STRING") {
+        if self.shell_state.env_vars.contains_key("BASH_EXECUTION_STRING") {
             flags.push('c');
         }
         flags
     }
 
     pub(in crate::executor) fn noexec_enabled(&self) -> bool {
-        crate::builtins::set::shell_option_enabled(&self.env_vars, "noexec")
+        crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noexec")
     }
 
     pub(in crate::executor) fn errexit_enabled(&self) -> bool {
-        self.env_vars.get("__RUBASH_ERREXIT").map(String::as_str) == Some("1")
-            || crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit")
+        self.shell_state.env_vars.get("__RUBASH_ERREXIT").map(String::as_str) == Some("1")
+            || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit")
     }
 
     pub(in crate::executor) fn errexit_is_active(&self) -> bool {
@@ -396,15 +396,15 @@ impl Executor {
     }
 
     pub(in crate::executor) fn xtrace_enabled(&self) -> bool {
-        self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1")
-            || crate::builtins::set::shell_option_enabled(&self.env_vars, "xtrace")
+        self.shell_state.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1")
+            || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "xtrace")
     }
 
     /// Expanded PS4 prefix for `set -x` tracing (Bash prints the expanded
     /// value of PS4 before each traced command). Defaults to `+ ` like Bash.
     pub(in crate::executor) fn xtrace_prefix(&self) -> String {
         let ps4 = self
-            .env_vars
+            .shell_state.env_vars
             .get("PS4")
             .cloned()
             .unwrap_or_else(|| "+ ".to_string());

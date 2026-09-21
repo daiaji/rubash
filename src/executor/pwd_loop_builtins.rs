@@ -23,7 +23,7 @@ impl Executor {
         E: Write,
     {
         if args.is_empty() || args.first().map(String::as_str) == Some("-L") {
-            if let Some(pwd) = self.env_vars.get("PWD") {
+            if let Some(pwd) = self.shell_state.env_vars.get("PWD") {
                 if pwd.starts_with('/') {
                     writeln!(stdout, "{pwd}")?;
                     return Ok(0);
@@ -33,7 +33,7 @@ impl Executor {
 
         crate::builtins::pwd::execute_with_env_and_io(
             args.iter().map(String::as_str),
-            &self.env_vars,
+            &self.shell_state.env_vars,
             stdout,
             stderr,
         )
@@ -45,7 +45,7 @@ impl Executor {
         kind: LoopControlKind,
     ) -> Result<(), ExecuteError> {
         let mut stderr = Vec::new();
-        if self.loop_depth == 0 {
+        if self.shell_state.loop_depth == 0 {
             // GNU break.def check_loop_level (BREAK_COMPLAINS): the
             // out-of-loop diagnostic is suppressed in posix mode; the status
             // stays zero either way (func5.sub posix testfunc `break`).
@@ -67,7 +67,7 @@ impl Executor {
 
         match loop_control_level(&cmd.words[1..]) {
             Ok(level) => {
-                let level = level.min(self.loop_depth);
+                let level = level.min(self.shell_state.loop_depth);
                 match kind {
                     LoopControlKind::Break => Err(ExecuteError::Break(level)),
                     LoopControlKind::Continue => Err(ExecuteError::Continue(level)),
@@ -100,7 +100,7 @@ impl Executor {
                 // of 0 effectively breaks the loop (the rest of the body is
                 // skipped and the loop does not advance to the next
                 // iteration), so both cases return Break.
-                let level = self.loop_depth;
+                let level = self.shell_state.loop_depth;
                 Err(ExecuteError::Break(level))
             }
             Err(LoopControlError::NotNumeric(value)) => {
@@ -142,12 +142,12 @@ impl Executor {
             // action uses the current $? (trap9.sub: handler's return sees
             // setexit's 111, not the pre-trap status).
             let action_depth = self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_SIGNAL_TRAP_DEPTH")
                 .and_then(|value| value.parse::<usize>().ok());
-            let in_trap_action = action_depth == Some(self.function_depth);
+            let in_trap_action = action_depth == Some(self.shell_state.function_depth);
             if in_trap_action {
-                self.env_vars
+                self.shell_state.env_vars
                     .get("__RUBASH_SIGNAL_TRAP_STATUS")
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(self.exit_code)
@@ -156,8 +156,8 @@ impl Executor {
             }
         };
 
-        let in_function = self.function_depth > 0;
-        let in_source = self.env_vars.get("__RUBASH_IN_SOURCE").map(String::as_str) == Some("1");
+        let in_function = self.shell_state.function_depth > 0;
+        let in_source = self.shell_state.env_vars.get("__RUBASH_IN_SOURCE").map(String::as_str) == Some("1");
         if in_function || in_source {
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             return Err(ExecuteError::Return(status));

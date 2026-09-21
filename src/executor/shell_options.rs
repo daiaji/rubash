@@ -5,7 +5,7 @@ use crate::executor::glob::{pathname_expand_word, PathnameExpansion};
 impl Executor {
     pub(in crate::executor) fn open_input_redirect(&self, target: &str) -> io::Result<File> {
         if is_null_device(target) {
-            return File::open(shell_path_to_windows("/dev/null", &self.env_vars));
+            return File::open(shell_path_to_windows("/dev/null", &self.shell_state.env_vars));
         }
         // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
         // the OS fd-alias layer — a dup of fd N, not a filesystem path.
@@ -15,7 +15,7 @@ impl Executor {
         if let Some(fd) = dev_stdio_redirect_fd(target) {
             return self.open_fd_read_endpoint(fd, target);
         }
-        File::open(shell_path_to_windows(target, &self.env_vars))
+        File::open(shell_path_to_windows(target, &self.shell_state.env_vars))
             .map_err(|e| crate::posix_errors::path_error(target, e))
     }
 
@@ -62,11 +62,11 @@ impl Executor {
         if is_null_device(target) {
             return OpenOptions::new()
                 .write(true)
-                .open(shell_path_to_windows("/dev/null", &self.env_vars));
+                .open(shell_path_to_windows("/dev/null", &self.shell_state.env_vars));
         }
         let target = self.redirect_output_path_target(target);
-        let path = shell_path_to_windows(&target, &self.env_vars);
-        if !clobber && crate::builtins::set::shell_option_enabled(&self.env_vars, "noclobber") {
+        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+        if !clobber && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber") {
             // GNU wording (bash builtins/common.c): "<target>: cannot
             // overwrite existing file"; the redirect machinery prints the
             // payload after its script/line prefix.
@@ -93,7 +93,7 @@ impl Executor {
             return target.to_string();
         }
 
-        match pathname_expand_word(target, &self.env_vars) {
+        match pathname_expand_word(target, &self.shell_state.env_vars) {
             PathnameExpansion::Matches(matches) if matches.len() == 1 => matches[0].clone(),
             _ => target.to_string(),
         }
@@ -132,7 +132,7 @@ impl Executor {
             return OpenOptions::new()
                 .write(true)
                 .append(true)
-                .open(shell_path_to_windows("/dev/null", &self.env_vars));
+                .open(shell_path_to_windows("/dev/null", &self.shell_state.env_vars));
         }
         OpenOptions::new().create(true).append(true).open(path)
     }
@@ -302,51 +302,51 @@ impl Executor {
             for flag in flags.chars() {
                 match (flag, enabled) {
                     ('e', true) => {
-                        self.env_vars
+                        self.shell_state.env_vars
                             .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(&mut self.env_vars, "errexit", true);
+                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "errexit", true);
                     }
                     ('e', false) => {
-                        self.env_vars.remove("__RUBASH_ERREXIT");
+                        self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
                         crate::builtins::set::set_shell_option(
-                            &mut self.env_vars,
+                            &mut self.shell_state.env_vars,
                             "errexit",
                             false,
                         );
                     }
                     ('x', true) => {
-                        self.env_vars
+                        self.shell_state.env_vars
                             .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", true);
+                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "xtrace", true);
                     }
                     ('x', false) => {
-                        self.env_vars.remove("__RUBASH_XTRACE");
-                        crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", false);
+                        self.shell_state.env_vars.remove("__RUBASH_XTRACE");
+                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "xtrace", false);
                     }
                     ('u', _) => {
                         crate::builtins::set::set_shell_option(
-                            &mut self.env_vars,
+                            &mut self.shell_state.env_vars,
                             "nounset",
                             enabled,
                         );
                     }
                     ('C', _) => {
                         crate::builtins::set::set_shell_option(
-                            &mut self.env_vars,
+                            &mut self.shell_state.env_vars,
                             "noclobber",
                             enabled,
                         );
                     }
                     ('f', _) => {
                         crate::builtins::set::set_shell_option(
-                            &mut self.env_vars,
+                            &mut self.shell_state.env_vars,
                             "noglob",
                             enabled,
                         );
                     }
                     ('n', _) => {
                         crate::builtins::set::set_shell_option(
-                            &mut self.env_vars,
+                            &mut self.shell_state.env_vars,
                             "noexec",
                             enabled,
                         );
@@ -354,7 +354,7 @@ impl Executor {
                     (flag, _) => {
                         if let Some(option) = short_set_flag_option(flag) {
                             crate::builtins::set::set_shell_option(
-                                &mut self.env_vars,
+                                &mut self.shell_state.env_vars,
                                 option,
                                 enabled,
                             );
@@ -378,17 +378,17 @@ impl Executor {
             let arg = &args[index];
             if arg == "--" {
                 self.apply_set_flag_updates(&flag_updates);
-                self.dollar_vars_changed_by_set = true;
+                self.shell_state.dollar_vars_changed_by_set = true;
                 self.set_positional_params(args[index + 1..].to_vec());
                 return true;
             }
 
             if arg == "-" {
                 self.apply_set_flag_updates(&flag_updates);
-                self.env_vars.remove("__RUBASH_XTRACE");
-                crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", false);
+                self.shell_state.env_vars.remove("__RUBASH_XTRACE");
+                crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "xtrace", false);
                 if index + 1 < args.len() {
-                    self.dollar_vars_changed_by_set = true;
+                    self.shell_state.dollar_vars_changed_by_set = true;
                     self.set_positional_params(args[index + 1..].to_vec());
                 }
                 return true;
@@ -396,7 +396,7 @@ impl Executor {
 
             let Some(prefix) = arg.chars().next().filter(|ch| matches!(ch, '-' | '+')) else {
                 self.apply_set_flag_updates(&flag_updates);
-                self.dollar_vars_changed_by_set = true;
+                self.shell_state.dollar_vars_changed_by_set = true;
                 self.set_positional_params(args[index..].to_vec());
                 return true;
             };
@@ -404,7 +404,7 @@ impl Executor {
             let flags = &arg[1..];
             if flags.is_empty() {
                 self.apply_set_flag_updates(&flag_updates);
-                self.dollar_vars_changed_by_set = true;
+                self.shell_state.dollar_vars_changed_by_set = true;
                 self.set_positional_params(args[index + 1..].to_vec());
                 return true;
             }
@@ -424,12 +424,12 @@ impl Executor {
                 // reported instead of being silently applied here.
                 if option_name == "restricted"
                     && prefix == '+'
-                    && crate::builtins::set::shell_option_enabled(&self.env_vars, "restricted")
+                    && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "restricted")
                 {
                     return false;
                 }
                 let enabled = prefix == '-';
-                crate::builtins::set::set_shell_option(&mut self.env_vars, option_name, enabled);
+                crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, option_name, enabled);
                 if option_name == "ignoreeof" {
                     // set.def:388-399 set_ignoreeof binds/unbinds IGNOREEOF —
                     // mirror the env write into the typed owner expansion
@@ -444,7 +444,7 @@ impl Executor {
                     }
                 }
                 if option_name == "posix" {
-                    self.env_vars.insert(
+                    self.shell_state.env_vars.insert(
                         "__RUBASH_POSIX_MODE".to_string(),
                         if enabled { "1" } else { "0" }.to_string(),
                     );
@@ -454,29 +454,29 @@ impl Executor {
                     // or the noninteractive default (off).
                     if enabled {
                         let prior = self.alias_expansion_enabled();
-                        self.env_vars.insert(
+                        self.shell_state.env_vars.insert(
                             "__RUBASH_POSIX_SAVED_EXPAND_ALIASES".to_string(),
                             if prior { "1" } else { "0" }.to_string(),
                         );
                         crate::builtins::shopt::set_option(
-                            &mut self.env_vars,
+                            &mut self.shell_state.env_vars,
                             "expand_aliases",
                             true,
                         );
                     } else {
                         match self
-                            .env_vars
+                            .shell_state.env_vars
                             .remove("__RUBASH_POSIX_SAVED_EXPAND_ALIASES")
                         {
                             Some(saved) => crate::builtins::shopt::set_option(
-                                &mut self.env_vars,
+                                &mut self.shell_state.env_vars,
                                 "expand_aliases",
                                 saved == "1",
                             ),
                             // No saved state: noninteractive default is off
                             // (interactive_shell is 0 here).
                             None => crate::builtins::shopt::set_option(
-                                &mut self.env_vars,
+                                &mut self.shell_state.env_vars,
                                 "expand_aliases",
                                 false,
                             ),
@@ -507,44 +507,44 @@ impl Executor {
             for flag in flags.chars() {
                 match (flag, enabled) {
                     ('e', true) => {
-                        self.env_vars
+                        self.shell_state.env_vars
                             .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(&mut self.env_vars, "errexit", true);
+                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "errexit", true);
                     }
                     ('e', false) => {
-                        self.env_vars.remove("__RUBASH_ERREXIT");
+                        self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
                         crate::builtins::set::set_shell_option(
-                            &mut self.env_vars,
+                            &mut self.shell_state.env_vars,
                             "errexit",
                             false,
                         );
                     }
                     ('x', true) => {
-                        self.env_vars
+                        self.shell_state.env_vars
                             .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", true);
+                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "xtrace", true);
                     }
                     ('x', false) => {
-                        self.env_vars.remove("__RUBASH_XTRACE");
-                        crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", false);
+                        self.shell_state.env_vars.remove("__RUBASH_XTRACE");
+                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "xtrace", false);
                     }
                     ('u', _) => {
                         crate::builtins::set::set_shell_option(
-                            &mut self.env_vars,
+                            &mut self.shell_state.env_vars,
                             "nounset",
                             enabled,
                         );
                     }
                     ('C', _) => {
                         crate::builtins::set::set_shell_option(
-                            &mut self.env_vars,
+                            &mut self.shell_state.env_vars,
                             "noclobber",
                             enabled,
                         );
                     }
                     ('f', _) => {
                         crate::builtins::set::set_shell_option(
-                            &mut self.env_vars,
+                            &mut self.shell_state.env_vars,
                             "noglob",
                             enabled,
                         );
@@ -552,7 +552,7 @@ impl Executor {
                     (flag, _) => {
                         if let Some(option) = short_set_flag_option(flag) {
                             crate::builtins::set::set_shell_option(
-                                &mut self.env_vars,
+                                &mut self.shell_state.env_vars,
                                 option,
                                 enabled,
                             );
@@ -569,7 +569,7 @@ impl Executor {
 
     pub(in crate::executor) fn expand_case_word(&mut self, word: &str) -> String {
         let mut expanded =
-            if let Some(value) = tilde_expand::expand_word_prefix(word, &self.env_vars) {
+            if let Some(value) = tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars) {
                 value
             } else {
                 self.expand_word(word)
@@ -601,12 +601,12 @@ impl Executor {
             return;
         };
         let same_buffer = self
-            .env_vars
+            .shell_state.env_vars
             .get(FUNCTION_STDIN)
             .map(|text| Self::function_stdin_fingerprint(text) == fingerprint)
             .unwrap_or(false);
         if same_buffer {
-            self.env_vars
+            self.shell_state.env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), offset.to_string());
         }
     }
@@ -617,12 +617,12 @@ impl Executor {
     /// FUNCTION_STDIN_OFFSET cursor for shell reads; feeding a child process
     /// must hand over only the unread tail.
     pub(in crate::executor) fn function_stdin_remaining(&self) -> Option<String> {
-        let input = self.env_vars.get(FUNCTION_STDIN)?;
+        let input = self.shell_state.env_vars.get(FUNCTION_STDIN)?;
         if input.is_empty() {
             return None;
         }
         let offset = self
-            .env_vars
+            .shell_state.env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0)
@@ -717,11 +717,11 @@ impl Executor {
             // The child drains the stream from the cursor onward; GNU's
             // shared fd 0 means a subsequent `read` sees EOF.
             let end = self
-                .env_vars
+                .shell_state.env_vars
                 .get(FUNCTION_STDIN)
                 .map(|input| input.len())
                 .unwrap_or(0);
-            self.env_vars
+            self.shell_state.env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), end.to_string());
         }
         result
@@ -847,7 +847,7 @@ impl Executor {
                     return Some(input);
                 }
                 if source_fd == 0 {
-                    if let Some(input) = self.env_vars.get(FUNCTION_STDIN) {
+                    if let Some(input) = self.shell_state.env_vars.get(FUNCTION_STDIN) {
                         return Some(input.clone());
                     }
                 }
@@ -862,7 +862,7 @@ impl Executor {
                 }
                 return None;
             }
-            let path = shell_path_to_windows(&target, &self.env_vars);
+            let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
             if redirect.append {
                 let _ = OpenOptions::new()
                     .create(true)

@@ -32,7 +32,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::setattr::export_with_io(
             args.iter().map(String::as_str),
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
         )?;
@@ -76,13 +76,13 @@ impl Executor {
             let (raw_name, _) = arg.split_once('=').unwrap_or((arg, ""));
             let name = raw_name.strip_suffix('+').unwrap_or(raw_name);
             let (base, _) = assignment_name_and_append(name);
-            if is_marked_var(&self.env_vars, ARRAY_VARS, base)
-                || is_marked_var(&self.env_vars, ASSOC_VARS, base)
-                || is_marked_var(&self.env_vars, NAMEREF_VARS, base)
+            if is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, base)
+                || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base)
+                || is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base)
             {
                 continue;
             }
-            match self.env_vars.get(base) {
+            match self.shell_state.env_vars.get(base) {
                 Some(value) => match self.shell_state.variables.get_mut(base) {
                     Some(variable) => {
                         variable.value = crate::shell::ShellValue::Scalar(value.clone());
@@ -142,10 +142,10 @@ impl Executor {
         }
 
         if print && index >= args.len() {
-            let mut names = marked_env_names(&self.env_vars, EXPORTED_FUNCTIONS);
+            let mut names = marked_env_names(&self.shell_state.env_vars, EXPORTED_FUNCTIONS);
             names.sort();
             for name in names {
-                if let Some(body) = self.functions.get(&name) {
+                if let Some(body) = self.shell_state.functions.get(&name) {
                     self.write_function_definition(&name, &body.commands, true, stdout)?;
                 }
             }
@@ -154,7 +154,7 @@ impl Executor {
 
         let mut status = 0;
         for name in &args[index..] {
-            if !self.functions.contains_key(name) {
+            if !self.shell_state.functions.contains_key(name) {
                 writeln!(
                     stderr,
                     "{}export: {name}: not a function",
@@ -173,9 +173,9 @@ impl Executor {
                 continue;
             }
             if unset {
-                unmark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
+                unmark_env_name(&mut self.shell_state.env_vars, EXPORTED_FUNCTIONS, name);
             } else {
-                mark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
+                mark_env_name(&mut self.shell_state.env_vars, EXPORTED_FUNCTIONS, name);
             }
         }
 

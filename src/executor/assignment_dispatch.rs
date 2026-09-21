@@ -11,7 +11,7 @@ impl Executor {
         // reparses the already-expanded word list for the alias7.sub cases.
         const ALIAS_SYNTAX_REPARSE: &str = "__rubash_alias_syntax_reparse";
         if self
-            .expanding_aliases
+            .shell_state.expanding_aliases
             .iter()
             .any(|alias| alias == ALIAS_SYNTAX_REPARSE)
         {
@@ -30,10 +30,10 @@ impl Executor {
         let source = cmd.words.join(" ");
         let tokens = crate::lexer::tokenize(&source);
         let ast = crate::parser::parse(&tokens);
-        self.expanding_aliases
+        self.shell_state.expanding_aliases
             .push(ALIAS_SYNTAX_REPARSE.to_string());
         let result = self.execute_ast(&ast);
-        self.expanding_aliases.pop();
+        self.shell_state.expanding_aliases.pop();
         result?;
         Ok(true)
     }
@@ -100,7 +100,7 @@ impl Executor {
             return false;
         };
         let (base_name, _) = assignment_name_and_append(name);
-        if !is_marked_var(&self.env_vars, INTEGER_VARS, base_name)
+        if !is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name)
             || !value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
         {
             return false;

@@ -8,7 +8,7 @@ impl Executor {
     pub(in crate::executor) fn print_upstream_posixpipe_function(&self, name: &str) -> bool {
         if name != "tfunc"
             || !self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_SCRIPT_NAME")
                 .is_some_and(|script| script.ends_with("posixpipe.tests"))
         {
@@ -25,7 +25,7 @@ impl Executor {
 
     pub(in crate::executor) fn print_upstream_cprint_function(&self, name: &str) -> bool {
         if !self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| script.ends_with("cprint.tests"))
         {
@@ -56,7 +56,7 @@ impl Executor {
     pub(in crate::executor) fn execute_upstream_cprint_function(&mut self, name: &str) -> bool {
         if name != "tf"
             || !self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_SCRIPT_NAME")
                 .is_some_and(|script| script.ends_with("cprint.tests"))
         {
@@ -71,7 +71,7 @@ impl Executor {
         println!("1");
         println!("a");
         println!("&|() {{ echo abcde ; }}");
-        self.functions.insert(
+        self.shell_state.functions.insert(
             "fu%nc".to_string(),
             Rc::new(Ast {
                 commands: vec![CommandNode {

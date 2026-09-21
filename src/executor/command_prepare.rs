@@ -236,12 +236,12 @@ impl Executor {
             if self.parameter_bad_substitution.replace(false) {
                 if self.posix_mode_enabled()
                     && self
-                        .env_vars
+                        .shell_state.env_vars
                         .get("__RUBASH_INTERACTIVE")
                         .map(String::as_str)
                         != Some("1")
                 {
-                    let code = if self.env_vars.get("__RUBASH_IS_C").is_some() {
+                    let code = if self.shell_state.env_vars.get("__RUBASH_IS_C").is_some() {
                         127
                     } else {
                         1
@@ -429,7 +429,7 @@ impl Executor {
             return marks;
         };
         if !crate::builtins::arrayref::is_arrayref_builtin(name)
-            || (!saw_command && self.functions.contains_key(name.as_str()))
+            || (!saw_command && self.shell_state.functions.contains_key(name.as_str()))
         {
             return marks;
         }
@@ -605,7 +605,7 @@ impl Executor {
                         materialize_expanded_command_word(word_text).replace('\x17', "'");
                     words.push(remark(materialized));
                 } else {
-                    match pathname_expand_word(word_text, &self.env_vars) {
+                    match pathname_expand_word(word_text, &self.shell_state.env_vars) {
                         PathnameExpansion::Matches(matches) => words.extend(
                             matches
                                 .into_iter()
@@ -701,7 +701,7 @@ impl Executor {
         };
         Some(split_expanded_fragments(
             &expanded_fragments,
-            self.env_vars.get("IFS").map(String::as_str),
+            self.shell_state.env_vars.get("IFS").map(String::as_str),
             policy,
         ))
     }
@@ -804,7 +804,7 @@ impl Executor {
                 raw[2..raw.len() - 1]
                     .split_whitespace()
                     .next()
-                    .is_some_and(|name| self.functions.contains_key(name))
+                    .is_some_and(|name| self.shell_state.functions.contains_key(name))
             })
         {
             let context = scan_substitution_spans(raw_substitution)
@@ -816,7 +816,7 @@ impl Executor {
             if self.splits_unquoted_expanded_word(cmd, index, &expanded) {
                 return field_split_escaped_ifs(
                     &expanded,
-                    self.env_vars.get("IFS").map(String::as_str),
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                 );
             }
             return vec![expanded];
@@ -861,7 +861,7 @@ impl Executor {
             if word_is_unquoted_array_list_expansion(word) {
                 return field_split_array_values_with_ifs(
                     values,
-                    self.env_vars.get("IFS").map(String::as_str),
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                 );
             }
             return values;
@@ -870,8 +870,8 @@ impl Executor {
         // (quoted `"$@"` is handled by quoted_positional_at_word_values_with_raw).
         if word == "$@" && !raw_word_is_quoted(raw) {
             return field_split_positional_values_with_ifs(
-                self.positional_params.clone(),
-                self.env_vars.get("IFS").map(String::as_str),
+                self.shell_state.positional_params.clone(),
+                self.shell_state.env_vars.get("IFS").map(String::as_str),
             );
         }
         // Unquoted `$*` with a set-empty IFS: Posix interp 888 dispatches
@@ -883,15 +883,15 @@ impl Executor {
         // `set -- ' A ' ' B '`).
         if word == "${*}"
             && !raw_word_is_quoted(raw)
-            && self.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
+            && self.shell_state.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
         {
-            return self.positional_params.clone();
+            return self.shell_state.positional_params.clone();
         }
         if word == "$*"
             && !raw_word_is_quoted(raw)
-            && self.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
+            && self.shell_state.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
         {
-            return self.positional_params.clone();
+            return self.shell_state.positional_params.clone();
         }
         if let Some(values) =
             self.quoted_positional_at_word_values_with_raw(word, raw, cmd.word_kinds.get(index))
@@ -910,7 +910,7 @@ impl Executor {
             {
                 return field_split_positional_values_with_ifs(
                     values,
-                    self.env_vars.get("IFS").map(String::as_str),
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                 );
             }
             return values;
@@ -1034,7 +1034,7 @@ impl Executor {
                 if let Some(prefix) = body.strip_suffix('@') {
                     if !prefix.is_empty() && is_shell_name(prefix) {
                         let mut names: Vec<String> = self
-                            .env_vars
+                            .shell_state.env_vars
                             .keys()
                             .filter(|name| is_shell_name(name) && name.starts_with(prefix))
                             .cloned()
@@ -1056,7 +1056,7 @@ impl Executor {
         // Only applied when IFS has non-whitespace characters and the word
         // has unquoted expansions (parameter or command substitution).
         let ifs_has_non_whitespace = self
-            .env_vars
+            .shell_state.env_vars
             .get("IFS")
             .map(|ifs| ifs.chars().any(|ch| !matches!(ch, ' ' | '\t' | '\n')))
             .unwrap_or(false);
@@ -1069,7 +1069,7 @@ impl Executor {
             });
         let marked_word;
         let word_to_expand: &str = if needs_ifs_marking {
-            let ifs = self.env_vars.get("IFS").map(String::as_str).unwrap_or("");
+            let ifs = self.shell_state.env_vars.get("IFS").map(String::as_str).unwrap_or("");
             marked_word = mark_literal_ifs_chars(word, ifs);
             &marked_word
         } else {
@@ -1129,7 +1129,7 @@ impl Executor {
                     // is expanded once, verbatim).
                     let name = assignment.name.as_str();
                     let raw_subscript = assignment.subscript_metadata.raw.as_str();
-                    let associative = is_marked_var(&self.env_vars, ASSOC_VARS, name)
+                    let associative = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
                         || self.is_assoc_parameter_array(name);
                     if associative {
                         let key = self.expand_subscript_string(raw_subscript);
@@ -1208,7 +1208,7 @@ impl Executor {
             // field_split_escaped_ifs read it as an escaped separator and
             // stripped the backslash (a + b). Escaping belongs to the lexer,
             // not to parameter-expansion results.
-            field_split_values_with_ifs(&decoded, self.env_vars.get("IFS").map(String::as_str))
+            field_split_values_with_ifs(&decoded, self.shell_state.env_vars.get("IFS").map(String::as_str))
         } else {
             vec![strip_ifs_protection_markers(&expanded)]
         }
@@ -1238,18 +1238,18 @@ impl Executor {
         var_name: &str,
     ) -> Option<(Vec<String>, bool)> {
         if var_name == "@" {
-            return Some((self.positional_params.clone(), true));
+            return Some((self.shell_state.positional_params.clone(), true));
         }
         if var_name == "*" {
-            return Some((self.positional_params.clone(), false));
+            return Some((self.shell_state.positional_params.clone(), false));
         }
         let (base, is_at) = var_name
             .strip_suffix("[@]")
             .map(|base| (base, true))
             .or_else(|| var_name.strip_suffix("[*]").map(|base| (base, false)))?;
         let storage = self.parameter_array_storage(base)?;
-        let values = if is_marked_var(&self.env_vars, ASSOC_VARS, base) {
-            assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, base))
+        let values = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base) {
+            assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.shell_state.env_vars, base))
         } else {
             array_values(&storage)
         };
@@ -1422,22 +1422,22 @@ impl Executor {
         // line). A null IFS leaves $@ on the per-parameter path below,
         // which already matches GNU.
         if !outer_double_quoted && matches!(alternate, "$@" | "${@}" | "$*" | "${*}") {
-            if self.positional_params.is_empty() {
+            if self.shell_state.positional_params.is_empty() {
                 return Some(Vec::new());
             }
-            match self.env_vars.get("IFS").map(String::as_str) {
+            match self.shell_state.env_vars.get("IFS").map(String::as_str) {
                 Some("") => {
                     if alternate == "$*" || alternate == "${*}" {
                         // subst.c param_expand routes the operator word
                         // through expand_string_for_rhs -> W_SPLITSPACE over
                         // escaped elements: one preserved word per positional
                         // (exp9.sub `${var-$*}` with `set -- abc 'def ghi' jkl`).
-                        return Some(self.positional_params.clone());
+                        return Some(self.shell_state.positional_params.clone());
                     }
                 }
                 Some(ifs) => {
                     if alternate == "$@" || alternate == "${@}" {
-                        let joined = self.positional_params.join(" ");
+                        let joined = self.shell_state.positional_params.join(" ");
                         return Some(field_split_values_with_ifs(&joined, Some(ifs)));
                     }
                 }
@@ -1453,11 +1453,11 @@ impl Executor {
         // null IFS leaves $@ on the per-parameter path (the re-parse path
         // below), which already matches GNU.
         if !outer_double_quoted
-            && !self.positional_params.is_empty()
+            && !self.shell_state.positional_params.is_empty()
             && (alternate.starts_with("${@") || alternate.starts_with("${*"))
             && alternate.ends_with('}')
         {
-            if let Some(ifs) = self.env_vars.get("IFS").map(String::as_str) {
+            if let Some(ifs) = self.shell_state.env_vars.get("IFS").map(String::as_str) {
                 if !ifs.is_empty() {
                     let inner = &alternate[2..alternate.len() - 1];
                     let separator = if inner.starts_with('*') {
@@ -1465,11 +1465,11 @@ impl Executor {
                     } else {
                         " ".to_string()
                     };
-                    let joined = self.positional_params.join(&separator);
-                    let saved = std::mem::take(&mut self.positional_params);
-                    self.positional_params = vec![joined];
+                    let joined = self.shell_state.positional_params.join(&separator);
+                    let saved = std::mem::take(&mut self.shell_state.positional_params);
+                    self.shell_state.positional_params = vec![joined];
                     let values = self.quoted_positional_at_word_values(alternate, None);
-                    self.positional_params = saved;
+                    self.shell_state.positional_params = saved;
                     if let Some(values) = values {
                         let result: Vec<String> = values
                             .into_iter()
@@ -1492,8 +1492,8 @@ impl Executor {
             let inner = &alternate[2..alternate.len() - 1];
             let base = &inner[..inner.len() - 3];
             if let Some(storage) = self.parameter_array_storage(base) {
-                let values: Vec<String> = if is_marked_var(&self.env_vars, ASSOC_VARS, base) {
-                    assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, base))
+                let values: Vec<String> = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base) {
+                    assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.shell_state.env_vars, base))
                 } else {
                     array_values(&storage)
                 }
@@ -1503,7 +1503,7 @@ impl Executor {
                 if values.is_empty() {
                     return Some(Vec::new());
                 }
-                match self.env_vars.get("IFS").map(String::as_str) {
+                match self.shell_state.env_vars.get("IFS").map(String::as_str) {
                     Some("") => return Some(values),
                     ifs => {
                         let separator = if inner.ends_with("[*]") {
@@ -1539,7 +1539,7 @@ impl Executor {
         // `a:b` whole under IFS=:), so those fragments stay on the
         // quote-aware re-parse path.
         let ifs_all_whitespace = self
-            .env_vars
+            .shell_state.env_vars
             .get("IFS")
             .map(|ifs| ifs.chars().all(|ch| matches!(ch, ' ' | '\t' | '\n')))
             .unwrap_or(true);
@@ -1560,7 +1560,7 @@ impl Executor {
                         SubstitutionQuoteContext::DoubleQuoted,
                     ),
                     SubstitutionQuoteContext::DoubleQuoted,
-                    self.env_vars.get("IFS").map(String::as_str),
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                 )
             } else {
                 self.expand_alternate_parameter_word(alternate)
@@ -1572,7 +1572,7 @@ impl Executor {
             if expanded.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER) {
                 return Some(field_split_values_with_quoted_nulls(
                     &expanded,
-                    self.env_vars.get("IFS").map(String::as_str),
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                 ));
             }
             // A fully quoted empty alternate (foo:-quote-quote) is a
@@ -1651,11 +1651,11 @@ impl Executor {
         // String-based operator path collapses these to a single joined
         // field, so intercept here and return the per-parameter fields.
         if !word_used && var_name == "@" {
-            return Some(self.positional_params.clone());
+            return Some(self.shell_state.positional_params.clone());
         }
         if !word_used && var_name == "*" {
             return Some(vec![self
-                .positional_params
+                .shell_state.positional_params
                 .join(&self.ifs_first_char_separator())]);
         }
 
@@ -1683,7 +1683,7 @@ impl Executor {
         // under IFS=':' stays `abc:def ghi:jkl`).
         if alternate == "$*" || alternate == "${*}" {
             return Some(vec![self
-                .positional_params
+                .shell_state.positional_params
                 .join(&self.ifs_first_char_separator())]);
         }
 
@@ -1813,7 +1813,7 @@ impl Executor {
         if expanded.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER) {
             return Some(field_split_values_with_quoted_nulls(
                 &expanded,
-                self.env_vars.get("IFS").map(String::as_str),
+                self.shell_state.env_vars.get("IFS").map(String::as_str),
             ));
         }
         if expanded.is_empty() {
@@ -1829,7 +1829,7 @@ impl Executor {
         mut variable_expanded: CommandNode,
         original_raws: &[Option<&str>],
     ) -> CommandNode {
-        if self.aliases.is_empty() {
+        if self.shell_state.aliases.is_empty() {
             return variable_expanded;
         }
 
@@ -2333,7 +2333,7 @@ fn quoted_pure_reference_expands_empty(content: &str, executor: &Executor) -> bo
             return executor.script_name_value().is_empty();
         }
         return executor
-            .positional_params
+            .shell_state.positional_params
             .get(position - 1)
             .is_none_or(|value| value.is_empty());
     }
@@ -2602,7 +2602,7 @@ fn expanded_ends_with_ifs_separator(expanded: &str, executor: &Executor) -> bool
         return false;
     }
     executor
-        .env_vars
+        .shell_state.env_vars
         .get("IFS")
         .map(String::as_str)
         .unwrap_or(" \t\n")

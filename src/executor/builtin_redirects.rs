@@ -64,7 +64,7 @@ impl Executor {
                     .create(true)
                     .read(true)
                     .write(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             } else {
                 self.open_input_redirect(&target)?;
             }
@@ -98,7 +98,7 @@ impl Executor {
                         OpenOptions::new()
                             .create(true)
                             .append(true)
-                            .open(shell_path_to_windows(&target, &self.env_vars))
+                            .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
                     }
                 })?;
             }
@@ -122,7 +122,7 @@ impl Executor {
                 OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             }
         }
 

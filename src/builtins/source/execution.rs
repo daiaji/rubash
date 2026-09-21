@@ -89,8 +89,8 @@ fn execute_ast_with_args(
         executor.set_positional_params(source_positional_params.clone());
     }
 
-    let old_dollar_vars_changed = executor.dollar_vars_changed_by_set;
-    executor.dollar_vars_changed_by_set = false;
+    let old_dollar_vars_changed = executor.shell_state.dollar_vars_changed_by_set;
+    executor.shell_state.dollar_vars_changed_by_set = false;
     // GNU builtins/source.def:208-216 unsets the DEBUG trap for the duration
     // of a sourced file when function_trace_mode is off; the unwind-protect
     // restores it only after source_file's run_return_trap (evalfile.c:395),
@@ -152,13 +152,13 @@ fn execute_ast_with_args(
         // reassigned the dollar vars through the set builtin and we are not
         // inside a shell function, the new values stay and the saved copy is
         // discarded; otherwise the saved positionals are restored.
-        if executor.dollar_vars_changed_by_set && executor.function_depth == 0 {
+        if executor.shell_state.dollar_vars_changed_by_set && executor.shell_state.function_depth == 0 {
             // keep the sourced script's new positionals
         } else {
             executor.set_positional_params(old_positional_params);
         }
     }
-    executor.dollar_vars_changed_by_set = old_dollar_vars_changed;
+    executor.shell_state.dollar_vars_changed_by_set = old_dollar_vars_changed;
 
     match result {
         Err(ExecuteError::Return(status)) => {

@@ -288,7 +288,7 @@ impl Executor {
             .unwrap_or_else(|| "rubash".into());
         let display_source = bash_command_source_text(&background_command.command);
         let mut child = Command::new(&exe);
-        for (key, value) in &self.env_vars {
+        for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 child.env(key, value);
             }
@@ -304,7 +304,7 @@ impl Executor {
         // original_signals -> SIG_HARD_IGNORE), so __RUBASH_TRAP_ORIG_IGN is
         // forwarded above and must survive this reset filter.
         for key in self
-            .env_vars
+            .shell_state.env_vars
             .keys()
             .filter(|key| key.starts_with("__RUBASH_TRAP") && *key != "__RUBASH_TRAP_ORIG_IGN")
         {
@@ -371,9 +371,16 @@ impl Executor {
         self.background_children.insert(pid, child);
         self.job_table
             .register_process(pid, display_source.clone(), true);
-        self.background_jobs.insert(pid, display_source);
-        self.background_job_order.push(pid);
-        self.last_background_pid = Some(pid);
+        self.job_table.set_job_control(
+            pid,
+            crate::builtins::set::shell_option_enabled(
+                &self.shell_state.env_vars,
+                "monitor",
+            ),
+        );
+        self.shell_state.background_jobs.insert(pid, display_source);
+        self.shell_state.background_job_order.push(pid);
+        self.shell_state.last_background_pid = Some(pid);
         self.exit_code = 0;
         Ok(())
     }
@@ -491,7 +498,7 @@ impl Executor {
                         match OpenOptions::new()
                             .create(true)
                             .append(true)
-                            .open(shell_path_to_windows(&target, &self.env_vars))
+                            .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
                         {
                             Ok(file) => BackgroundStdio::File(file),
                             Err(_) => continue,
@@ -504,7 +511,7 @@ impl Executor {
                         .read(true)
                         .write(true)
                         .create(true)
-                        .open(shell_path_to_windows(&target, &self.env_vars))
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
                     {
                         Ok(file) => BackgroundStdio::File(file),
                         Err(_) => continue,
@@ -523,7 +530,7 @@ impl Executor {
                             OpenOptions::new()
                                 .create(true)
                                 .append(true)
-                                .open(shell_path_to_windows(&target, &self.env_vars))
+                                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
                         } else {
                             self.create_redirect_output(&target, false)
                         };
@@ -555,7 +562,7 @@ impl Executor {
 
     fn background_command_source(&self, command: &CommandNode) -> String {
         let mut source = String::new();
-        for (name, body) in &self.functions {
+        for (name, body) in &self.shell_state.functions {
             if is_exportable_function_name(name) {
                 source.push_str(name);
                 source.push_str("() { ");
@@ -614,7 +621,7 @@ impl Executor {
             }
             self.execute_command(&time_command.command)?;
         }
-        print_time(&self.env_vars, time_command.posix_format, started);
+        print_time(&self.shell_state.env_vars, time_command.posix_format, started);
         if time_command.inverted {
             self.exit_code = invert_exit_status(self.exit_code);
         }
@@ -664,7 +671,7 @@ impl Executor {
             Ok(())
         };
         print_time(
-            &self.env_vars,
+            &self.shell_state.env_vars,
             time_prefix_parts(&cmd.words).is_some_and(|parts| parts.posix_format),
             started,
         );
@@ -716,7 +723,7 @@ impl Executor {
             return Ok(None);
         };
 
-        print_time(&self.env_vars, prefix.posix_format, started);
+        print_time(&self.shell_state.env_vars, prefix.posix_format, started);
         if prefix.inverted {
             self.exit_code = invert_exit_status(self.exit_code);
         }
@@ -736,18 +743,18 @@ impl Executor {
         // `break` is considered in-loop, suppresses its diagnostic and aborts
         // the remainder of the script (arith-for.tests: `for ((j=;;))` with
         // `j=` empty RHS). Match the Git Bash baseline for now.
-        self.loop_depth += 1;
+        self.shell_state.loop_depth += 1;
         // GNU execute_arith_for_command:3236 sets line_number = arith_lineno
         // = arith_for_command->line, and eval_arith_for_expr:3187 runs the
         // DEBUG trap before each expression evaluation (init once; test and
         // step once per iteration) with that line restored, so $LINENO inside
         // the fire is the for command's line (dbg-support.tests: the double
         // "debug lineno: 108 main" per iteration).
-        let for_line = self.env_vars.get("__RUBASH_CURRENT_LINE").cloned();
+        let for_line = self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE").cloned();
         let restore_for_line = |executor: &mut Executor| {
             if let Some(line) = &for_line {
                 executor
-                    .env_vars
+                    .shell_state.env_vars
                     .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
             }
         };
@@ -798,11 +805,11 @@ impl Executor {
             }
 
             ran_body = true;
-            self.loop_depth += 1;
+            self.shell_state.loop_depth += 1;
             let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_BODY);
             let result = self.execute_ast(&body_ast);
             drop(_t);
-            self.loop_depth -= 1;
+            self.shell_state.loop_depth -= 1;
             match result {
                 Ok(()) => {}
                 Err(ExecuteError::Break(level)) if level <= 1 => {
@@ -852,7 +859,7 @@ impl Executor {
         // decrement on failed init, leaving loop_level==1 so a following
         // `break` was treated as in-loop and aborted the rest of the script
         // (arith-for.tests: `for ((j=;;))` with `j=` empty RHS). Match GNU.
-        self.loop_depth -= 1;
+        self.shell_state.loop_depth -= 1;
         Ok(())
     }
 
@@ -916,15 +923,13 @@ impl Executor {
         cmd: &CommandNode,
         subshell_command: &SubshellCommand,
     ) -> Result<(), ExecuteError> {
-        let saved_env = self.env_vars.clone();
-        let saved_pipestatus = self.pipestatus.clone();
-        let saved_depth = self.subshell_depth.get();
-        // The subshell body runs in place on this executor, so the typed
-        // variable store and positional parameters must be saved and restored
-        // like env_vars. GNU keeps assignments, set --, and IFS changes
-        // local to the subshell.
-        let saved_variables = self.shell_state.variables.clone();
-        let saved_positional_params = self.positional_params.clone();
+        // GNU execute_cmd.c:1576 execute_in_subshell: the forked child's
+        // mutable state is a whole-copy of the parent's. The in-place body
+        // gets the same boundary from a ShellState clone — assignments,
+        // aliases, functions, set --, IFS, env-carried traps, positional
+        // params, and job bookkeeping all restore wholesale at the end.
+        let saved_state = self.shell_state.clone();
+        let saved_depth = self.shell_state.subshell_depth.get();
         // GNU execute_cmd.c runs `( list )` via execute_in_subshell ->
         // make_child: the forked child owns its own cwd, so a `cd` in the
         // body never reaches the parent. The body here runs in place on
@@ -932,10 +937,9 @@ impl Executor {
         // environment and must be restored like env_vars (niubash#100).
         // Same convention as command substitution's saved_dir handling.
         let saved_cwd = env::current_dir().ok();
-        crate::builtins::trap::reset_for_subshell(&mut self.env_vars);
-        let saved_loop_depth = self.loop_depth;
-        self.subshell_depth.set(saved_depth + 1);
-        self.loop_depth = 0;
+        crate::builtins::trap::reset_for_subshell(&mut self.shell_state.env_vars);
+        self.shell_state.subshell_depth.set(saved_depth + 1);
+        self.shell_state.loop_depth = 0;
 
         let mut redirect_cmd = cmd.clone();
         let group_outputs =
@@ -1044,15 +1048,7 @@ impl Executor {
             | Err(ExecuteError::FatalFunctionError(code))
             | Err(ExecuteError::Return(code)) => code,
             Err(error) => {
-                self.restore_shell_env(saved_env);
-                self.shell_state.variables = saved_variables;
-                self.set_positional_params(saved_positional_params);
-                self.pipestatus = saved_pipestatus;
-                self.subshell_depth.set(saved_depth);
-                self.loop_depth = saved_loop_depth;
-                if let Some(dir) = saved_cwd {
-                    let _ = env::set_current_dir(dir);
-                }
+                self.restore_flat_subshell(saved_state.clone(), saved_cwd.clone());
                 return Err(error);
             }
         };
@@ -1069,28 +1065,12 @@ impl Executor {
         {
             Ok(trap_status) => trap_status,
             Err(error) => {
-                self.restore_shell_env(saved_env);
-                self.shell_state.variables = saved_variables;
-                self.set_positional_params(saved_positional_params);
-                self.pipestatus = saved_pipestatus;
-                self.subshell_depth.set(saved_depth);
-                self.loop_depth = saved_loop_depth;
-                if let Some(dir) = &saved_cwd {
-                    let _ = env::set_current_dir(dir);
-                }
+                self.restore_flat_subshell(saved_state.clone(), saved_cwd.clone());
                 return Err(error);
             }
         };
 
-        self.restore_shell_env(saved_env);
-        self.shell_state.variables = saved_variables;
-        self.set_positional_params(saved_positional_params);
-        self.pipestatus = saved_pipestatus;
-        self.subshell_depth.set(saved_depth);
-        self.loop_depth = saved_loop_depth;
-        if let Some(dir) = saved_cwd {
-            let _ = env::set_current_dir(dir);
-        }
+        self.restore_flat_subshell(saved_state, saved_cwd);
         let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
         self.exit_code = status;
         finish_result?;
@@ -1119,9 +1099,9 @@ impl Executor {
             }
 
             ran_body = true;
-            self.loop_depth += 1;
+            self.shell_state.loop_depth += 1;
             let result = self.execute_ast(&body);
-            self.loop_depth -= 1;
+            self.shell_state.loop_depth -= 1;
             self.run_pending_signal_traps()?;
             match result {
                 Ok(()) => {
@@ -1326,19 +1306,19 @@ impl Executor {
             return Ok(());
         };
 
-        for (key, value) in &self.env_vars {
+        for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 child.env(key, value);
             }
         }
         // Preserve the parent script location for diagnostics emitted by the
         // coprocess shell, while keeping internal executor state isolated.
-        if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
+        if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             child.env("__RUBASH_SCRIPT_NAME", script);
             let line = cmd
                 .line
                 .map(|line| line.to_string())
-                .or_else(|| self.env_vars.get("__RUBASH_CURRENT_LINE").cloned())
+                .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE").cloned())
                 .unwrap_or_else(|| "1".to_string());
             child.env("__RUBASH_CURRENT_LINE", line.clone());
             // The child re-parses `-c` source from line 1. Preserve the
@@ -1386,9 +1366,16 @@ impl Executor {
                     let job_id =
                         self.job_table
                             .register_process(pid, bash_command_source_text(cmd), true);
-                    self.background_jobs
+                    self.job_table.set_job_control(
+                        pid,
+                        crate::builtins::set::shell_option_enabled(
+                            &self.shell_state.env_vars,
+                            "monitor",
+                        ),
+                    );
+                    self.shell_state.background_jobs
                         .insert(pid, bash_command_source_text(cmd));
-                    self.background_job_order.push(pid);
+                    self.shell_state.background_job_order.push(pid);
                     self.coproc_stdin_writers.insert(pid, stdin_writer);
                     self.coproc_stdout_readers.insert(pid, stdout_reader);
                     // GNU sh_openpipe moves the pipe ends to the highest free
@@ -1412,8 +1399,8 @@ impl Executor {
                     // Store the file descriptors in env for COPROC array
                     let stdin_key = format!("__RUBASH_COPROC_STDIN_{}", pid);
                     let stdout_key = format!("__RUBASH_COPROC_STDOUT_{}", pid);
-                    self.env_vars.insert(stdin_key, "pipe".to_string());
-                    self.env_vars.insert(stdout_key, "pipe".to_string());
+                    self.shell_state.env_vars.insert(stdin_key, "pipe".to_string());
+                    self.shell_state.env_vars.insert(stdout_key, "pipe".to_string());
 
                     // Windows has no inherited POSIX fd for this pipe. Expose
                     // two shell-owned virtual descriptors instead; the PID
@@ -1464,13 +1451,13 @@ impl Executor {
                                 } else {
                                     let target_base =
                                         target.split('[').next().unwrap_or(target.as_str());
-                                    let target_exists = self.env_vars.contains_key(target_base)
+                                    let target_exists = self.shell_state.env_vars.contains_key(target_base)
                                         || self.shell_state.variables.get(target_base).is_some();
                                     if target_exists {
                                         // v != 0: ASSIGN_DISALLOWED on the resolved
                                         // var; elements bind to the target but
                                         // <name>_PID still uses the original name.
-                                        if is_marked_var(&self.env_vars, READONLY_VARS, target_base)
+                                        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, target_base)
                                         {
                                             eprintln!(
                                                 "{}{}: readonly variable",
@@ -1503,8 +1490,8 @@ impl Executor {
                                     self.diagnostic_prefix(),
                                     array_name
                                 );
-                                unmark_env_name(&mut self.env_vars, NAMEREF_VARS, &array_name);
-                                if is_marked_var(&self.env_vars, READONLY_VARS, &array_name) {
+                                unmark_env_name(&mut self.shell_state.env_vars, NAMEREF_VARS, &array_name);
+                                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &array_name) {
                                     eprintln!(
                                         "{}{}: readonly variable",
                                         self.diagnostic_prefix(),
@@ -1514,7 +1501,7 @@ impl Executor {
                                 }
                             }
                             NamerefResolution::NotNameref => {
-                                if is_marked_var(&self.env_vars, READONLY_VARS, &array_name) {
+                                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &array_name) {
                                     eprintln!(
                                         "{}{}: readonly variable",
                                         self.diagnostic_prefix(),
@@ -1532,10 +1519,10 @@ impl Executor {
                     }
                     // GNU stores c_name regardless of bind success so
                     // coproc_unsetvars can still attempt the unbinds.
-                    self.coproc_names.insert(pid, c_name.clone());
+                    self.shell_state.coproc_names.insert(pid, c_name.clone());
                     if can_bind {
-                        self.env_vars.insert(bind_name.clone(), array_value);
-                        mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &bind_name);
+                        self.shell_state.env_vars.insert(bind_name.clone(), array_value);
+                        mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &bind_name);
                         // bind_variable (execute_cmd.c:2441) is nameref-aware:
                         // `coproc ref` with ref_PID a nameref assigns through
                         // it and hits the resolved target's readonly check.
@@ -1611,7 +1598,7 @@ impl Executor {
                     OpenOptions::new()
                         .create(true)
                         .append(true)
-                        .open(shell_path_to_windows(&target, &self.env_vars))?,
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?,
                 ));
             }
         }
@@ -1634,7 +1621,7 @@ impl Executor {
                     OpenOptions::new()
                         .create(true)
                         .append(true)
-                        .open(shell_path_to_windows(&target, &self.env_vars))?,
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?,
                 ));
             }
         }
@@ -1671,7 +1658,7 @@ impl Executor {
         let word = self.expand_case_word(&case_command.word);
         let word = tilde_expand::strip_assignment_quote_marker(&word);
         self.abandon_on_arithmetic_expansion_error()?;
-        let nocasematch = crate::builtins::shopt::option_enabled(&self.env_vars, "nocasematch");
+        let nocasematch = crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "nocasematch");
         let mut fall_through = false;
         let mut matched_any = false;
         let mut index = 0;

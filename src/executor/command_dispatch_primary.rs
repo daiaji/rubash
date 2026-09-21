@@ -9,7 +9,7 @@ impl Executor {
         let result = match word {
             "exit" => self.execute_exit_command_word(cmd)?,
             "echo" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "echo") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "echo") {
                     self.execute_external(cmd)
                 } else {
                     self.execute_echo(cmd)?;
@@ -30,7 +30,7 @@ impl Executor {
             "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
             "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
             "pwd" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "pwd") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "pwd") {
                     self.execute_external(cmd)
                 } else {
                     self.exit_code = self.execute_pwd(cmd)?;
@@ -39,7 +39,7 @@ impl Executor {
             }
             "source" | "." => self.execute_source_command(cmd),
             "printf" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "printf") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "printf") {
                     self.execute_external(cmd)
                 } else {
                     self.exit_code = self.execute_printf(cmd)?;
@@ -50,7 +50,7 @@ impl Executor {
             "builtin" => self.execute_builtin_direct_command(cmd),
             #[cfg(windows)]
             "sudo" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "sudo") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "sudo") {
                     self.execute_external(cmd)
                 } else {
                     self.exit_code = self.execute_sudo(cmd)?;
@@ -59,7 +59,7 @@ impl Executor {
             }
             "cd" => {
                 if self
-                    .env_vars
+                    .shell_state.env_vars
                     .get("__RUBASH_SCRIPT_NAME")
                     .is_some_and(|script| script.contains("type3.sub"))
                 {
@@ -116,7 +116,7 @@ impl Executor {
                 Ok(())
             }
             "true" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "true") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "true") {
                     self.execute_external(cmd)
                 } else {
                     let redirect_failed =
@@ -130,7 +130,7 @@ impl Executor {
                 }
             }
             "false" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "false") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "false") {
                     self.execute_external(cmd)
                 } else {
                     let redirect_failed =
@@ -183,7 +183,7 @@ impl Executor {
                 Ok(())
             }
             "hash" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "hash") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "hash") {
                     self.execute_external(cmd)
                 } else {
                     self.exit_code = self.execute_hash(cmd)?;

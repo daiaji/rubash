@@ -17,7 +17,7 @@ impl Executor {
         let expanded = unescape_remaining_shell_escapes(&decode_parameter_word_quotes(
             &expanded,
         ));
-        tilde_expand::expand_assignment_tilde_value(&expanded, &self.env_vars, false)
+        tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
     }
 
     // Alternate word of the `-`/`+`/`:-`/`:+` operators. GNU expands the
@@ -30,14 +30,14 @@ impl Executor {
     // and their own whitespace stays protected (more-exp ${B:-"$A"}).
     pub(in crate::executor) fn expand_alternate_parameter_word(&mut self, word: &str) -> String {
         let expanded = self.expand_embedded_parameters_alternate_mut(word);
-        tilde_expand::expand_assignment_tilde_value(&expanded, &self.env_vars, false)
+        tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
     }
 
     pub(in crate::executor) fn expand_parameter_word_mut(&mut self, word: &str) -> String {
         let expanded = unescape_remaining_shell_escapes(&decode_parameter_word_quotes(
             &self.expand_embedded_parameters_mut(word),
         ));
-        tilde_expand::expand_assignment_tilde_value(&expanded, &self.env_vars, false)
+        tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
     }
 
     /// GNU subst.c pos_params (3745) + string_list_pos_params (3030):
@@ -54,14 +54,14 @@ impl Executor {
         length: Option<isize>,
     ) -> String {
         let selected = positional_parameter_substring_with_zero(
-            &self.positional_params,
+            &self.shell_state.positional_params,
             &self.script_name_value(),
             offset,
             length,
         );
         if var_name == "*" {
             let ifs = self
-                .env_vars
+                .shell_state.env_vars
                 .get("IFS")
                 .cloned()
                 .unwrap_or_else(|| " \t\n".to_string());
@@ -120,7 +120,7 @@ impl Executor {
                             &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
-                        self.env_vars.get("IFS").map(String::as_str),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     );
                 }
                 return self
@@ -133,7 +133,7 @@ impl Executor {
                                 &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
-                            self.env_vars.get("IFS").map(String::as_str),
+                            self.shell_state.env_vars.get("IFS").map(String::as_str),
                         )
                     });
             }
@@ -150,7 +150,7 @@ impl Executor {
                                 &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
-                            self.env_vars.get("IFS").map(String::as_str),
+                            self.shell_state.env_vars.get("IFS").map(String::as_str),
                         );
                     }
                     return String::new();
@@ -164,7 +164,7 @@ impl Executor {
                             &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
-                        self.env_vars.get("IFS").map(String::as_str),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     );
                 }
                 return String::new();
@@ -280,7 +280,7 @@ impl Executor {
                                 &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
-                            self.env_vars.get("IFS").map(String::as_str),
+                            self.shell_state.env_vars.get("IFS").map(String::as_str),
                         );
                     }
                     return String::new();
@@ -291,7 +291,7 @@ impl Executor {
                             &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
-                        self.env_vars.get("IFS").map(String::as_str),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     );
                 }
                 return String::new();
@@ -311,7 +311,7 @@ impl Executor {
                             &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
-                        self.env_vars.get("IFS").map(String::as_str),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     );
                 }
                 return self
@@ -323,7 +323,7 @@ impl Executor {
                                 &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
-                            self.env_vars.get("IFS").map(String::as_str),
+                            self.shell_state.env_vars.get("IFS").map(String::as_str),
                         )
                     });
             }
@@ -351,7 +351,31 @@ impl Executor {
         if word.starts_with('"') || word.starts_with('\'') || word.starts_with('\\') {
             return word.to_string();
         }
-        tilde_expand::expand_assignment_tilde_value(word, &self.env_vars, false)
+        tilde_expand::expand_assignment_tilde_value(word, &self.shell_state.env_vars, false)
+    }
+
+    /// GNU parameter_brace_expand_word (subst.c:7663): the `word` half of
+    /// `${var op word}` is expanded under the word's own quote context. The
+    /// double-quote sentence decode (slashify_in_quotes port) applies inside
+    /// "${...}" and in here-document bodies (Q_HERE_DOCUMENT behaves like a
+    /// dq context for ${} words); for an unquoted ${...} the rhs keeps its
+    /// original
+    /// quote syntax so the walker's quote removal strips it (`o=${x-' '}`
+    /// stores a space; `${f-'$HOME'}` keeps `$HOME` unexpanded).
+    fn decode_operator_word_for_context(
+        &self,
+        word: &str,
+        context: SubstitutionQuoteContext,
+    ) -> String {
+        if matches!(
+            context,
+            SubstitutionQuoteContext::DoubleQuoted
+                | SubstitutionQuoteContext::HereDocument
+        ) {
+            decode_double_quotes_in_quoted_parameter_word(word, self.posix_mode_enabled())
+        } else {
+            word.to_string()
+        }
     }
 
     pub(in crate::executor) fn expand_quoted_parameter_word_mut(
@@ -467,11 +491,11 @@ impl Executor {
                     let default = self.tilde_expand_operator_word(default, context);
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters_mut_with_context(
-                            &decode_double_quotes_in_quoted_parameter_word(&default, self.posix_mode_enabled()),
+                            &self.decode_operator_word_for_context(&default, context),
                             context,
                         ),
                         context,
-                        self.env_vars.get("IFS").map(String::as_str),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     );
                 }
                 return self
@@ -482,11 +506,11 @@ impl Executor {
                         let default = self.tilde_expand_operator_word(default, context);
                         unescape_parameter_operator_result(
                             &self.expand_embedded_parameters_mut_with_context(
-                                &decode_double_quotes_in_quoted_parameter_word(&default, self.posix_mode_enabled()),
+                                &self.decode_operator_word_for_context(&default, context),
                                 context,
                             ),
                             context,
-                            self.env_vars.get("IFS").map(String::as_str),
+                            self.shell_state.env_vars.get("IFS").map(String::as_str),
                         )
                     });
             }
@@ -501,11 +525,11 @@ impl Executor {
                         let alternate = self.tilde_expand_operator_word(alternate, context);
                         return unescape_parameter_operator_result(
                             &self.expand_embedded_parameters_mut_with_context(
-                                &decode_double_quotes_in_quoted_parameter_word(&alternate, self.posix_mode_enabled()),
+                                &self.decode_operator_word_for_context(&alternate, context),
                                 context,
                             ),
                             context,
-                            self.env_vars.get("IFS").map(String::as_str),
+                            self.shell_state.env_vars.get("IFS").map(String::as_str),
                         );
                     }
                     return String::new();
@@ -517,11 +541,11 @@ impl Executor {
                     let alternate = self.tilde_expand_operator_word(alternate, context);
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters_mut_with_context(
-                            &decode_double_quotes_in_quoted_parameter_word(&alternate, self.posix_mode_enabled()),
+                            &self.decode_operator_word_for_context(&alternate, context),
                             context,
                         ),
                         context,
-                        self.env_vars.get("IFS").map(String::as_str),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     );
                 }
                 return String::new();
@@ -665,22 +689,22 @@ impl Executor {
                 if let Some((_, non_empty)) = self.list_operand_joined_word(var_name) {
                     if non_empty {
                         let alternate = self.tilde_expand_operator_word(alternate, context);
-                        let decoded = decode_double_quotes_in_quoted_parameter_word(&alternate, self.posix_mode_enabled());
+                        let decoded = self.decode_operator_word_for_context(&alternate, context);
                         let expanded =
                             self.expand_embedded_parameters_mut_with_context(&decoded, context);
                         return unescape_parameter_operator_result(&expanded, context,
-                            self.env_vars.get("IFS").map(String::as_str),
+                            self.shell_state.env_vars.get("IFS").map(String::as_str),
                         );
                     }
                     return String::new();
                 }
                 if self.parameter_operator_value(var_name).is_some() {
                     let alternate = self.tilde_expand_operator_word(alternate, context);
-                    let decoded = decode_double_quotes_in_quoted_parameter_word(&alternate, self.posix_mode_enabled());
+                    let decoded = self.decode_operator_word_for_context(&alternate, context);
                     let expanded =
                         self.expand_embedded_parameters_mut_with_context(&decoded, context);
                     let final_value = unescape_parameter_operator_result(&expanded, context,
-                            self.env_vars.get("IFS").map(String::as_str),
+                            self.shell_state.env_vars.get("IFS").map(String::as_str),
                         );
                     return final_value;
                 }
@@ -699,11 +723,11 @@ impl Executor {
                     let default = self.tilde_expand_operator_word(default, context);
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters_mut_with_context(
-                            &decode_double_quotes_in_quoted_parameter_word(&default, self.posix_mode_enabled()),
+                            &self.decode_operator_word_for_context(&default, context),
                             context,
                         ),
                         context,
-                        self.env_vars.get("IFS").map(String::as_str),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     );
                 }
                 return self
@@ -713,11 +737,11 @@ impl Executor {
                         let default = self.tilde_expand_operator_word(default, context);
                         unescape_parameter_operator_result(
                             &self.expand_embedded_parameters_mut_with_context(
-                                &decode_double_quotes_in_quoted_parameter_word(&default, self.posix_mode_enabled()),
+                                &self.decode_operator_word_for_context(&default, context),
                                 context,
                             ),
                             context,
-                            self.env_vars.get("IFS").map(String::as_str),
+                            self.shell_state.env_vars.get("IFS").map(String::as_str),
                         )
                     });
             }
@@ -802,7 +826,7 @@ impl Executor {
         );
         let unescaped =
             unescape_parameter_operator_result(&expanded, SubstitutionQuoteContext::DoubleQuoted,
-                            self.env_vars.get("IFS").map(String::as_str),
+                            self.shell_state.env_vars.get("IFS").map(String::as_str),
                         );
         unescaped.replace(PROTECTED_LITERAL_BACKSLASH, "\\")
     }
@@ -941,7 +965,7 @@ impl Executor {
         if self.nameref_target_name(indirect_name).is_some() {
             return false;
         }
-        let Some(target_name) = self.env_vars.get(indirect_name).cloned() else {
+        let Some(target_name) = self.shell_state.env_vars.get(indirect_name).cloned() else {
             return false;
         };
         if self.apply_array_element_parameter_assignment(&target_name, value.clone()) {

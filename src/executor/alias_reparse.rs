@@ -18,7 +18,7 @@ impl Executor {
             return Ok(None);
         };
         if self
-            .expanding_aliases
+            .shell_state.expanding_aliases
             .iter()
             .any(|alias| alias == first_word)
         {
@@ -60,7 +60,7 @@ impl Executor {
             return Ok(None);
         }
 
-        self.expanding_aliases.push(first_word.clone());
+        self.shell_state.expanding_aliases.push(first_word.clone());
         let tokens = crate::lexer::tokenize_with_options(
             &source,
             crate::lexer::TokenizeOptions {
@@ -70,7 +70,7 @@ impl Executor {
         );
         let reparsed = crate::parser::parse(&tokens);
         let result = self.execute_ast(&reparsed);
-        self.expanding_aliases.pop();
+        self.shell_state.expanding_aliases.pop();
         result?;
         Ok(Some(next_index))
     }
@@ -534,7 +534,7 @@ impl Executor {
         let Some(first_word) = command.words.first() else {
             return Ok(None);
         };
-        if !self.aliases.contains_key(first_word) {
+        if !self.shell_state.aliases.contains_key(first_word) {
             return Ok(None);
         }
 
@@ -559,7 +559,7 @@ impl Executor {
             }
         }
 
-        self.expanding_aliases.push(first_word.clone());
+        self.shell_state.expanding_aliases.push(first_word.clone());
         // parse.y gather_here_documents (parse.y:3120) reads the
         // here-document body from the same input stream the replacement
         // text is parsed from: by the time this reparse runs,
@@ -573,7 +573,7 @@ impl Executor {
         let tokens = crate::lexer::tokenize(&source);
         let ast = crate::parser::parse(&tokens);
         let result = self.execute_ast(&ast);
-        self.expanding_aliases.pop();
+        self.shell_state.expanding_aliases.pop();
         result?;
         Ok(Some(next_index))
     }

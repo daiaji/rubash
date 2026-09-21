@@ -44,9 +44,9 @@ impl Executor {
         let resolved_program = invocation
             .command
             .first()
-            .and_then(|name| find_user_command(name, &self.env_vars));
+            .and_then(|name| find_user_command(name, &self.shell_state.env_vars));
         let environment = if invocation.preserve_environment {
-            self.env_vars.clone()
+            self.shell_state.env_vars.clone()
         } else {
             self.child_shell_environment()
         };

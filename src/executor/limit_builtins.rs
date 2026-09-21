@@ -98,8 +98,8 @@ impl Executor {
                 self.job_table.mark_stopped(pid);
             } else if operand.starts_with('%') {
                 self.job_table.mark_completed(pid, 128 + request.signal);
-                self.background_jobs.remove(&pid);
-                self.background_job_order.retain(|job_pid| *job_pid != pid);
+                self.shell_state.background_jobs.remove(&pid);
+                self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
                 self.coproc_stdin_writers.remove(&pid);
                 self.coproc_stdout_readers.remove(&pid);
                 self.fd_table.close(pid);
@@ -120,7 +120,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::ulimit::execute_with_io(
             &cmd.words[1..],
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
         )?;

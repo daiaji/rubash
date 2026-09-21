@@ -38,10 +38,10 @@ impl Executor {
         // the enclosing function (execute_cmd.c run_builtin sets it on the
         // function call and the body's assignment-word expansion runs before
         // the builtin resets it).
-        let context_name = self.function_name_stack.first().map(String::as_str);
+        let context_name = self.shell_state.function_name_stack.first().map(String::as_str);
         let status = crate::builtins::setattr::readonly_with_io(
             args.iter().map(String::as_str),
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
             context_name,
@@ -102,10 +102,10 @@ impl Executor {
             // declare.def set_or_show_attributes(NULL, f|r): `readonly -f`
             // and `readonly -fp` both print each readonly function's full
             // definition followed by the `declare -fr NAME` attribute line.
-            let mut names = marked_env_names(&self.env_vars, READONLY_FUNCTIONS);
+            let mut names = marked_env_names(&self.shell_state.env_vars, READONLY_FUNCTIONS);
             names.sort();
             for name in names {
-                if let Some(body) = self.functions.get(&name) {
+                if let Some(body) = self.shell_state.functions.get(&name) {
                     self.write_function_definition(&name, &body.commands, false, stdout)?;
                     writeln!(stdout, "declare -fr {name}")?;
                 }
@@ -115,7 +115,7 @@ impl Executor {
 
         let mut status = 0;
         for name in &args[index..] {
-            let Some(body) = self.functions.get(name) else {
+            let Some(body) = self.shell_state.functions.get(name) else {
                 writeln!(
                     stderr,
                     "{}readonly: {name}: not a function",
@@ -128,7 +128,7 @@ impl Executor {
                 self.write_function_definition(name, &body.commands, false, stdout)?;
                 writeln!(stdout, "declare -fr {name}")?;
             }
-            mark_env_name(&mut self.env_vars, READONLY_FUNCTIONS, name);
+            mark_env_name(&mut self.shell_state.env_vars, READONLY_FUNCTIONS, name);
         }
 
         Ok(status)
@@ -150,7 +150,7 @@ impl Executor {
         // declare -f prints the stored command tree through the GNU
         // print_cmd.c port so it matches `type NAME` and upstream bash,
         // including the body kind and definition-level redirects.
-        let info = self.function_def_infos.get(name);
+        let info = self.shell_state.function_def_infos.get(name);
         let text = crate::parser::ast_print::multiline_function_def_text_with(
             name,
             body,
@@ -162,12 +162,12 @@ impl Executor {
     }
 
     pub(in crate::executor) fn apply_exported_functions_to_child(&self, process: &mut Command) {
-        for name in marked_env_names(&self.env_vars, EXPORTED_FUNCTIONS) {
-            let Some(body) = self.functions.get(&name) else {
+        for name in marked_env_names(&self.shell_state.env_vars, EXPORTED_FUNCTIONS) {
+            let Some(body) = self.shell_state.functions.get(&name) else {
                 continue;
             };
             let def_redirects = self
-                .function_def_infos
+                .shell_state.function_def_infos
                 .get(&name)
                 .map(|info| info.def_redirects.as_slice())
                 .unwrap_or(&[]);
@@ -180,14 +180,14 @@ impl Executor {
 
     pub(in crate::executor) fn apply_child_environment(&self, process: &mut Command) {
         process.env_clear();
-        for name in marked_env_names(&self.env_vars, EXPORTED_VARS) {
-            if let Some(value) = self.env_vars.get(&name) {
+        for name in marked_env_names(&self.shell_state.env_vars, EXPORTED_VARS) {
+            if let Some(value) = self.shell_state.env_vars.get(&name) {
                 if is_valid_process_env(&name, value) {
                     process.env(&name, self.child_env_value(&name, value));
                 }
             }
         }
-        for (name, value) in local_export_env_values(&self.env_vars) {
+        for (name, value) in local_export_env_values(&self.shell_state.env_vars) {
             if is_valid_process_env(&name, &value) {
                 process.env(&name, self.child_env_value(&name, &value));
             }
@@ -196,21 +196,21 @@ impl Executor {
         // the per-signal "" trap keys cannot survive a Windows environment
         // block, so the merged ignore set rides in the ORIG_IGN variable
         // (trap.c original_signals -> SIG_HARD_IGNORE in the child).
-        let inherited_ignores = crate::builtins::trap::transport_inherited_ignores(&self.env_vars);
+        let inherited_ignores = crate::builtins::trap::transport_inherited_ignores(&self.shell_state.env_vars);
         if !inherited_ignores.is_empty() {
             process.env(crate::builtins::trap::TRAP_ORIG_IGNORES, inherited_ignores);
         }
-        apply_required_windows_child_environment(process, &self.env_vars);
+        apply_required_windows_child_environment(process, &self.shell_state.env_vars);
         self.apply_exported_functions_to_child(process);
     }
 
     pub(in crate::executor) fn child_env_value(&self, name: &str, value: &str) -> String {
         if cfg!(windows) && name.eq_ignore_ascii_case("PATH") {
-            return shell_path_to_process(value, &self.env_vars);
+            return shell_path_to_process(value, &self.shell_state.env_vars);
         }
         if cfg!(windows) && name == "TMPDIR" {
             return shell_display_path(
-                &shell_path_to_windows(value, &self.env_vars)
+                &shell_path_to_windows(value, &self.shell_state.env_vars)
                     .to_string_lossy()
                     .replace('\\', "/"),
             );

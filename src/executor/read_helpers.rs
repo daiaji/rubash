@@ -619,7 +619,7 @@ impl Executor {
         }
 
         let ifs = self
-            .env_vars
+            .shell_state.env_vars
             .get("IFS")
             .map(String::as_str)
             .unwrap_or(" \t\n");

@@ -13,7 +13,7 @@ impl Executor {
         // fatal bad substitution by the parameter-error pre-scan.
         if let Some(base) = invalid_at_transform_base(name) {
             let is_set = self.parameter_error_value(base).is_some()
-                || self.env_vars.contains_key(base);
+                || self.shell_state.env_vars.contains_key(base);
             if !is_set {
                 return Some(String::new());
             }

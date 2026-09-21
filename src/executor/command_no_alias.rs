@@ -13,7 +13,7 @@ impl Executor {
             return Ok(());
         };
 
-        if crate::builtins::enable::is_disabled(&self.env_vars, word) {
+        if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word) {
             return self.execute_external(cmd);
         }
 
@@ -23,21 +23,21 @@ impl Executor {
                 Ok(())
             }
             "true" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "true") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "true") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = crate::builtins::colon::true_builtin();
                 Ok(())
             }
             "false" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "false") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "false") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = crate::builtins::colon::false_builtin();
                 Ok(())
             }
             "echo" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "echo") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "echo") {
                     return self.execute_external(cmd);
                 }
                 self.execute_echo(cmd)?;
@@ -48,7 +48,7 @@ impl Executor {
                 Ok(())
             }
             "pwd" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "pwd") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "pwd") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = self.execute_pwd(cmd)?;
@@ -95,14 +95,14 @@ impl Executor {
                 Ok(())
             }
             "printf" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "printf") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "printf") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = self.execute_printf(cmd)?;
                 Ok(())
             }
             "hash" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "hash") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "hash") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = self.execute_hash(cmd)?;
@@ -166,7 +166,7 @@ impl Executor {
                 Ok(())
             }
             "umask" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "umask") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "umask") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = self.execute_umask(cmd)?;
@@ -177,14 +177,14 @@ impl Executor {
                 Ok(())
             }
             "read" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "read") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "read") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = self.execute_read(cmd);
                 Ok(())
             }
             "mapfile" | "readarray" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, &cmd.words[0]) {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, &cmd.words[0]) {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = self.execute_mapfile(cmd);
@@ -233,16 +233,16 @@ impl Executor {
             return self.execute_command_without_aliases(cmd);
         }
 
-        let saved_path = self.env_vars.get("PATH").cloned();
-        self.env_vars
-            .insert("PATH".to_string(), standard_path(&self.env_vars));
+        let saved_path = self.shell_state.env_vars.get("PATH").cloned();
+        self.shell_state.env_vars
+            .insert("PATH".to_string(), standard_path(&self.shell_state.env_vars));
         let result = self.execute_command_without_aliases(cmd);
         match saved_path {
             Some(path) => {
-                self.env_vars.insert("PATH".to_string(), path);
+                self.shell_state.env_vars.insert("PATH".to_string(), path);
             }
             None => {
-                self.env_vars.remove("PATH");
+                self.shell_state.env_vars.remove("PATH");
             }
         }
         result

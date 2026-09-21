@@ -32,7 +32,7 @@ pub(super) enum UpstreamOutputStream {
 impl Executor {
     fn current_script_is_bash_upstream_test(&self) -> bool {
         if self
-            .env_vars
+            .shell_state.env_vars
             .get("BUILD_DIR")
             .is_some_and(|path| normalized_path(path).contains("/third_party/bash"))
         {
@@ -40,7 +40,7 @@ impl Executor {
         }
 
         if self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| path_looks_like_bash_upstream_tests(script))
         {
@@ -60,7 +60,7 @@ impl Executor {
         // real lexer/parser/executor so the ledger reflects genuine GNU
         // semantics instead of the canned handlers below.
         if self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_NO_UPSTREAM_SCRIPTS")
             .map(String::as_str)
             == Some("1")

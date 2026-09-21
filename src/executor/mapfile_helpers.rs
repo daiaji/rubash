@@ -176,7 +176,7 @@ impl Executor {
                 if redirect.fd.unwrap_or(0) == 0 {
                     let target = self.expand_word(&redirect.target);
                     if !target.starts_with("<(") && !is_closed_redirect_target(&target) {
-                        let path = shell_path_to_windows(&target, &self.env_vars);
+                        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
                         if let Ok(input) =
                             crate::executor::substitution_metadata::read_shell_input_file(path)
                         {
@@ -190,7 +190,7 @@ impl Executor {
             }
             // Fallback: read from inherited process stdin when INHERIT_PROCESS_STDIN is set
             // (e.g., printf '...' | rubash -c 'mapfile arr')
-            if self.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) == Some("1") {
+            if self.shell_state.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) == Some("1") {
                 return self.read_inherited_process_stdin_to_string();
             }
             return None;
@@ -243,7 +243,7 @@ impl Executor {
         if is_closed_redirect_target(&target) {
             return None;
         }
-        let path = shell_path_to_windows(&target, &self.env_vars);
+        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
         if redirect.append {
             let _ = OpenOptions::new()
                 .create(true)
@@ -258,7 +258,7 @@ impl Executor {
         if self.fd_table.is_open_for_read(fd) {
             if let Some(input) = self.fd_table.read_all_text(fd) {
                 if let Some((_, offset)) = self.fd_table.input_snapshot(fd) {
-                    self.env_vars
+                    self.shell_state.env_vars
                         .insert(fd_stdin_offset_key(fd), offset.to_string());
                 }
                 return Some(input);

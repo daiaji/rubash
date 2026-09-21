@@ -59,7 +59,7 @@ impl Executor {
             // thread-local for the `=`/`:=` brace-op RHS (subst.c:4487).
             let assign_rhs = self.inside_assignment_rhs.get()
                 || ASSIGNMENT_RHS.with(|flag| flag.get());
-            let separator = match self.env_vars.get("IFS").map(String::as_str) {
+            let separator = match self.shell_state.env_vars.get("IFS").map(String::as_str) {
                 // IFS set and non-empty: dollar_star -> IFS[0] for `*`,
                 // dollar_at -> IFS[0] for `@` only outside assignment RHS.
                 Some(ifs) if !ifs.is_empty() => {
@@ -77,7 +77,7 @@ impl Executor {
 
             };
             return Some(
-                self.positional_params
+                self.shell_state.positional_params
                     .iter()
                     .map(|value| self.replace_patsub_pattern(value, &pattern, &replacement, global))
                     .collect::<Vec<_>>()
@@ -86,7 +86,7 @@ impl Executor {
         }
         if let Ok(index) = var_name.parse::<usize>() {
             return Some(
-                self.positional_params
+                self.shell_state.positional_params
                     .get(index.saturating_sub(1))
                     .map(|value| {
                         self.replace_patsub_pattern(
@@ -107,7 +107,7 @@ impl Executor {
             .or_else(|| var_name.strip_suffix("[*]"))
         {
             return Some(
-                self.env_vars
+                self.shell_state.env_vars
                     .get(array_name)
                     .map(|value| {
                         let values = array_values(value)
@@ -154,7 +154,7 @@ impl Executor {
             replacement,
             global,
             self.nocasematch_enabled(),
-            crate::builtins::shopt::option_enabled(&self.env_vars, "patsub_replacement"),
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "patsub_replacement"),
             self.extglob_enabled(),
         )
     }
@@ -168,12 +168,12 @@ impl Executor {
     /// strcreplace pass in pat_subst.
     pub(in crate::executor) fn expand_patsub_replacement_text(&self, replacement: &str) -> String {
         let patsub_replacement =
-            crate::builtins::shopt::option_enabled(&self.env_vars, "patsub_replacement");
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "patsub_replacement");
         let chars: Vec<char> = replacement.chars().collect();
         // GNU expands a leading tilde in the replacement string regardless
         // of outer quoting and of the shopt state (new-exp16.sub P1/P2).
         if chars.first() == Some(&'~') && (replacement == "~" || replacement.starts_with("~/")) {
-            if let Some(expanded) = tilde_expand::expand_word_prefix(replacement, &self.env_vars) {
+            if let Some(expanded) = tilde_expand::expand_word_prefix(replacement, &self.shell_state.env_vars) {
                 let expanded = self.expand_embedded_parameters(&expanded);
                 return self.finish_patsub_replacement(&expanded, patsub_replacement);
             }
@@ -304,7 +304,7 @@ impl Executor {
             return Some(self.replace_patsub_pattern(&target_name, pattern, replacement, global));
         }
 
-        let target_expr = self.env_vars.get(indirect_name)?;
+        let target_expr = self.shell_state.env_vars.get(indirect_name)?;
         let values = self.indirect_target_values(target_expr);
         if values.is_empty() {
             return Some(String::new());

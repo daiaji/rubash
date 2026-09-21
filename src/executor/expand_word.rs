@@ -164,15 +164,15 @@ impl Executor {
             "$?" => Some(self.exit_code.to_string()),
             "$$" => Some(self.shell_pid_value().to_string()),
             "$!" => Some(self.last_background_pid_value()),
-            "$@" => Some(self.positional_params.join(" ")),
+            "$@" => Some(self.shell_state.positional_params.join(" ")),
             // Bash joins `$*` with the first character of IFS, not a space.
             "$*" => Some(
-                self.positional_params
+                self.shell_state.positional_params
                     .join(&self.ifs_first_char_separator()),
             ),
-            "$#" => Some(self.positional_params.len().to_string()),
+            "$#" => Some(self.shell_state.positional_params.len().to_string()),
             "$-" => Some(self.shell_option_flags()),
-            _ => tilde_expand::expand_word_prefix(word, &self.env_vars),
+            _ => tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars),
         }
     }
 
@@ -255,7 +255,7 @@ impl Executor {
             && !compound_assignment
             && !expanded.contains('=')
             && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
-            && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
+            && (self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
                 || expanded.starts_with("~/"))
         {
             return format!("{name}={}", self.expand_assignment_tilde(&expanded));
@@ -284,8 +284,8 @@ impl Executor {
             .and_then(|rest| rest.strip_suffix("))"))
         {
             let expression = self.expand_arithmetic_special_parameters(expression);
-            if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
-                if let Some(name) = arithmetic_unbound_variable(&expression, &self.env_vars) {
+            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
+                if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars) {
                     if !self.arithmetic_expansion_error.replace(true) {
                         eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
                     }
@@ -297,7 +297,7 @@ impl Executor {
                 }
             }
             let (value, actual_category) =
-                eval_conditional_arith_value_categorized(&expression, &self.env_vars);
+                eval_conditional_arith_value_categorized(&expression, &self.shell_state.env_vars);
             if let Some(value) = value {
                 return Some(value.to_string());
             }
@@ -310,7 +310,7 @@ impl Executor {
             let message = crate::executor::arithmetic::arithmetic_error_message(
                 &expression,
                 true,
-                &self.env_vars,
+                &self.shell_state.env_vars,
             )
             .unwrap_or_else(|| {
                 format!(

@@ -156,7 +156,7 @@ impl Executor {
                 " ".to_string()
             };
             return Some(
-                self.positional_params
+                self.shell_state.positional_params
                     .iter()
                     .map(|value| self.apply_parameter_transform_value(value, transform))
                     .collect::<Vec<_>>()
@@ -165,7 +165,7 @@ impl Executor {
         }
         if let Ok(index) = var_name.parse::<usize>() {
             return Some(
-                self.positional_params
+                self.shell_state.positional_params
                     .get(index.saturating_sub(1))
                     .map(|value| self.apply_parameter_transform_value(value, transform))
                     .unwrap_or_default(),
@@ -212,7 +212,7 @@ impl Executor {
         }
         if matches!(var_name, "@" | "*") {
             return Some(
-                self.positional_params
+                self.shell_state.positional_params
                     .iter()
                     .map(|value| apply_parameter_case_mod(value, operation, &pattern))
                     .collect::<Vec<_>>()
@@ -221,7 +221,7 @@ impl Executor {
         }
         if let Ok(index) = var_name.parse::<usize>() {
             return Some(
-                self.positional_params
+                self.shell_state.positional_params
                     .get(index.saturating_sub(1))
                     .map(|value| apply_parameter_case_mod(value, operation, &pattern))
                     .unwrap_or_default(),
@@ -235,7 +235,7 @@ impl Executor {
             .or_else(|| var_name.strip_suffix("[*]"))
         {
             return Some(
-                self.env_vars
+                self.shell_state.env_vars
                     .get(array_name)
                     .map(|value| {
                         let values = array_values(value)
@@ -270,13 +270,13 @@ impl Executor {
             return Some(apply_parameter_case_mod(&target_name, operation, pattern));
         }
 
-        let target_name = self.env_vars.get(indirect_name)?;
+        let target_name = self.shell_state.env_vars.get(indirect_name)?;
         if let Some(array_expr) = target_name
             .strip_suffix("[@]")
             .or_else(|| target_name.strip_suffix("[*]"))
         {
             return Some(
-                self.env_vars
+                self.shell_state.env_vars
                     .get(array_expr)
                     .map(|value| {
                         let values = array_values(value)
@@ -291,8 +291,8 @@ impl Executor {
         if let Some(value) = self.array_element_parameter_value(target_name) {
             return Some(apply_parameter_case_mod(&value, operation, pattern));
         }
-        if let Some(value) = self.env_vars.get(target_name) {
-            if is_marked_array_var(&self.env_vars, target_name) || is_array_storage(value) {
+        if let Some(value) = self.shell_state.env_vars.get(target_name) {
+            if is_marked_array_var(&self.shell_state.env_vars, target_name) || is_array_storage(value) {
                 return Some(
                     array_value_at(value, 0)
                         .map(|value| apply_parameter_case_mod(&value, operation, pattern))

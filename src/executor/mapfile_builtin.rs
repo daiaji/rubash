@@ -473,11 +473,11 @@ impl Executor {
                 let target_exists = if target.contains('[') {
                     self.array_element_parameter_value(&target).is_some()
                 } else {
-                    self.env_vars.contains_key(base)
+                    self.shell_state.env_vars.contains_key(base)
                         || self.shell_state.variables.get(base).is_some()
                 };
                 if target_exists {
-                    if is_marked_var(&self.env_vars, READONLY_VARS, base) {
+                    if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, base) {
                         let _ = writeln!(
                             stderr,
                             "{}{name}: readonly variable",
@@ -503,8 +503,8 @@ impl Executor {
                     "{}warning: {name}: removing nameref attribute",
                     self.diagnostic_prefix()
                 );
-                unmark_env_name(&mut self.env_vars, NAMEREF_VARS, &name);
-                if is_marked_var(&self.env_vars, READONLY_VARS, &name) {
+                unmark_env_name(&mut self.shell_state.env_vars, NAMEREF_VARS, &name);
+                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &name) {
                     let _ = writeln!(
                         stderr,
                         "{}{name}: readonly variable",
@@ -515,7 +515,7 @@ impl Executor {
                 name
             }
             _ => {
-                if is_marked_var(&self.env_vars, READONLY_VARS, &name) {
+                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &name) {
                     let _ = writeln!(
                         stderr,
                         "{}{name}: readonly variable",
@@ -542,7 +542,7 @@ impl Executor {
             }
             let start = origin.unwrap_or(0);
             let mut entries = if origin.is_some() {
-                self.env_vars
+                self.shell_state.env_vars
                     .get(&name)
                     .map(|current| indexed_array_entries(current))
                     .unwrap_or_default()
@@ -563,18 +563,18 @@ impl Executor {
                 }
                 entries.insert(target_index, value);
             }
-            self.env_vars
+            self.shell_state.env_vars
                 .insert(name.clone(), format_indexed_array_storage(entries));
-            mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+            mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
             // Diagnostics already buffered (e.g. the nameref-attribute
             // warning) must still reach stderr on success.
             let _ = self.write_buffered_builtin_output(cmd, &[], &stderr);
             return 0;
         }
 
-        self.env_vars
+        self.shell_state.env_vars
             .insert(name.clone(), format_indexed_array_storage(BTreeMap::new()));
-        mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+        mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
         let _ = self.write_buffered_builtin_output(cmd, &[], &stderr);
         0
     }

@@ -91,7 +91,7 @@ impl Executor {
     ) -> String {
         self.last_command_substitution_status.set(Some(0));
         self.last_command_substitution_parse_error.set(false);
-        let old_depth = self.subshell_depth.get();
+        let old_depth = self.shell_state.subshell_depth.get();
         let saved_command = self.debug_trap_command.borrow().clone();
         // A command substitution is a subshell boundary: an expansion error
         // raised while expanding the substitution's own words (fast-path
@@ -110,13 +110,13 @@ impl Executor {
         // (subst.c:10277): it kills the substitution's command list, never
         // the enclosing word's command.
         let saved_bad_substitution = self.parameter_bad_substitution.replace(false);
-        self.subshell_depth.set(old_depth + 1);
+        self.shell_state.subshell_depth.set(old_depth + 1);
         // Bash evaluates BASH_COMMAND in a command substitution against the
         // substitution's own command source, rather than the outer word.
         *self.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
         let result = self.expand_command_substitution_inner(source, context);
         *self.debug_trap_command.borrow_mut() = saved_command;
-        self.subshell_depth.set(old_depth);
+        self.shell_state.subshell_depth.set(old_depth);
         self.arithmetic_expansion_error.set(saved_expansion_error);
         self.arithmetic_nonfatal_error.set(saved_nonfatal_error);
         self.arithmetic_fatal_error.set(saved_fatal_error);
@@ -197,8 +197,8 @@ impl Executor {
         // shortcuts below can express. Disqualify the whole shortcut family
         // and route the body through the real parser/executor, matching
         // subst.c:7143 command_substitute -> parse_and_execute.
-        if crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace")
-            && crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG")
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "functrace")
+            && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
                 .is_some_and(|action| !action.is_empty())
         {
             if let Some(output) = self.command_list_substitution_output(source, context) {
@@ -397,7 +397,7 @@ impl Executor {
                     }
                 })
                 .collect();
-            let mut env_vars = self.env_vars.clone();
+            let mut env_vars = self.shell_state.env_vars.clone();
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let status = crate::builtins::printf::execute_with_io(
@@ -432,12 +432,12 @@ impl Executor {
                     .and_then(|rest| rest.strip_suffix(')'))
                 {
                     let mut executor = self.command_substitution_executor();
-                    crate::builtins::trap::reset_for_subshell(&mut executor.env_vars);
+                    crate::builtins::trap::reset_for_subshell(&mut executor.shell_state.env_vars);
                     output.push_str(&executor.expand_command_substitution(source));
                     continue;
                 }
                 let path = self.expand_word(word);
-                match fs::read_to_string(shell_path_to_windows(&path, &self.env_vars)) {
+                match fs::read_to_string(shell_path_to_windows(&path, &self.shell_state.env_vars)) {
                     Ok(value) => output.push_str(&value),
                     Err(_) => {
                         status = 1;
@@ -475,14 +475,14 @@ impl Executor {
 
         if words.first().map(String::as_str) == Some("umask") {
             return self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_UMASK")
                 .cloned()
                 .unwrap_or_else(|| "0022".to_string());
         }
 
         if words.first().map(String::as_str) == Some("ulimit") {
-            return crate::builtins::ulimit::command_substitution(&words[1..], &self.env_vars);
+            return crate::builtins::ulimit::command_substitution(&words[1..], &self.shell_state.env_vars);
         }
 
         if words.first().map(String::as_str) == Some("pwd") {
@@ -491,7 +491,7 @@ impl Executor {
                     .map(|path| path.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
             }
-            return self.env_vars.get("PWD").cloned().unwrap_or_default();
+            return self.shell_state.env_vars.get("PWD").cloned().unwrap_or_default();
         }
 
         if words.first().map(String::as_str) == Some("type")
@@ -591,7 +591,7 @@ impl Executor {
         } else {
             self.home_value()
         };
-        let target = shell_path_to_windows(&target, &self.env_vars);
+        let target = shell_path_to_windows(&target, &self.shell_state.env_vars);
         let Ok(path) = fs::canonicalize(target) else {
             self.last_command_substitution_status.set(Some(1));
             return Some(String::new());
@@ -615,7 +615,7 @@ impl Executor {
         // line counter so body diagnostics report the original script line
         // instead of restarting at 1 (subst.c comsub handling).
         let body_start_line = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
@@ -642,7 +642,7 @@ impl Executor {
         // actually invoke trap, preserving specialized substitution modes.
         let has_trap_command = source.split_whitespace().any(|word| word == "trap");
         if has_trap_command {
-            crate::builtins::trap::reset_for_subshell(&mut subshell.env_vars);
+            crate::builtins::trap::reset_for_subshell(&mut subshell.shell_state.env_vars);
         }
         // Keep the command source visible to BASH_COMMAND while the parsed
         // substitution body runs, including DEBUG trap actions.
@@ -657,12 +657,12 @@ impl Executor {
         // counter would keep -e dead even after `set -e`. POSIX mode
         // enables inherit_errexit (set-e1.sub).
         let posix_mode = subshell
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_POSIX_MODE")
             .map(String::as_str)
             == Some("1");
         let inherit_errexit =
-            crate::builtins::shopt::option_enabled(&subshell.env_vars, "inherit_errexit");
+            crate::builtins::shopt::option_enabled(&subshell.shell_state.env_vars, "inherit_errexit");
         // Builtins inside the body that write the process stdout directly
         // consult the thread-local capture — which belongs to an enclosing
         // pipeline stage when this substitution runs inside one, leaking
@@ -673,8 +673,8 @@ impl Executor {
                 subshell.execute_ast(&ast)
             } else {
                 subshell.suppress_errexit = 0;
-                subshell.env_vars.remove("__RUBASH_ERREXIT");
-                crate::builtins::set::set_shell_option(&mut subshell.env_vars, "errexit", false);
+                subshell.shell_state.env_vars.remove("__RUBASH_ERREXIT");
+                crate::builtins::set::set_shell_option(&mut subshell.shell_state.env_vars, "errexit", false);
                 subshell.execute_ast(&ast)
             };
             let mut status = command_substitution_result_status(result, subshell.exit_code);
@@ -696,12 +696,12 @@ impl Executor {
         // child's cursor lives in its env clone; fold it back when both
         // sides still name the same FUNCTION_STDIN buffer.
         if let (Some(parent_input), Some(child_input)) = (
-            self.env_vars.get(FUNCTION_STDIN).cloned(),
-            subshell.env_vars.get(FUNCTION_STDIN).cloned(),
+            self.shell_state.env_vars.get(FUNCTION_STDIN).cloned(),
+            subshell.shell_state.env_vars.get(FUNCTION_STDIN).cloned(),
         ) {
             if parent_input == child_input {
                 if let Some(child_offset) = subshell
-                    .env_vars
+                    .shell_state.env_vars
                     .get(FUNCTION_STDIN_OFFSET)
                     .and_then(|value| value.parse::<usize>().ok())
                 {
@@ -734,9 +734,21 @@ impl Executor {
     }
 
     pub(in crate::executor) fn command_substitution_executor(&self) -> Executor {
+        // The fork copy: every mutable shell datum arrives through the
+        // cloned state boundary (execute_cmd.c:1576 execute_in_subshell /
+        // subst.c:7143 command_substitute), so new semantic fields are
+        // isolated automatically — no per-field list to maintain.
+        let mut shell_state = self.shell_state.clone();
+        // GNU forks carry the parent's loop_level, but a `break` in a real
+        // child can only end the child. In-process the loop-break flag
+        // would reach the parent's live loop, so the boundary resets it —
+        // the same rule the flat `( )` region applies at entry.
+        shell_state.loop_depth = 0;
+        shell_state
+            .subshell_depth
+            .set(self.shell_state.subshell_depth.get() + 1);
         Executor {
-            session_history: None,
-            shell_state: self.shell_state.clone(),
+            shell_state,
             fd_table: self.fd_table.clone(),
             job_table: self.job_table.clone(),
             exit_code: self.exit_code,
@@ -745,31 +757,8 @@ impl Executor {
             // (subshell_environment check); inherit the parent's latch so a
             // subshell logout cannot double-source it either.
             bash_logout_sourced: true,
-            env_vars: self.env_vars.clone(),
-            aliases: self.aliases.clone(),
-            functions: self.functions.clone(),
-            function_definition_redirects: self.function_definition_redirects.clone(),
-            function_def_infos: self.function_def_infos.clone(),
-            function_definition_locations: self.function_definition_locations.clone(),
-            positional_params: self.positional_params.clone(),
-            pipestatus: self.pipestatus.clone(),
-            function_name_stack: self.function_name_stack.clone(),
-            bash_argc_stack: self.bash_argc_stack.clone(),
-            bash_argv_stack: self.bash_argv_stack.clone(),
-            bash_lineno_stack: self.bash_lineno_stack.clone(),
-            bash_source_stack: self.bash_source_stack.clone(),
-            local_var_scopes: self.local_var_scopes.clone(),
-            local_attr_scopes: self.local_attr_scopes.clone(),
-            local_typed_scopes: self.local_typed_scopes.clone(),
-            expanding_aliases: self.expanding_aliases.clone(),
-            loop_depth: 0,
-            function_depth: self.function_depth,
-            dollar_vars_changed_by_set: self.dollar_vars_changed_by_set,
-            random_state: self.random_state.clone_state(),
             shell_pid: self.shell_pid,
-            subshell_depth: Cell::new(self.subshell_depth.get() + 1),
             owns_signal_mailbox: false,
-            last_background_pid: self.last_background_pid,
             arithmetic_expansion_error: Cell::new(false),
             arithmetic_nonfatal_error: Cell::new(false),
             arithmetic_fatal_error: Cell::new(false),
@@ -795,10 +784,7 @@ impl Executor {
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             background_children: HashMap::new(),
-            background_jobs: HashMap::new(),
-            background_job_order: Vec::new(),
             coproc_stdin_writers: HashMap::new(),
-            coproc_names: HashMap::new(),
             coproc_stdout_readers: HashMap::new(),
             coproc_stderr_forwarders: HashMap::new(),
             assignment_output_process_substitutions: HashMap::new(),
@@ -828,8 +814,6 @@ impl Executor {
             external_file_builtins_enabled: self.external_file_builtins_enabled,
             process_env_snapshot: self.process_env_snapshot.clone(),
             history_provider: self.history_provider.clone(),
-            last_notified_job_ids: HashSet::new(),
-            completion_specs: crate::builtins::complete::CompletionRegistry::new(),
         }
     }
 
@@ -839,7 +823,7 @@ impl Executor {
         allow_glob: bool,
     ) -> Option<PathBuf> {
         if !allow_glob || !path.contains('*') || self.posix_mode_enabled() {
-            return Some(shell_path_to_windows(path, &self.env_vars));
+            return Some(shell_path_to_windows(path, &self.shell_state.env_vars));
         }
 
         let normalized = path.replace('\\', "/");
@@ -847,7 +831,7 @@ impl Executor {
             .rsplit_once('/')
             .map(|(dir, pattern)| (if dir.is_empty() { "/" } else { dir }, pattern))
             .unwrap_or((".", normalized.as_str()));
-        let mut matches = shell_directory_entries(dir, &self.env_vars)
+        let mut matches = shell_directory_entries(dir, &self.shell_state.env_vars)
             .ok()?
             .into_iter()
             .filter_map(|entry| case_pattern_matches(pattern, &entry.name).then_some(entry.path))

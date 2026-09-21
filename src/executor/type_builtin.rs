@@ -15,7 +15,7 @@ impl Executor {
             // names and CMDSRCH_STDPATH (`command -p`) lookups; a hit bumps
             // times_found (hashlib.c:254).
             if !use_standard_path && !name.contains('/') && !name.contains('\\') {
-                crate::builtins::hash::bump_hashed_path_hit(&mut self.env_vars, name);
+                crate::builtins::hash::bump_hashed_path_hit(&mut self.shell_state.env_vars, name);
             }
             if !self.describe_name(name, mode, false, false) {
                 status = 1;
@@ -72,7 +72,7 @@ impl Executor {
         let mut status = 0;
         for name in &args[first_name..] {
             if !use_standard_path && !name.contains('/') && !name.contains('\\') {
-                crate::builtins::hash::bump_hashed_path_hit(&mut self.env_vars, name);
+                crate::builtins::hash::bump_hashed_path_hit(&mut self.shell_state.env_vars, name);
             }
             if !self.describe_name_with_io(name, mode, false, false, stdout)? {
                 status = 1;
@@ -98,9 +98,9 @@ impl Executor {
             return None;
         }
 
-        let saved_path = self.env_vars.get("PATH").cloned();
-        self.env_vars
-            .insert("PATH".to_string(), standard_path(&self.env_vars));
+        let saved_path = self.shell_state.env_vars.get("PATH").cloned();
+        self.shell_state.env_vars
+            .insert("PATH".to_string(), standard_path(&self.shell_state.env_vars));
         Some(saved_path)
     }
 
@@ -111,10 +111,10 @@ impl Executor {
 
         match saved_path {
             Some(path) => {
-                self.env_vars.insert("PATH".to_string(), path);
+                self.shell_state.env_vars.insert("PATH".to_string(), path);
             }
             None => {
-                self.env_vars.remove("PATH");
+                self.shell_state.env_vars.remove("PATH");
             }
         }
     }
@@ -197,7 +197,7 @@ impl Executor {
             // non-absolute name lookup runs phash_search, whose hit bumps
             // times_found (hashlib.c:254). `-P` (force_path) skips the table.
             if !force_path && !name.contains('/') && !name.contains('\\') {
-                crate::builtins::hash::bump_hashed_path_hit(&mut self.env_vars, name);
+                crate::builtins::hash::bump_hashed_path_hit(&mut self.shell_state.env_vars, name);
             }
             let found = if all {
                 self.describe_name_all_with_io(name, mode, force_path, skip_functions, stdout)?

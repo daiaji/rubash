@@ -54,16 +54,16 @@ impl Executor {
             return execute(self);
         };
 
-        let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
-        let old_function_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-        self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-        self.env_vars
+        let old_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+        let old_function_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        self.shell_state.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+        self.shell_state.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
 
         let result = execute(self);
-        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_function_stdin);
+        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_function_stdin);
         restore_optional_env_var(
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             FUNCTION_STDIN_OFFSET,
             old_function_stdin_offset,
         );
@@ -109,7 +109,7 @@ impl Executor {
                 };
                 output.into_bytes()
             } else {
-                let path = shell_path_to_windows(&target, &self.env_vars);
+                let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
                 if redirect.append {
                     // Mirrors the exec path (trap_exec.rs): [N]<> opens the
                     // file for reading and writing (redir.c r_input_output,
@@ -128,10 +128,10 @@ impl Executor {
                 saved.push(SavedNumberedFd {
                     fd,
                     entry: self.fd_table.entries.get(&fd).cloned(),
-                    fd_stdin: self.env_vars.get(&fd_stdin_key(fd)).cloned(),
-                    fd_stdin_offset: self.env_vars.get(&fd_stdin_offset_key(fd)).cloned(),
-                    fd_dynamic: self.env_vars.get(&fd_dynamic_input_key(fd)).cloned(),
-                    fd_closed: self.env_vars.get(&fd_closed_key(fd)).cloned(),
+                    fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
+                    fd_stdin_offset: self.shell_state.env_vars.get(&fd_stdin_offset_key(fd)).cloned(),
+                    fd_dynamic: self.shell_state.env_vars.get(&fd_dynamic_input_key(fd)).cloned(),
+                    fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
                 });
             }
             self.set_fd_input_bytes(fd, input, true);
@@ -152,19 +152,19 @@ impl Executor {
                     self.fd_table.entries.remove(&saved.fd);
                 }
             }
-            restore_optional_env_var(&mut self.env_vars, &fd_stdin_key(saved.fd), saved.fd_stdin);
+            restore_optional_env_var(&mut self.shell_state.env_vars, &fd_stdin_key(saved.fd), saved.fd_stdin);
             restore_optional_env_var(
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &fd_stdin_offset_key(saved.fd),
                 saved.fd_stdin_offset,
             );
             restore_optional_env_var(
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &fd_dynamic_input_key(saved.fd),
                 saved.fd_dynamic,
             );
             restore_optional_env_var(
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &fd_closed_key(saved.fd),
                 saved.fd_closed,
             );

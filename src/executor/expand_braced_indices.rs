@@ -304,8 +304,8 @@ impl Executor {
     pub(in crate::executor) fn apply_pending_subscript_writes(&mut self) {
         let writes = PENDING_SUBSCRIPT_WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
         for (name, value) in writes {
-            if self.env_vars.get(&name) != Some(&value) {
-                self.env_vars.insert(name.clone(), value.clone());
+            if self.shell_state.env_vars.get(&name) != Some(&value) {
+                self.shell_state.env_vars.insert(name.clone(), value.clone());
                 // Also sync to shell_state.variables, which is checked
                 // first by shell_variable_value (variable_state.rs:178-184).
                 if let Some(variable) = self.shell_state.variables.get_mut(&name) {
@@ -322,7 +322,7 @@ impl Executor {
         name: &str,
     ) -> Option<String> {
         if name == "DIRSTACK[@]" || name == "DIRSTACK[*]" {
-            return Some(crate::builtins::pushd::stack_words(&self.env_vars));
+            return Some(crate::builtins::pushd::stack_words(&self.shell_state.env_vars));
         }
         if let Some(index) = name
             .strip_prefix("DIRSTACK[")
@@ -330,7 +330,7 @@ impl Executor {
             .and_then(|index| self.dirstack_subscript(index))
         {
             return Some(
-                crate::builtins::pushd::stack_value(&self.env_vars, index).unwrap_or_default(),
+                crate::builtins::pushd::stack_value(&self.shell_state.env_vars, index).unwrap_or_default(),
             );
         }
         if let Some(array_name) = name.strip_prefix('#').and_then(|name| {
@@ -343,7 +343,7 @@ impl Executor {
             return Some(
                 self.parameter_array_storage(array_name)
                     .map(|value| {
-                        if is_marked_array_var(&self.env_vars, array_name)
+                        if is_marked_array_var(&self.shell_state.env_vars, array_name)
                             || is_array_storage(&value)
                         {
                             self.array_length(array_name)
@@ -386,7 +386,7 @@ impl Executor {
 
     fn expand_braced_length_parameter(&self, var_name: &str) -> String {
         if matches!(var_name, "@" | "*") {
-            return self.positional_params.len().to_string();
+            return self.shell_state.positional_params.len().to_string();
         }
         if is_special_parameter_name(var_name) || var_name.parse::<usize>().is_ok() {
             return self
@@ -401,7 +401,7 @@ impl Executor {
             // called and the expansion returns empty (array.tests:232-240
             // ${#xpath[-10]} with max_index=5 -> -4 -> bad array subscript,
             // echo produces an empty line, not "0").
-            if let Some(value) = self.env_vars.get(array_name) {
+            if let Some(value) = self.shell_state.env_vars.get(array_name) {
                 if let Some(resolved) = resolve_indexed_array_subscript(value, index) {
                     if let Some(element) = array_value_at(value, resolved) {
                         return parameter_char_length(&element).to_string();
@@ -420,7 +420,7 @@ impl Executor {
         }
         if let Some((array_name, index)) = parse_array_numeric_subscript(var_name) {
             return self
-                .env_vars
+                .shell_state.env_vars
                 .get(array_name)
                 .and_then(|value| array_value_at(value, index))
                 .map(|value| parameter_char_length(&value).to_string())
@@ -461,7 +461,7 @@ impl Executor {
             {
                 // `$((...))` keeps its own writes-capturing evaluation so
                 // `count++` side effects survive the cloned env.
-                let overlaid = env_vars_with_pending_subscript_writes(&self.env_vars);
+                let overlaid = env_vars_with_pending_subscript_writes(&self.shell_state.env_vars);
                 let (result, writes) =
                     eval_conditional_arith_value_with_writes(expr.trim(), &overlaid);
                 if !writes.is_empty() {
@@ -484,7 +484,7 @@ impl Executor {
                 }
             };
             if let Some(index) = index {
-                if let Some(value) = self.env_vars.get(array_name) {
+                if let Some(value) = self.shell_state.env_vars.get(array_name) {
                     if let Some(resolved) = resolve_indexed_array_subscript(value, index) {
                         if let Some(element) = array_value_at(value, resolved) {
                             return parameter_char_length(&element).to_string();
@@ -511,10 +511,10 @@ impl Executor {
         // element contributes that element; an invalid cell falls back to
         // the length of the cell string itself
         // (nameref24.sub: name4 -> 'aa&bb' prints 5, name2 -> unset prints 0).
-        if is_marked_var(&self.env_vars, NAMEREF_VARS, var_name) {
-            let cell = self.env_vars.get(var_name).cloned().unwrap_or_default();
+        if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, var_name) {
+            let cell = self.shell_state.env_vars.get(var_name).cloned().unwrap_or_default();
             if is_shell_name(&cell) {
-                if let Some(target_value) = self.env_vars.get(&cell) {
+                if let Some(target_value) = self.shell_state.env_vars.get(&cell) {
                     if is_array_storage(target_value) {
                         let element_zero = if self.is_assoc_parameter_array(&cell) {
                             assoc_value_at(target_value, "0")
@@ -547,7 +547,7 @@ impl Executor {
                 }
                 if let Some(index) = key.parse::<usize>().ok() {
                     return self
-                        .env_vars
+                        .shell_state.env_vars
                         .get(array_name)
                         .and_then(|value| array_value_at(value, index))
                         .map(|value| parameter_char_length(&value).to_string())
@@ -557,7 +557,7 @@ impl Executor {
             }
             return parameter_char_length(&cell).to_string();
         }
-        self.env_vars
+        self.shell_state.env_vars
             .get(var_name)
             .map(|value| {
                 if is_array_storage(value) {
@@ -592,7 +592,7 @@ impl Executor {
                 " ".to_string()
             };
             return positional_parameter_substring_with_zero(
-                &self.positional_params,
+                &self.shell_state.positional_params,
                 &self.script_name_value(),
                 offset,
                 length,
@@ -645,7 +645,7 @@ impl Executor {
             return Some(parameter_substring(&target_name, offset, length));
         }
 
-        let target_expr = self.env_vars.get(indirect_name)?;
+        let target_expr = self.shell_state.env_vars.get(indirect_name)?;
         if target_expr.ends_with("[@]") || target_expr.ends_with("[*]") {
             let values = slice_array_values(
                 self.indirect_target_values(target_expr),

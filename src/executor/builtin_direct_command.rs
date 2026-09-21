@@ -34,7 +34,7 @@ impl Executor {
         let mut builtin_cmd = cmd.clone();
         builtin_cmd.words = args.to_vec();
 
-        if crate::builtins::enable::is_disabled(&self.env_vars, name) {
+        if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, name) {
             self.write_builtin_not_found(cmd, name)?;
             self.exit_code = 1;
             return Ok(());

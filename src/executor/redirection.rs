@@ -406,7 +406,7 @@ impl Executor {
                 OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             } else {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
@@ -530,7 +530,7 @@ impl OutputFdState {
                 let mut file = OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&path, &executor.env_vars))?;
+                    .open(shell_path_to_windows(&path, &executor.shell_state.env_vars))?;
                 file.write_all(output)?;
                 Ok(())
             }

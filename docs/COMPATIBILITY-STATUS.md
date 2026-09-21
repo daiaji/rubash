@@ -15,7 +15,19 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-21，master 回归修复后全量 true-baseline 重跑）：57 零差 / 26 有 DIFF / 总 733 行**
+> **最新台账（2026-09-22，修正重计数——完整测试种子 + 完好辅助二进制）：55 零差 / 28 有 DIFF / 总 799 原始行**
+> （其中 `jobs` 31 + `history` 173 = 204 行为 harness 40s 超时双侧截断的测量伪影——
+> GNU 侧 jobs rc=124、history rc=137 均被 timeout 杀死，非 rubash 语义差；
+> 真实语义差 ≈595 行 / 26 套件。本台账取代 2026-09-21 的 "57 零差 / 733 行"：
+> 该数字测于不完整种子目录（缺 ~190 个 `.sub`/`test-glue-functions`/helper 文件，
+> 双侧同报 "No such file" 产生假零差；`procsub`/`nquote`/`iquote` 等套件当时
+> 实际未测到真实行为）。本次同步发现并修复：`kill -n9`/`-sNAME` 黏连信号规格
+> （kill.def:134-142）、`set -m` 未映射 monitor 选项（support_names.rs）、
+> `fg`/`bg` 对非作业控制作业的 J_JOBCONTROL 检查（fg_bg.def:154-160）、
+> `${THIS_SH}` 同进程子壳作业表泄漏（execute_cmd.c:6139-6233 进程边界语义）、
+> 以及 posixpipe.tests 脚本名硬编码 hack 整族删除。）
+>
+> **上一台账（2026-09-21，已作废——种子不完整）：57 零差 / 26 有 DIFF / 总 733 行**
 > （DIFF 1-50：19 套件；51-250：7 套件；251+：0。较 848 行净减 115，
 > 逐套件对比无任何套件变差：attr 40→0、shopt 38→0、varenv 18→0、
 > heredoc 5→0、lastpipe 5→0、comsub-eof 2→0、comsub-posix 19→14、

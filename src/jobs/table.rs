@@ -32,6 +32,10 @@ pub struct JobEntry {
     pub foreground: bool,
     pub notified: bool,
     pub coproc_endpoints: Vec<u32>,
+    /// GNU jobs.c J_JOBCONTROL: whether the job was started while job
+    /// control (`set -m`) was active. fg/bg must refuse jobs without it
+    /// (fg_bg.def:159 "job %d started without job control").
+    pub job_control: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -87,6 +91,7 @@ impl JobTable {
             foreground: !background,
             notified: false,
             coproc_endpoints: Vec::new(),
+            job_control: false,
         };
         for pid in pids {
             self.pid_to_job.insert(pid, id);
@@ -152,6 +157,27 @@ impl JobTable {
             process.exit_status = Some(status);
         }
         self.recompute_job(job_id);
+    }
+
+    /// GNU jobs.c J_JOBCONTROL flag, recorded at spawn: fg/bg refuse jobs
+    /// started without job control (fg_bg.def:159).
+    pub fn set_job_control(&mut self, pid: u32, job_control: bool) {
+        if let Some(job_id) = self.pid_to_job.get(&pid).copied() {
+            if let Some(job) = self.jobs.get_mut(&job_id) {
+                job.job_control = job_control;
+            }
+        }
+    }
+
+    pub fn job_control_for_pid(&self, pid: u32) -> bool {
+        self.pid_to_job
+            .get(&pid)
+            .and_then(|job_id| self.jobs.get(job_id))
+            .is_some_and(|job| job.job_control)
+    }
+
+    pub fn job_id_for_pid(&self, pid: u32) -> Option<JobId> {
+        self.pid_to_job.get(&pid).copied()
     }
 
     pub fn mark_stopped(&mut self, pid: u32) {

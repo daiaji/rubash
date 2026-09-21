@@ -10,7 +10,7 @@ impl Executor {
     ) -> bool {
         if !force_path {
             if self.alias_expansion_enabled() {
-                if let Some(alias) = self.aliases.get(name) {
+                if let Some(alias) = self.shell_state.aliases.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
                             println!("{name} is aliased to `{}'", alias.value);
@@ -52,7 +52,7 @@ impl Executor {
             }
 
             if !skip_functions {
-                if let Some(body) = self.functions.get(name) {
+                if let Some(body) = self.shell_state.functions.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
                             self.print_function_description(name, &body.commands)
@@ -79,7 +79,7 @@ impl Executor {
         if let Some(path) = self.command_path(name, force_path) {
             match mode {
                 TypeDescribeMode::Verbose => {
-                    if crate::builtins::hash::hashed_path(&self.env_vars, name).is_some() {
+                    if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name).is_some() {
                         println!("{name} is hashed ({path})");
                     } else {
                         println!("{name} is {path}");
@@ -107,7 +107,7 @@ impl Executor {
     {
         if !force_path {
             if self.alias_expansion_enabled() {
-                if let Some(alias) = self.aliases.get(name) {
+                if let Some(alias) = self.shell_state.aliases.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
                             writeln!(stdout, "{name} is aliased to `{}'", alias.value)?;
@@ -150,7 +150,7 @@ impl Executor {
             }
 
             if !skip_functions {
-                if let Some(body) = self.functions.get(name) {
+                if let Some(body) = self.shell_state.functions.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
                             self.write_function_description(name, &body.commands, stdout)?
@@ -177,7 +177,7 @@ impl Executor {
         if let Some(path) = self.command_path(name, force_path) {
             match mode {
                 TypeDescribeMode::Verbose => {
-                    if crate::builtins::hash::hashed_path(&self.env_vars, name).is_some() {
+                    if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name).is_some() {
                         writeln!(stdout, "{name} is hashed ({path})")?;
                     } else {
                         writeln!(stdout, "{name} is {path}")?;
@@ -209,7 +209,7 @@ impl Executor {
 
         if !force_path && mode != TypeDescribeMode::PathOnly {
             if self.alias_expansion_enabled() {
-                if let Some(alias) = self.aliases.get(name) {
+                if let Some(alias) = self.shell_state.aliases.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
                             writeln!(stdout, "{name} is aliased to `{}'", alias.value)?;
@@ -256,7 +256,7 @@ impl Executor {
             }
 
             if !skip_functions {
-                if let Some(body) = self.functions.get(name) {
+                if let Some(body) = self.shell_state.functions.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
                             self.write_function_description(name, &body.commands, stdout)?
@@ -284,7 +284,7 @@ impl Executor {
             match mode {
                 TypeDescribeMode::Verbose => {
                     if !force_path
-                        && crate::builtins::hash::hashed_path(&self.env_vars, name).is_some()
+                        && crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name).is_some()
                     {
                         writeln!(stdout, "{name} is hashed ({path})")?;
                     } else {

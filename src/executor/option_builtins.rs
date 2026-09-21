@@ -11,7 +11,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::hash::execute_with_io(
             &cmd.words[1..],
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
         )?;
@@ -27,7 +27,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::shopt::execute_with_io(
             &cmd.words[1..],
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
         )?;
@@ -47,7 +47,7 @@ impl Executor {
             command_name,
             enable,
             &cmd.words[1..],
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
         )?;
@@ -63,7 +63,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::umask::execute_with_io(
             &cmd.words[1..],
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
         )?;

@@ -7,10 +7,10 @@ impl Executor {
         unquoted: bool,
     ) -> Option<String> {
         match name {
-            "#" => return Some(self.positional_params.len().to_string()),
+            "#" => return Some(self.shell_state.positional_params.len().to_string()),
             // GNU string_list_dollar_star: `*` joins with IFS[0] in scalar
             // contexts; `@` stays space-joined.
-            "@" => return Some(self.positional_params.join(" ")),
+            "@" => return Some(self.shell_state.positional_params.join(" ")),
             "*" => return Some(self.positional_params_star_joined()),
             "?" => return Some(self.exit_code.to_string()),
             "$" => return Some(self.shell_pid_value().to_string()),
@@ -22,7 +22,7 @@ impl Executor {
 
         if let Ok(index) = name.parse::<usize>() {
             return Some(
-                self.positional_params
+                self.shell_state.positional_params
                     .get(index.saturating_sub(1))
                     .cloned()
                     .unwrap_or_default(),
@@ -108,9 +108,9 @@ impl Executor {
                     .map(|value| {
                         if let Some(resolved) = storage_name
                             .as_deref()
-                            .filter(|name| is_marked_var(&self.env_vars, ASSOC_VARS, name))
+                            .filter(|name| is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name))
                         {
-                            assoc_keys(&value, assoc_nbuckets(&self.env_vars, resolved))
+                            assoc_keys(&value, assoc_nbuckets(&self.shell_state.env_vars, resolved))
                                 .join(&separator)
                         } else {
                             array_indices(&value).join(&separator)
@@ -135,7 +135,7 @@ impl Executor {
             // unquoted both join with IFS[0] (' ' when unset/empty) and the
             // caller's field split reproduces the per-name fields.
             let mut names: Vec<&str> = self
-                .env_vars
+                .shell_state.env_vars
                 .keys()
                 .map(String::as_str)
                 .filter(|name| is_shell_name(name) && name.starts_with(prefix))
@@ -145,7 +145,7 @@ impl Executor {
         }
 
         if indirect_name == "#" {
-            return Some(self.positional_params.last().cloned().unwrap_or_default());
+            return Some(self.shell_state.positional_params.last().cloned().unwrap_or_default());
         }
 
         // GNU subst.c parameter_brace_expand_indir: the target may itself be
@@ -164,7 +164,7 @@ impl Executor {
         }
 
         let target_name = if let Ok(index) = indirect_name.parse::<usize>() {
-            self.positional_params
+            self.shell_state.positional_params
                 .get(index.saturating_sub(1))
                 .cloned()
                 .unwrap_or_default()
@@ -183,8 +183,8 @@ impl Executor {
             // expands empty here.
             let element = match self.resolved_variable_name(base) {
                 Some(resolved) => {
-                    let base_is_array = is_marked_var(&self.env_vars, ARRAY_VARS, &resolved)
-                        || is_marked_var(&self.env_vars, ASSOC_VARS, &resolved)
+                    let base_is_array = is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, &resolved)
+                        || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved)
                         || self.parameter_array_storage(&resolved).is_some();
                     if base_is_array {
                         self.array_element_parameter_value(&format!("{resolved}[{sub}]"))
@@ -200,7 +200,7 @@ impl Executor {
             };
             element.unwrap_or_default()
         } else {
-            self.env_vars
+            self.shell_state.env_vars
                 .get(indirect_name)
                 .cloned()
                 .unwrap_or_default()
@@ -226,8 +226,8 @@ impl Executor {
             .or_else(|| target_name.strip_suffix("[*]"))
         {
             if let Some(resolved) = self.resolved_variable_name(base) {
-                if is_marked_var(&self.env_vars, ARRAY_VARS, &resolved)
-                    || is_marked_var(&self.env_vars, ASSOC_VARS, &resolved)
+                if is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, &resolved)
+                    || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved)
                     || self.parameter_array_storage(&resolved).is_some()
                 {
                     let separator = if target_name.ends_with("[*]") {
@@ -238,12 +238,12 @@ impl Executor {
                     return Some(
                         self.parameter_array_storage(&resolved)
                             .map(|value| {
-                                if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+                                if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved) {
                                     // GNU assoc_reference order follows the
                                     // hash table's bucket order, not
                                     // insertion order (hashlib.c).
                                     let nbuckets =
-                                        assoc_nbuckets(&self.env_vars, &resolved);
+                                        assoc_nbuckets(&self.shell_state.env_vars, &resolved);
                                     bash_assoc_order(&assoc_entries(&value), nbuckets)
                                         .into_iter()
                                         .map(|(_, (_, entry_value))| entry_value)
@@ -269,10 +269,10 @@ impl Executor {
         // re-expands as $@/$*; scalar context joins with a space for @ and
         // IFS[0] for * (string_list_dollar_at / string_list_dollar_star).
         match target_name.as_str() {
-            "@" => return Some(self.positional_params.join(" ")),
+            "@" => return Some(self.shell_state.positional_params.join(" ")),
             "*" => {
                 return Some(
-                    self.positional_params
+                    self.shell_state.positional_params
                         .join(&self.ifs_first_char_separator()),
                 )
             }

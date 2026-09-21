@@ -131,7 +131,7 @@ impl Executor {
 
         if let Some((name, name_index)) = wait_assign_var(&cmd.words[1..]) {
             let expand_once =
-                crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once");
+                crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once");
             // GNU wait.def:156 SET_VFLAGS (builtins/common.h:279): the -p
             // operand's arrayflags are VA_NOEXPAND when array_expand_once
             // is on, plus VA_ONEWORD only when the option is on AND the
@@ -148,7 +148,7 @@ impl Executor {
                         &metadata.raw,
                         false,
                         false,
-                        &self.env_vars,
+                        &self.shell_state.env_vars,
                     )
                 });
             // wait.def:157: valid_identifier OR valid_array_reference under
@@ -158,7 +158,7 @@ impl Executor {
                     &name,
                     expand_once,
                     expand_once && w_arrayref,
-                    &self.env_vars,
+                    &self.shell_state.env_vars,
 
                 )
             {
@@ -171,7 +171,7 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 return Ok(1);
             }
-            if is_marked_var(&self.env_vars, READONLY_VARS, &name) {
+            if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &name) {
                 let mut stderr = Vec::new();
                 writeln!(
                     stderr,
@@ -189,7 +189,7 @@ impl Executor {
                 // ASS_ONEWORD.
                 self.unset_array_element(&name, expand_once);
             } else {
-                self.env_vars.remove(&name);
+                self.shell_state.env_vars.remove(&name);
             }
         }
         if let Some(request) = wait_any_request(&cmd.words[1..]) {
@@ -332,7 +332,7 @@ impl Executor {
     /// alone (VA_ONEWORD from W_ARRAYREF only widens the subscript close
     /// to the last `]`; it does not make the bind verbatim).
     fn wait_var_arrayref(&self) -> bool {
-        crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once")
+        crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once")
     }
 
     /// GNU builtin_bind_var_to_int: an element name binds that element with
@@ -351,9 +351,9 @@ impl Executor {
         } else {
             SubscriptSource::ExpandedOnce(subscript)
         };
-        let current = self.env_vars.get(&base).cloned().unwrap_or_default();
-        if is_marked_var(&self.env_vars, ASSOC_VARS, &base)
-            || (!is_marked_array_var(&self.env_vars, &base)
+        let current = self.shell_state.env_vars.get(&base).cloned().unwrap_or_default();
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &base)
+            || (!is_marked_array_var(&self.shell_state.env_vars, &base)
                 && !is_array_storage(&current)
                 && !matches!(
                     self.eval_indexed_subscript(source),
@@ -367,9 +367,9 @@ impl Executor {
             } else {
                 entries.push((key, value));
             }
-            self.env_vars.insert(base.clone(), format_assoc_storage(entries));
-            if !is_marked_var(&self.env_vars, ASSOC_VARS, &base) {
-                mark_env_name(&mut self.env_vars, ASSOC_VARS, &base);
+            self.shell_state.env_vars.insert(base.clone(), format_assoc_storage(entries));
+            if !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &base) {
+                mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, &base);
             }
             return;
         }
@@ -377,10 +377,10 @@ impl Executor {
             IndexedSubscript::Index(index) => {
                 let mut entries = indexed_array_entries(&current);
                 entries.insert(index as usize, value);
-                self.env_vars
+                self.shell_state.env_vars
                     .insert(base.clone(), format_indexed_array_storage(entries));
-                if !is_marked_array_var(&self.env_vars, &base) {
-                    mark_env_name(&mut self.env_vars, ARRAY_VARS, &base);
+                if !is_marked_array_var(&self.shell_state.env_vars, &base) {
+                    mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, &base);
                 }
             }
             _ => {
@@ -499,11 +499,11 @@ impl Executor {
     /// variable`. Runs for every coproc name recorded at spawn, including
     /// names whose coproc_bind failed (invalid identifier, readonly).
     fn coproc_unset_vars(&mut self, pid: u32) {
-        let Some(name) = self.coproc_names.remove(&pid) else {
+        let Some(name) = self.shell_state.coproc_names.remove(&pid) else {
             return;
         };
         let pid_name = format!("{name}_PID");
-        self.env_vars.remove(&pid_name);
+        self.shell_state.env_vars.remove(&pid_name);
         self.shell_state.variables.remove(&pid_name);
         for marker in [
             READONLY_VARS,
@@ -513,12 +513,12 @@ impl Executor {
             ASSOC_128_VARS,
             DECLARED_UNSET_VARS,
         ] {
-            unmark_env_name(&mut self.env_vars, marker, &pid_name);
+            unmark_env_name(&mut self.shell_state.env_vars, marker, &pid_name);
         }
         let unbind_name = self
             .resolved_variable_name(&name)
             .unwrap_or_else(|| name.clone());
-        if is_marked_var(&self.env_vars, READONLY_VARS, &unbind_name) {
+        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &unbind_name) {
             eprintln!(
                 "{}{}: cannot unset: readonly variable",
                 self.diagnostic_prefix(),
@@ -526,10 +526,10 @@ impl Executor {
             );
             return;
         }
-        self.env_vars.remove(&unbind_name);
+        self.shell_state.env_vars.remove(&unbind_name);
         self.shell_state.variables.remove(&unbind_name);
         for marker in [ARRAY_VARS, ASSOC_VARS, ASSOC_128_VARS, DECLARED_UNSET_VARS] {
-            unmark_env_name(&mut self.env_vars, marker, &unbind_name);
+            unmark_env_name(&mut self.shell_state.env_vars, marker, &unbind_name);
         }
     }
 
@@ -570,18 +570,18 @@ impl Executor {
             .collect::<Vec<_>>();
         for fd in endpoint_fds {
             self.fd_table.close(fd);
-            self.env_vars.remove(&fd_stdin_key(fd));
-            self.env_vars.remove(&fd_stdin_offset_key(fd));
-            self.env_vars.remove(&fd_dynamic_input_key(fd));
-            self.env_vars.remove(&fd_output_key(fd));
-            self.env_vars
+            self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+            self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+            self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+            self.shell_state.env_vars.remove(&fd_output_key(fd));
+            self.shell_state.env_vars
                 .remove(&fd_output_process_substitution_key(fd));
-            self.env_vars.insert(fd_closed_key(fd), "1".to_string());
+            self.shell_state.env_vars.insert(fd_closed_key(fd), "1".to_string());
         }
         self.coproc_unset_vars(pid);
 
         let coproc_prefix = format!("{FD_COPROC_STDIN_TARGET_PREFIX}{pid}");
-        self.env_vars.retain(|key, value| {
+        self.shell_state.env_vars.retain(|key, value| {
             !((key.starts_with(FD_STDIN_PREFIX) || key.starts_with(FD_OUTPUT_PREFIX))
                 && value == &coproc_prefix)
         });
@@ -589,8 +589,8 @@ impl Executor {
 
     fn forget_background_runtime(&mut self, pid: u32) {
         self.background_children.remove(&pid);
-        self.background_jobs.remove(&pid);
-        self.background_job_order.retain(|job_pid| *job_pid != pid);
+        self.shell_state.background_jobs.remove(&pid);
+        self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
         // Close the coproc endpoint fds for this pid before dropping the
         // pipe maps, mirroring retire_completed_coproc's fd cleanup so the
         // high fds 63/60 become reusable for the next coproc (coproc.tests
@@ -731,7 +731,7 @@ impl Executor {
                     continue;
                 }
             }
-            if options.changed_only && self.last_notified_job_ids.contains(&job_number) {
+            if options.changed_only && self.shell_state.last_notified_job_ids.contains(&job_number) {
                 continue;
             }
             let state_text = state_text_opt.unwrap_or_else(|| "Unknown".to_string());
@@ -759,7 +759,7 @@ impl Executor {
 "));
             }
             if options.changed_only {
-                self.last_notified_job_ids.insert(job_number);
+                self.shell_state.last_notified_job_ids.insert(job_number);
             }
         }
         output
@@ -779,14 +779,14 @@ impl Executor {
             crate::builtins::disown::DisownAction::Complete(status) => status,
             crate::builtins::disown::DisownAction::All => {
                 let pids: Vec<u32> = self
-                    .background_jobs
+                    .shell_state.background_jobs
                     .keys()
                     .copied()
                     .chain(self.background_children.keys().copied())
                     .collect();
                 self.background_children.clear();
-                self.background_jobs.clear();
-                self.background_job_order.clear();
+                self.shell_state.background_jobs.clear();
+                self.shell_state.background_job_order.clear();
                 self.coproc_stdin_writers.clear();
                 self.coproc_stdout_readers.clear();
                 for pid in pids {
@@ -813,8 +813,8 @@ impl Executor {
                 for job in jobs {
                     if let Some(pid) = self.resolve_background_job(&job) {
                         self.background_children.remove(&pid);
-                        self.background_jobs.remove(&pid);
-                        self.background_job_order.retain(|job_pid| *job_pid != pid);
+                        self.shell_state.background_jobs.remove(&pid);
+                        self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
                         self.coproc_stdin_writers.remove(&pid);
                         self.coproc_stdout_readers.remove(&pid);
                         self.fd_table.close(pid);
@@ -836,17 +836,17 @@ impl Executor {
     }
 
     fn disown_current_job(&mut self) -> bool {
-        let Some(pid) = self.last_background_pid else {
+        let Some(pid) = self.shell_state.last_background_pid else {
             return false;
         };
-        if !self.background_children.contains_key(&pid) && !self.background_jobs.contains_key(&pid)
+        if !self.background_children.contains_key(&pid) && !self.shell_state.background_jobs.contains_key(&pid)
         {
             return false;
         }
 
         self.background_children.remove(&pid);
-        self.background_jobs.remove(&pid);
-        self.background_job_order.retain(|job_pid| *job_pid != pid);
+        self.shell_state.background_jobs.remove(&pid);
+        self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
         self.coproc_stdin_writers.remove(&pid);
         self.coproc_stdout_readers.remove(&pid);
         self.fd_table.close(pid);
@@ -891,7 +891,15 @@ impl Executor {
             &self.diagnostic_prefix(),
             &mut stderr,
         )?;
-        let has_job_control = self.job_table.jobs.values().any(|job| job.background);
+        // GNU fg_bg.def:108-113 — `job_control == 0` (the monitor option,
+        // off by default in non-interactive shells) reports "no job
+        // control" before any operand processing, regardless of whether
+        // background jobs exist. A background job table entry alone does
+        // not imply job control.
+        let has_job_control = crate::builtins::set::shell_option_enabled(
+            &self.shell_state.env_vars,
+            "monitor",
+        );
         let status = match action {
             // Bash reports the non-interactive job-control failure before
             // validating fg/bg operands or options when no jobs exist.
@@ -938,17 +946,31 @@ impl Executor {
             return Ok(1);
         };
 
+        // GNU fg_bg.def:154-160 — a job started without job control
+        // (J_JOBCONTROL unset, e.g. spawned before `set -m`) cannot be
+        // foregrounded; refuse instead of waiting on it.
+        if !self.job_table.job_control_for_pid(pid) {
+            let job_id = self.job_table.job_id_for_pid(pid).unwrap_or(0);
+            writeln!(
+                stderr,
+                "{}fg: job {} started without job control",
+                self.diagnostic_prefix(),
+                job_id
+            )?;
+            return Ok(1);
+        }
+
         let Some(mut child) = self.background_children.remove(&pid) else {
-            self.background_jobs.remove(&pid);
-            self.background_job_order.retain(|job_pid| *job_pid != pid);
+            self.shell_state.background_jobs.remove(&pid);
+            self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
             self.coproc_stdin_writers.remove(&pid);
             self.coproc_stdout_readers.remove(&pid);
             self.fd_table.close(pid);
             self.write_job_not_found("fg", job, stderr)?;
             return Ok(1);
         };
-        self.background_jobs.remove(&pid);
-        self.background_job_order.retain(|job_pid| *job_pid != pid);
+        self.shell_state.background_jobs.remove(&pid);
+        self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
         self.coproc_stdin_writers.remove(&pid);
         self.coproc_stdout_readers.remove(&pid);
         self.fd_table.close(pid);
@@ -976,6 +998,17 @@ impl Executor {
         let mut status = 0;
         for job in requested {
             if let Some(pid) = self.resolve_requested_background_job(job) {
+                if !self.job_table.job_control_for_pid(pid) {
+                    let job_id = self.job_table.job_id_for_pid(pid).unwrap_or(0);
+                    writeln!(
+                        stderr,
+                        "{}bg: job {} started without job control",
+                        self.diagnostic_prefix(),
+                        job_id
+                    )?;
+                    status = 1;
+                    continue;
+                }
                 self.job_table.mark_running(pid);
                 if let Some(job_id) = self.job_table.pid_to_job.get(&pid).copied() {
                     if let Some(entry) = self.job_table.jobs.get_mut(&job_id) {
@@ -1046,13 +1079,13 @@ impl Executor {
         // but only when no host provider is installed: an installed
         // provider IS the history list (the host owns interactive
         // history), so an auto-created empty session must not shadow it.
-        if self.session_history.is_none() && self.history_provider.is_none() {
+        if self.shell_state.session_history.is_none() && self.history_provider.is_none() {
             let session = std::rc::Rc::new(std::cell::RefCell::new(
                 crate::history::SessionHistory::new(),
             ));
             self.set_session_history(Some(session));
         }
-        if let Some(session) = self.session_history.clone() {
+        if let Some(session) = self.shell_state.session_history.clone() {
             // The shell's own session history (scripts that ran
             // "set -o history") takes precedence over the host provider.
             let status = super::history_exec::execute_history_session(
@@ -1265,7 +1298,7 @@ impl Executor {
             .get_env("__RUBASH_POSIX_MODE")
             .map(|v| v == "1")
             .unwrap_or(false);
-        let session = self.session_history.clone();
+        let session = self.shell_state.session_history.clone();
         let result = if let Some(session) = session.as_ref() {
             let (entries, base, last_added) = {
                 let shell = session.borrow();
@@ -1341,7 +1374,7 @@ impl Executor {
                     return Ok(1);
                 }
                 let editor_path =
-                    crate::executor::path::find_user_command(&editor_name, &self.env_vars)
+                    crate::executor::path::find_user_command(&editor_name, &self.shell_state.env_vars)
                         .unwrap_or_else(|| std::path::PathBuf::from(&editor_name));
                 let edit_status = std::process::Command::new(&editor_path).arg(&path).status();
                 match edit_status {
@@ -1449,7 +1482,7 @@ impl Executor {
             // then -p print / -r remove / register per name against the
             // registry. Bare complete (no words) prints all specs.
             if args.is_empty() {
-                for (name, cs) in self.completion_specs.iter() {
+                for (name, cs) in self.shell_state.completion_specs.iter() {
                     crate::builtins::complete::print_compspec_line(name, cs, &mut stdout)?;
                 }
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
@@ -1482,7 +1515,7 @@ impl Executor {
                 // -p overrides everything else (complete.def:426-441).
                 let mut status = 0;
                 if let Some(pseudo) = pseudo {
-                    match self.completion_specs.get(pseudo) {
+                    match self.shell_state.completion_specs.get(pseudo) {
                         Some(cs) => {
                             crate::builtins::complete::print_compspec_line(
                                 pseudo,
@@ -1502,7 +1535,7 @@ impl Executor {
                     // print_cmd_completions (complete.def:630-650): argument
                     // order, unknown names error and fail the builtin.
                     for target in &parsed.operands {
-                        match self.completion_specs.get(target.as_str()) {
+                        match self.shell_state.completion_specs.get(target.as_str()) {
                             Some(cs) => {
                                 crate::builtins::complete::print_compspec_line(
                                     target,
@@ -1520,7 +1553,7 @@ impl Executor {
                         }
                     }
                 } else {
-                    for (name, cs) in self.completion_specs.iter() {
+                    for (name, cs) in self.shell_state.completion_specs.iter() {
                         crate::builtins::complete::print_compspec_line(name, cs, &mut stdout)?;
                     }
                 }
@@ -1532,7 +1565,7 @@ impl Executor {
                 // errors on unknown names, bare -r flushes the table.
                 let mut status = 0;
                 if let Some(pseudo) = pseudo {
-                    if !self.completion_specs.remove(pseudo) {
+                    if !self.shell_state.completion_specs.remove(pseudo) {
                         writeln!(
                             stderr,
                             "{diagnostic_prefix}complete: {pseudo}: no completion specification"
@@ -1541,7 +1574,7 @@ impl Executor {
                     }
                 } else if !parsed.operands.is_empty() {
                     for target in &parsed.operands {
-                        if !self.completion_specs.remove(target) {
+                        if !self.shell_state.completion_specs.remove(target) {
                             writeln!(
                                 stderr,
                                 "{diagnostic_prefix}complete: {target}: no completion specification"
@@ -1550,7 +1583,7 @@ impl Executor {
                         }
                     }
                 } else {
-                    self.completion_specs.flush();
+                    self.shell_state.completion_specs.flush();
                 }
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 return Ok(status);
@@ -1565,15 +1598,15 @@ impl Executor {
             // Register the compspec for every name (complete.def:480-485).
             let spec = crate::builtins::complete::Compspec::from_parsed(&parsed);
             if let Some(pseudo) = pseudo {
-                self.completion_specs.insert(pseudo, spec.clone());
+                self.shell_state.completion_specs.insert(pseudo, spec.clone());
             }
             for target in &parsed.operands {
-                self.completion_specs.insert(target, spec.clone());
+                self.shell_state.completion_specs.insert(target, spec.clone());
             }
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(0);
         }
-        let function_names: Vec<String> = self.functions.keys().cloned().collect();
+        let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         let job_names: Vec<String> = self
             .job_table
             .jobs
@@ -1584,8 +1617,8 @@ impl Executor {
         let status = crate::builtins::complete::execute_with_io(
             builtin,
             &cmd.words[1..],
-            &self.env_vars,
-            &self.aliases,
+            &self.shell_state.env_vars,
+            &self.shell_state.aliases,
             &function_names,
             &job_names,
             &diagnostic_prefix,
@@ -1605,7 +1638,7 @@ impl Executor {
                         .lines()
                         .map(str::to_string)
                         .collect();
-                    store_indexed_array(&mut self.env_vars, &varname, values);
+                    store_indexed_array(&mut self.shell_state.env_vars, &varname, values);
                 }
                 stdout.clear();
             }

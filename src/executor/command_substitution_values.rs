@@ -158,12 +158,12 @@ impl Executor {
                     words[1..].iter().map(|w| self.expand_word(w)).collect();
                 use std::io::Write;
                 use std::process::Stdio;
-                let program = find_user_command(&cmd_name, &self.env_vars)?;
+                let program = find_user_command(&cmd_name, &self.shell_state.env_vars)?;
                 let (mut process, _) = external_command_for_named_program(
                     &program,
                     Some(&cmd_name),
                     &expanded_args,
-                    &self.env_vars,
+                    &self.shell_state.env_vars,
                 );
                 self.apply_child_environment(&mut process);
                 let mut child = process
@@ -251,7 +251,7 @@ impl Executor {
         &self,
         word: &str,
     ) -> Vec<String> {
-        match glob::pathname_expand_word(word, &self.env_vars) {
+        match glob::pathname_expand_word(word, &self.shell_state.env_vars) {
             glob::PathnameExpansion::Matches(matches) => matches,
             glob::PathnameExpansion::NoMatch => vec![word.to_string()],
             glob::PathnameExpansion::Fail(_) => vec![word.to_string()],
@@ -307,10 +307,10 @@ impl Executor {
             .unwrap_or(word);
         let word = word.strip_prefix('\x1d').unwrap_or(word);
         if word == "${@}" {
-            return Some(self.positional_params.clone());
+            return Some(self.shell_state.positional_params.clone());
         }
         if word == "$@" && kind.map_or(true, |kind| *kind == TokenKind::Word) {
-            return Some(self.positional_params.clone());
+            return Some(self.shell_state.positional_params.clone());
         }
         if let Some(name) = word
             .strip_prefix("${")
@@ -340,19 +340,19 @@ impl Executor {
                                 if let Some((base, starred)) = subscripted {
                                     let resolved = self.resolved_variable_name(base)?;
                                     let is_assoc =
-                                        is_marked_var(&self.env_vars, ASSOC_VARS, &resolved);
+                                        is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved);
                                     let is_array = is_assoc
-                                        || is_marked_array_var(&self.env_vars, &resolved)
+                                        || is_marked_array_var(&self.shell_state.env_vars, &resolved)
                                         || self
-                                            .env_vars
+                                            .shell_state.env_vars
                                             .get(&resolved)
                                             .is_some_and(|value| is_array_storage(value));
                                     if is_array {
-                                        let storage = self.env_vars.get(&resolved)?;
+                                        let storage = self.shell_state.env_vars.get(&resolved)?;
                                         let keys = if is_assoc {
                                             assoc_keys(
                                                 storage,
-                                                assoc_nbuckets(&self.env_vars, &resolved),
+                                                assoc_nbuckets(&self.shell_state.env_vars, &resolved),
                                             )
                                         } else {
                                             array_indices(storage)
@@ -363,7 +363,7 @@ impl Executor {
                                     // collapses to X[0] (array_variable on a
                                     // non-array yields element 0), so the
                                     // indirection target is X's value.
-                                    let target = self.env_vars.get(&resolved)?;
+                                    let target = self.shell_state.env_vars.get(&resolved)?;
                                     let arr = target
                                         .strip_suffix("[@]")
                                         .map(|a| (a, false))
@@ -374,15 +374,15 @@ impl Executor {
                                         })?;
                                     let resolved_arr =
                                         self.resolved_variable_name(arr.0)?;
-                                    let storage = self.env_vars.get(&resolved_arr)?;
+                                    let storage = self.shell_state.env_vars.get(&resolved_arr)?;
                                     let values = if is_marked_var(
-                                        &self.env_vars,
+                                        &self.shell_state.env_vars,
                                         ASSOC_VARS,
                                         &resolved_arr,
                                     ) {
                                         assoc_hash_ordered_values(
                                             storage,
-                                            assoc_nbuckets(&self.env_vars, &resolved_arr),
+                                            assoc_nbuckets(&self.shell_state.env_vars, &resolved_arr),
                                         )
                                     } else {
                                         array_values(storage)
@@ -393,7 +393,7 @@ impl Executor {
                                     // value; a `arr[@]`/`arr[*]` target
                                     // expands to the element list.
                                     let resolved = self.resolved_variable_name(ind)?;
-                                    let target = self.env_vars.get(&resolved)?;
+                                    let target = self.shell_state.env_vars.get(&resolved)?;
                                     let arr = target
                                         .strip_suffix("[@]")
                                         .map(|a| (a, false))
@@ -404,15 +404,15 @@ impl Executor {
                                         })?;
                                     let resolved_arr =
                                         self.resolved_variable_name(arr.0)?;
-                                    let storage = self.env_vars.get(&resolved_arr)?;
+                                    let storage = self.shell_state.env_vars.get(&resolved_arr)?;
                                     let values = if is_marked_var(
-                                        &self.env_vars,
+                                        &self.shell_state.env_vars,
                                         ASSOC_VARS,
                                         &resolved_arr,
                                     ) {
                                         assoc_hash_ordered_values(
                                             storage,
-                                            assoc_nbuckets(&self.env_vars, &resolved_arr),
+                                            assoc_nbuckets(&self.shell_state.env_vars, &resolved_arr),
                                         )
                                     } else {
                                         array_values(storage)
@@ -438,21 +438,21 @@ impl Executor {
                         }
                     }
                     if indirect == "@" {
-                        return Some(self.positional_params.clone());
+                        return Some(self.shell_state.positional_params.clone());
                     }
                     if indirect == "*" {
                         return Some(vec![self
-                            .positional_params
+                            .shell_state.positional_params
                             .join(&self.ifs_first_char_separator())]);
                     }
                     if is_shell_name(indirect) {
-                        if let Some(target) = self.env_vars.get(indirect).map(String::as_str) {
+                        if let Some(target) = self.shell_state.env_vars.get(indirect).map(String::as_str) {
                             if target == "@" {
-                                return Some(self.positional_params.clone());
+                                return Some(self.shell_state.positional_params.clone());
                             }
                             if target == "*" {
                                 return Some(vec![self
-                                    .positional_params
+                                    .shell_state.positional_params
                                     .join(&self.ifs_first_char_separator())]);
                             }
                         }
@@ -492,10 +492,10 @@ impl Executor {
                     };
                     if !word_used {
                         if var_name == "@" {
-                            return Some(self.positional_params.clone());
+                            return Some(self.shell_state.positional_params.clone());
                         }
                         return Some(vec![self
-                            .positional_params
+                            .shell_state.positional_params
                             .join(&self.ifs_first_char_separator())]);
                     }
                 }
@@ -512,7 +512,7 @@ impl Executor {
             if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
                 if var_name == "@" {
                     return Some(positional_parameter_substring_with_zero(
-                        &self.positional_params,
+                        &self.shell_state.positional_params,
                         &self.script_name_value(),
                         offset,
                         length,
@@ -520,7 +520,7 @@ impl Executor {
                 }
                 if var_name == "*" {
                     let values = positional_parameter_substring_with_zero(
-                        &self.positional_params,
+                        &self.shell_state.positional_params,
                         &self.script_name_value(),
                         offset,
                         length,
@@ -582,13 +582,13 @@ impl Executor {
         let values = if transform == ParameterTransform::Assignment {
             let mut values = vec!["set".to_string(), "--".to_string()];
             values.extend(
-                self.positional_params
+                self.shell_state.positional_params
                     .iter()
                     .map(|value| shell_single_quote_assignment_value(value)),
             );
             values
         } else {
-            self.positional_params
+            self.shell_state.positional_params
                 .iter()
                 .map(|value| self.apply_parameter_transform_value(value, transform))
                 .collect::<Vec<_>>()
@@ -603,7 +603,7 @@ impl Executor {
             // elements (subst.c:3014), so each element survives verbatim: one
             // word per positional (exp10.sub `${*@Q}` with `set -- ' A ' ' B '`).
             let ifs_set_empty = self
-                .env_vars
+                .shell_state.env_vars
                 .get("IFS")
                 .is_some_and(|value| value.is_empty());
             if ifs_set_empty && !quoted {
@@ -696,7 +696,7 @@ impl Executor {
             return None;
         }
         let values = self
-            .positional_params
+            .shell_state.positional_params
             .iter()
             .map(|value| modify(value))
             .collect::<Vec<_>>();
@@ -720,16 +720,16 @@ impl Executor {
         // words into one field under a null IFS (array6.sub
         // `recho ${foo}"$@"` with IFS=).
         if let Some(values) = raw.and_then(|raw| {
-            quoted_positional_at_segments(raw, &self.env_vars, &|name| {
+            quoted_positional_at_segments(raw, &self.shell_state.env_vars, &|name| {
                 self.nameref_target_name(name)
             })
             .map(|segments| {
                 expand_quoted_positional_at_segments(
                     &segments,
-                    self.env_vars.get("IFS").map(String::as_str),
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                     |segment| match segment {
                         QuotedPositionalAtSegment::PositionalAt(_) => {
-                            self.positional_params.clone()
+                            self.shell_state.positional_params.clone()
                         }
                         QuotedPositionalAtSegment::ArrayAt(name, _) => self
 
@@ -773,8 +773,8 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| expression.strip_suffix("[*]"))
             .unwrap_or_default();
-        let ordered = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
-            assoc_hash_ordered_values(value, assoc_nbuckets(&self.env_vars, array_name))
+        let ordered = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name) {
+            assoc_hash_ordered_values(value, assoc_nbuckets(&self.shell_state.env_vars, array_name))
         } else {
             array_values(value)
         };
@@ -804,7 +804,7 @@ impl Executor {
         command: &CommandNode,
     ) {
         let current_line = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or_else(|| command.line.unwrap_or(1));
@@ -855,11 +855,11 @@ impl Executor {
             .map(String::as_str)
             .unwrap_or("");
         if is_shell_builtin_name(first_word)
-            && !crate::builtins::enable::is_disabled(&self.env_vars, first_word)
+            && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, first_word)
         {
             return None;
         }
-        let Some(program) = find_user_command(&stdio.expanded_words[0], &self.env_vars) else {
+        let Some(program) = find_user_command(&stdio.expanded_words[0], &self.shell_state.env_vars) else {
             if stdio.expanded_words.first().map(String::as_str) == Some("mktemp") {
                 return None;
             }
@@ -871,7 +871,7 @@ impl Executor {
             &program,
             Some(&stdio.expanded_words[0]),
             &stdio.expanded_words[1..],
-            &self.env_vars,
+            &self.shell_state.env_vars,
         );
 
         self.apply_child_environment(&mut process);
@@ -907,7 +907,7 @@ impl Executor {
         }
         let output = spawned.wait_with_output().ok()?;
         if piped_stdin.is_some() {
-            if let Some(text) = self.env_vars.get(FUNCTION_STDIN) {
+            if let Some(text) = self.shell_state.env_vars.get(FUNCTION_STDIN) {
                 self.comsub_stdin_writeback.set(Some((
                     text.len(),
                     Self::function_stdin_fingerprint(text),
@@ -992,7 +992,7 @@ impl Executor {
 
     fn command_substitution_redirect_path(&self, target: &str) -> Option<PathBuf> {
         let expanded = strip_matching_quotes(&self.expand_word(target)).to_string();
-        Some(shell_path_to_windows(&expanded, &self.env_vars))
+        Some(shell_path_to_windows(&expanded, &self.shell_state.env_vars))
     }
 
     pub(in crate::executor) fn expand_backtick_substitution_typed(
@@ -1052,7 +1052,7 @@ impl Executor {
         }
 
         let value = digits.parse::<usize>().ok()?;
-        let stack = crate::builtins::pushd::load_stack(&self.env_vars);
+        let stack = crate::builtins::pushd::load_stack(&self.shell_state.env_vars);
         let index = if from_right {
             if value < stack.len() {
                 stack.len() - 1 - value
@@ -1072,12 +1072,12 @@ impl Executor {
 
         if index == "NDIRS" {
             return self
-                .env_vars
+                .shell_state.env_vars
                 .get("NDIRS")
                 .and_then(|value| value.parse::<usize>().ok())
                 .or_else(|| {
                     Some(
-                        crate::builtins::pushd::load_stack(&self.env_vars)
+                        crate::builtins::pushd::load_stack(&self.shell_state.env_vars)
                             .len()
                             .saturating_sub(1),
                     )
@@ -1090,11 +1090,11 @@ impl Executor {
         }
         let rhs = rhs.parse::<usize>().ok()?;
         let ndirs = self
-            .env_vars
+            .shell_state.env_vars
             .get("NDIRS")
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or_else(|| {
-                crate::builtins::pushd::load_stack(&self.env_vars)
+                crate::builtins::pushd::load_stack(&self.shell_state.env_vars)
                     .len()
                     .saturating_sub(1)
             });

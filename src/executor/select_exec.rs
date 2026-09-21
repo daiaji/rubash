@@ -64,7 +64,7 @@ impl Executor {
         select_command.body = body.commands;
 
         let values: Vec<String> = if select_command.default_positional {
-            self.positional_params.clone()
+            self.shell_state.positional_params.clone()
         } else {
             let mut values = Vec::new();
             for (index, word) in select_command.words.iter().enumerate() {
@@ -112,11 +112,11 @@ impl Executor {
         values: &[String],
     ) -> Result<(), ExecuteError> {
         let ps3 = self
-            .env_vars
+            .shell_state.env_vars
             .get("PS3")
             .cloned()
             .unwrap_or_else(|| "#? ".to_string());
-        let has_stdin = self.env_vars.contains_key(FUNCTION_STDIN);
+        let has_stdin = self.shell_state.env_vars.contains_key(FUNCTION_STDIN);
         let mut stdin_offset = self.select_stdin_offset(has_stdin);
 
         loop {
@@ -163,7 +163,7 @@ impl Executor {
 
     fn select_stdin_offset(&self, has_stdin: bool) -> usize {
         if has_stdin {
-            self.env_vars
+            self.shell_state.env_vars
                 .get(FUNCTION_STDIN_OFFSET)
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(0)
@@ -189,7 +189,7 @@ impl Executor {
         }
 
         let stdin_content = self
-            .env_vars
+            .shell_state.env_vars
             .get(FUNCTION_STDIN)
             .cloned()
             .unwrap_or_default();
@@ -205,7 +205,7 @@ impl Executor {
             *stdin_offset = stdin_content.len();
             remaining.to_string()
         };
-        self.env_vars
+        self.shell_state.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), stdin_offset.to_string());
         Some(input)
     }
@@ -217,9 +217,9 @@ impl Executor {
         let body = Ast {
             commands: body.to_vec(),
         };
-        self.loop_depth += 1;
+        self.shell_state.loop_depth += 1;
         let result = self.execute_ast(&body);
-        self.loop_depth -= 1;
+        self.shell_state.loop_depth -= 1;
         match result {
             Ok(()) => Ok(SelectBodyFlow::ContinueLoop),
             Err(ExecuteError::Break(level)) if level <= 1 => {

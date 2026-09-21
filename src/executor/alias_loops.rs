@@ -99,9 +99,9 @@ impl Executor {
             }
 
             ran_body = true;
-            executor.loop_depth += 1;
+            executor.shell_state.loop_depth += 1;
             let result = executor.execute_ast(&body);
-            executor.loop_depth -= 1;
+            executor.shell_state.loop_depth -= 1;
             match result {
                 Ok(()) => {
                     last_body_status = executor.exit_code;
@@ -162,10 +162,10 @@ impl Executor {
         let Some(command) = ast.commands.get(command_index) else {
             return Ok(None);
         };
-        let posix_mode = self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
+        let posix_mode = self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
         let words = if command.words.first().map(String::as_str) == Some("al")
             && command.words.get(1).map(String::as_str) == Some("for")
-            && (posix_mode || !self.aliases.contains_key("for"))
+            && (posix_mode || !self.shell_state.aliases.contains_key("for"))
         {
             command.words[1..].to_vec()
         } else if posix_mode {

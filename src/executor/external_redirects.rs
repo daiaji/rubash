@@ -47,7 +47,7 @@ impl Executor {
                 let mut file = OpenOptions::new()
                     .create(true)
                     .write(true)
-                    .open(shell_path_to_windows(&stdout_target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&stdout_target, &self.shell_state.env_vars))?;
                 file.seek(SeekFrom::End(0))?;
                 process.stderr(Stdio::from(file.try_clone()?));
                 process.stdout(Stdio::from(file));
@@ -101,7 +101,7 @@ impl Executor {
                 let mut file = OpenOptions::new()
                     .create(true)
                     .write(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                 file.seek(SeekFrom::End(0))?;
                 process.stdout(Stdio::from(file));
             }
@@ -213,7 +213,7 @@ impl Executor {
                 let mut file = OpenOptions::new()
                     .create(true)
                     .write(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                 file.seek(SeekFrom::End(0))?;
                 process.stderr(Stdio::from(file));
             }
@@ -309,7 +309,7 @@ impl Executor {
                 let mut file = OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                 file.write_all(stdout)?;
                 return Ok(());
             }
@@ -321,7 +321,7 @@ impl Executor {
                 let mut file = OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                 file.write_all(stdout)?;
                 return Ok(());
             }

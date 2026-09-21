@@ -57,7 +57,10 @@ pub const DEFERRED_COMPOUND_BODY: char = '\u{3}';
 /// its attributes — `convert_var_to_array` and VSETATTR run before
 /// assign_array_element — without re-evaluating (which would double-print
 /// the `operand expected` diagnostic).
-pub const FAILED_SUBSCRIPT_SENTINEL: &str = "\u{E10A}";
+/// The codepoint must stay outside U+E000..=U+E1FF: E000-E100 is the
+/// raw-byte marker range and E100+byte is BYTE_CHAR_BASE (conditional/
+/// pattern.rs). E10A specifically collided with SQ_DOLLAR_DATA
+/// (assignment_expansion.rs), which let restore_sq_content_markers decode
+/// the sentinel into a literal `$` and vice versa.
+pub const FAILED_SUBSCRIPT_SENTINEL: &str = "\u{E200}";
 pub const ARRAY_FIELD_SPLIT_MARKER: char = '';
-pub const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str =
-    "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";

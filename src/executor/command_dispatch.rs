@@ -84,12 +84,12 @@ impl Executor {
         self.finish_process_substitutions(process_substitution_files)?;
         self.finish_assignment_output_process_substitutions_for_command(cmd)?;
         if cmd.background && result.is_ok() {
-            self.last_background_pid = Some(std::process::id());
+            self.shell_state.last_background_pid = Some(std::process::id());
             self.exit_code = 0;
         }
         if !keep_temporary_assignments {
             self.restore_temporary_assignments(temporary_assignments);
-        } else if self.posix_mode_enabled() && self.function_depth > 0 {
+        } else if self.posix_mode_enabled() && self.shell_state.function_depth > 0 {
             // GNU execute_cmd.c:4892-4894 → variables.c:4662
             // merge_temporary_env → variables.c:4485 push_posix_temp_var:
             // a posix special builtin's tempenv binds at the current
@@ -102,7 +102,7 @@ impl Executor {
             for (name, _) in &cmd.assignments {
                 let (base, _) = assignment_name_and_append(name);
                 let is_local = self
-                    .local_var_scopes
+                    .shell_state.local_var_scopes
                     .iter()
                     .any(|scope| scope.contains_key(base));
                 let is_function_tempenv = self
@@ -117,7 +117,7 @@ impl Executor {
                         .any(|(propagated, _)| propagated == base)
                 {
                     self.tempenv_propagated_names
-                        .push((base.to_string(), capture_var_attrs(&self.env_vars, base)));
+                        .push((base.to_string(), capture_var_attrs(&self.shell_state.env_vars, base)));
                 }
             }
         }
@@ -128,7 +128,7 @@ impl Executor {
             && self.special_builtin_failed.get()
             && self.posix_mode_enabled()
             && self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_INTERACTIVE")
                 .map(String::as_str)
                 != Some("1")
@@ -144,13 +144,6 @@ impl Executor {
     }
 
     fn execute_prepared_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        if self
-            .env_vars
-            .contains_key(SKIP_POSIXPIPE_TIME_COUNT_REMAINDER)
-        {
-            return self.execute_skipped_posixpipe_command();
-        }
-
         let Some(word) = cmd.words.first() else {
             return Ok(());
         };
@@ -159,30 +152,12 @@ impl Executor {
             self.exit_code = 1;
             return Ok(());
         }
-        if crate::builtins::enable::is_disabled(&self.env_vars, word) {
+        if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word) {
             return self.execute_external(cmd);
         }
         if let Some(result) = self.execute_primary_builtin_command(cmd, word)? {
             return result;
         }
         self.execute_late_builtin_command(cmd, word)
-    }
-
-    fn execute_skipped_posixpipe_command(&mut self) -> Result<(), ExecuteError> {
-        let remaining = self
-            .env_vars
-            .get(SKIP_POSIXPIPE_TIME_COUNT_REMAINDER)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(1);
-        if remaining > 1 {
-            self.env_vars.insert(
-                SKIP_POSIXPIPE_TIME_COUNT_REMAINDER.to_string(),
-                (remaining - 1).to_string(),
-            );
-        } else {
-            self.env_vars.remove(SKIP_POSIXPIPE_TIME_COUNT_REMAINDER);
-        }
-        self.exit_code = 0;
-        Ok(())
     }
 }

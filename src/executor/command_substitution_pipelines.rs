@@ -172,12 +172,12 @@ impl Executor {
             }
         }
         let dir = self
-            .env_vars
+            .shell_state.env_vars
             .get("TMPDIR")
             .filter(|value| !value.contains('\0'))
             .cloned()
             .unwrap_or_else(safe_temp_dir_string);
-        let dir = shell_path_to_windows(&dir, &self.env_vars);
+        let dir = shell_path_to_windows(&dir, &self.shell_state.env_vars);
         std::fs::create_dir_all(&dir).ok()?;
         let mut path = None;
         for attempt in 0..32 {
@@ -231,7 +231,7 @@ impl Executor {
             // the heredoc has not been gathered yet, so bash warns and then
             // gathers it anyway (heredoc7.sub line 17).
             let start_line = self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_CURRENT_LINE")
                 .and_then(|line| line.parse::<usize>().ok())
                 .unwrap_or(1);
@@ -241,7 +241,7 @@ impl Executor {
             );
         }
         let comsub_start_line = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or(1)
@@ -329,7 +329,7 @@ impl Executor {
         let closed_by_paren = source.contains('\x1c');
         let source = source.replace('\x1c', "");
         let comsub_start_line = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or(1)
@@ -414,7 +414,7 @@ impl Executor {
             return None;
         }
         if let Some(head) = stages.first().and_then(|stage| stage.first()) {
-            if self.functions.contains_key(head) {
+            if self.shell_state.functions.contains_key(head) {
                 return None;
             }
         }
@@ -450,7 +450,7 @@ impl Executor {
         let started = time_command_started();
         let output = self.timed_command_substitution_inner(&words[index..])?;
         print_time(
-            &self.env_vars,
+            &self.shell_state.env_vars,
             words
                 .iter()
                 .skip(1)
@@ -490,7 +490,7 @@ impl Executor {
                     .iter()
                     .flat_map(|word| self.expand_command_substitution_arg_values(word))
                     .collect::<Vec<_>>();
-                let mut env_vars = self.env_vars.clone();
+                let mut env_vars = self.shell_state.env_vars.clone();
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
                 let status = crate::builtins::printf::execute_with_io(
@@ -537,7 +537,7 @@ impl Executor {
                 for word in &words[1..] {
                     let path = self.expand_word(word);
                     if let Ok(value) =
-                        fs::read_to_string(shell_path_to_windows(&path, &self.env_vars))
+                        fs::read_to_string(shell_path_to_windows(&path, &self.shell_state.env_vars))
                     {
                         output.push_str(&value);
                     }
@@ -573,7 +573,7 @@ impl Executor {
                     .iter()
                     .flat_map(|word| self.expand_command_substitution_arg_values(word))
                     .collect();
-                let mut env_vars = self.env_vars.clone();
+                let mut env_vars = self.shell_state.env_vars.clone();
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
                 let _ = crate::builtins::printf::execute_with_io(
@@ -594,7 +594,7 @@ impl Executor {
                 for word in &words[1..] {
                     let path = self.expand_word(word);
                     if let Ok(value) =
-                        fs::read_to_string(shell_path_to_windows(&path, &self.env_vars))
+                        fs::read_to_string(shell_path_to_windows(&path, &self.shell_state.env_vars))
                     {
                         output.push_str(&value);
                     }
