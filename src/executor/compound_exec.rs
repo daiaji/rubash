@@ -59,7 +59,7 @@ enum CoprocStderrForwardTarget {
     Stderr,
     File(PathBuf),
     Discard,
-    CoprocStdin(std::io::PipeWriter),
+    CoprocStdin(std::fs::File),
 }
 
 /// Resolved stdio disposition for one of a background child's fds 0-2,
@@ -148,7 +148,7 @@ fn forward_coproc_stderr(
                 file.write_all(&buffer[..count])?;
             }
             CoprocStderrForwardTarget::Discard => {}
-            CoprocStderrForwardTarget::CoprocStdin(writer) => {
+            CoprocStderrForwardTarget::CoprocStdin(ref mut writer) => {
                 writer.write_all(&buffer[..count])?;
                 writer.flush()?;
             }
@@ -165,6 +165,75 @@ impl Executor {
     /// coproc in coproc.tests. `slot` 0 requests the read end (63) and
     /// `slot` 1 the write end (60). Falls back to the low-first allocator
     /// when the preferred fd is already taken.
+    /// Coproc pipe endpoints live in fd_table as handle-backed FileFd slots
+    /// (governance 3.6 step 4 — bookkeeping migrated off the old
+    /// coproc_*_writers/readers maps). These helpers resolve a coprocess pid
+    /// to its pipe handle and retire a coprocess by closing its slots.
+    pub(crate) fn coproc_read_file(&self, pid: u32) -> Option<Rc<FileFd>> {
+        self.fd_table
+            .entries
+            .values()
+            .find_map(|entry| match &entry.read {
+                Some(FdReadEndpoint::CoprocStdout { pid: p, fd }) if *p == pid => {
+                    Some(fd.clone())
+                }
+                _ => None,
+            })
+    }
+
+    pub(crate) fn coproc_write_file(&self, pid: u32) -> Option<Rc<FileFd>> {
+        self.fd_table
+            .entries
+            .values()
+            .find_map(|entry| match &entry.write {
+                Some(FdWriteEndpoint::CoprocStdin { pid: p, fd }) if *p == pid => {
+                    Some(fd.clone())
+                }
+                _ => None,
+            })
+    }
+
+    /// First open coproc read pipe — the `read <&COPROC` (fd 0) default.
+    pub(crate) fn first_coproc_read(&self) -> Option<(u32, Rc<FileFd>)> {
+        self.fd_table
+            .entries
+            .iter()
+            .find_map(|(_, entry)| match &entry.read {
+                Some(FdReadEndpoint::CoprocStdout { pid, fd }) if !entry.closed => {
+                    Some((*pid, fd.clone()))
+                }
+                _ => None,
+            })
+    }
+
+    pub(crate) fn coproc_has_endpoints(&self, pid: u32) -> bool {
+        self.coproc_read_file(pid).is_some() || self.coproc_write_file(pid).is_some()
+    }
+
+    /// Close every fd slot carrying this coprocess's pipe ends. Dropping the
+    /// last Rc<FileFd> closes the underlying HANDLE.
+    pub(crate) fn close_coproc_endpoints(&mut self, pid: u32) {
+        let fds: Vec<u32> = self
+            .fd_table
+            .entries
+            .iter()
+            .filter_map(|(fd, entry)| {
+                let r = matches!(
+                    entry.read.as_ref(),
+                    Some(FdReadEndpoint::CoprocStdout { pid: p, .. }) if *p == pid
+                );
+                let w = matches!(
+                    entry.write.as_ref(),
+                    Some(FdWriteEndpoint::CoprocStdin { pid: p, .. }) if *p == pid
+                );
+                (r || w).then_some(*fd)
+            })
+            .collect();
+        for fd in fds {
+            self.fd_table.close(fd);
+        }
+    }
+
     fn allocate_coproc_fd(&mut self, slot: usize) -> u32 {
         let want = if slot == 0 { 63u32 } else { 60u32 };
         let free = self.fd_table.entries.get(&want).map_or(true, |e| {
@@ -324,7 +393,12 @@ impl Executor {
             if *fd < 3 || entry.closed {
                 continue;
             }
-            if let Some(FdReadEndpoint::File(f)) = &entry.read {
+            let read_file = match &entry.read {
+                Some(FdReadEndpoint::File(f)) => Some(f),
+                Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some(fd),
+                _ => None,
+            };
+            if let Some(f) = read_file {
                 let key = Rc::as_ptr(f) as usize;
                 let dup = match fd_shared_dups.get(&key) {
                     Some(&h) => h,
@@ -345,7 +419,12 @@ impl Executor {
                     f.path.to_string_lossy().into_owned(),
                 );
             }
-            if let Some(FdWriteEndpoint::File(f)) = &entry.write {
+            let write_file = match &entry.write {
+                Some(FdWriteEndpoint::File(f)) => Some(f),
+                Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => Some(fd),
+                _ => None,
+            };
+            if let Some(f) = write_file {
                 let key = Rc::as_ptr(f) as usize;
                 let dup = match fd_shared_dups.get(&key) {
                     Some(&h) => h,
@@ -1399,23 +1478,38 @@ impl Executor {
                     self.shell_state.background_jobs
                         .insert(pid, bash_command_source_text(cmd));
                     self.shell_state.background_job_order.push(pid);
-                    self.coproc_stdin_writers.insert(pid, stdin_writer);
-                    self.coproc_stdout_readers.insert(pid, stdout_reader);
                     // GNU sh_openpipe moves the pipe ends to the highest free
                     // fds below 64 (move_to_high_fd with maxfd 64): rpipe
                     // 63/62 and wpipe 61/60, of which the parent keeps 63 and
                     // 60. All three coprocs in coproc.tests reuse that same
-                    // pair, so `${COPROC[@]}` is literally "63 60".
+                    // pair, so `${COPROC[@]}` is literally "63 60". The parent
+                    // ends live in fd_table as real HANDLE endpoints (Rc'd
+                    // FileFd), so dup/close/fork share them like GNU's fork.
+                    use std::os::windows::io::IntoRawHandle;
+                    let coproc_write_file = Rc::new(FileFd {
+                        handle: stdin_writer.into_raw_handle() as crate::fd::HANDLE,
+                        path: std::path::PathBuf::from(format!("coproc:{pid}:stdin")),
+                    });
+                    let coproc_read_file = Rc::new(FileFd {
+                        handle: stdout_reader.into_raw_handle() as crate::fd::HANDLE,
+                        path: std::path::PathBuf::from(format!("coproc:{pid}:stdout")),
+                    });
                     let coproc_read_fd = self.allocate_coproc_fd(0);
                     self.fd_table.open_input(
                         coproc_read_fd,
-                        FdReadEndpoint::CoprocStdout(pid),
+                        FdReadEndpoint::CoprocStdout {
+                            pid,
+                            fd: coproc_read_file,
+                        },
                         true,
                     );
                     let coproc_write_fd = self.allocate_coproc_fd(1);
                     self.fd_table.open_output(
                         coproc_write_fd,
-                        FdWriteEndpoint::CoprocStdin(pid),
+                        FdWriteEndpoint::CoprocStdin {
+                            pid,
+                            fd: coproc_write_file,
+                        },
                         true,
                     );
                     self.job_table.attach_coproc_endpoint(job_id, pid);
@@ -1581,11 +1675,9 @@ impl Executor {
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 Some(CoprocStderrForwardTarget::File(path))
             }
-            FdWriteEndpoint::CoprocStdin(pid) => self
-                .coproc_stdin_writers
-                .get(&pid)
-                .and_then(|writer| writer.try_clone().ok())
-                .map(CoprocStderrForwardTarget::CoprocStdin),
+            FdWriteEndpoint::CoprocStdin { fd, .. } => crate::fd::duplicate_handle_inheritable(fd.handle)
+                .ok()
+                .map(|h| CoprocStderrForwardTarget::CoprocStdin(crate::fd::handle_to_file(h))),
         }
     }
 

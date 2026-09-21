@@ -466,8 +466,6 @@ pub struct Executor {
     shell_pid: u32,
     owns_signal_mailbox: bool,
     background_children: HashMap<u32, crate::fd::SpawnedChild>,
-    coproc_stdin_writers: HashMap<u32, std::io::PipeWriter>,
-    coproc_stdout_readers: HashMap<u32, std::io::PipeReader>,
     coproc_stderr_forwarders: HashMap<u32, std::thread::JoinHandle<Result<(), std::io::Error>>>,
     assignment_output_process_substitutions: HashMap<String, String>,
     pending_scalar_assignment: bool,

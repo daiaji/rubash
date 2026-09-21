@@ -243,14 +243,15 @@ impl Executor {
         fd: u32,
         stdout: bool,
     ) -> Result<bool, ExecuteError> {
-        let Some(FdWriteEndpoint::CoprocStdin(pid)) = self.fd_table.write_endpoint(fd) else {
+        let Some(FdWriteEndpoint::CoprocStdin { fd: pipe, .. }) =
+            self.fd_table.write_endpoint(fd)
+        else {
             return Ok(false);
         };
-        let writer = self
-            .coproc_stdin_writers
-            .get(&pid)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "coprocess input is closed"))?
-            .try_clone()?;
+        let dup = crate::fd::duplicate_handle_inheritable(pipe.handle).map_err(|_| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "coprocess input is closed")
+        })?;
+        let writer = crate::fd::handle_to_file(dup);
         if stdout {
             process.stdout(Stdio::from(writer));
         } else {

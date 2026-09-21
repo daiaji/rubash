@@ -485,17 +485,23 @@ impl Executor {
             if redirect.fd.unwrap_or(0) == 0 {
                 let target = self.expand_word(&redirect.target);
                 if let Some(fd) = redirect_target_fd(&target) {
-                    if let Some(FdReadEndpoint::CoprocStdout(pid)) = self.fd_table.read_endpoint(fd)
+                    if let Some(FdReadEndpoint::CoprocStdout { fd: pipe, .. }) =
+                        self.fd_table.read_endpoint(fd)
                     {
-                        if let Some(mut reader) = self.coproc_stdout_readers.remove(&pid) {
-                            use std::io::Read;
-                            let mut input = Vec::new();
-                            reader.read_to_end(&mut input)?;
-                            self.fd_table.close_input(fd);
-                            self.write_cat_output(cmd, &filter(&input))?;
-                            self.exit_code = 0;
-                            return Ok(true);
+                        // Drain the coproc's stdout pipe through the slot's
+                        // real HANDLE (BROKEN_PIPE maps to EOF in read_some).
+                        let mut input = Vec::new();
+                        loop {
+                            match crate::fd::read_some(pipe.handle, 8192) {
+                                Ok(buf) if buf.is_empty() => break,
+                                Ok(buf) => input.extend_from_slice(&buf),
+                                Err(_) => break,
+                            }
                         }
+                        self.fd_table.close_input(fd);
+                        self.write_cat_output(cmd, &filter(&input))?;
+                        self.exit_code = 0;
+                        return Ok(true);
                     }
                 }
             }

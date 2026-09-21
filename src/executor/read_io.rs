@@ -206,39 +206,37 @@ impl Executor {
         // Rubash stores that endpoint as a PipeReader keyed by the child PID.
         // A zero descriptor retains the legacy unnamed-coproc behavior; named
         // coprocess arrays carry their PID as a virtual descriptor.
-        if self.coproc_stdout_readers.is_empty() {
-            return None;
-        }
-        let pid = if fd == 0 {
-            *self.coproc_stdout_readers.keys().next()?
-        } else if let Some(FdReadEndpoint::CoprocStdout(pid)) = self.fd_table.read_endpoint(fd) {
-            pid
+        // The pipe read end lives in fd_table as a real HANDLE; read_some
+        // maps a drained anonymous pipe's ERROR_BROKEN_PIPE to EOF.
+        let (pid, pipe) = if fd == 0 {
+            self.first_coproc_read()?
+        } else if let Some(FdReadEndpoint::CoprocStdout { pid, fd: pipe }) =
+            self.fd_table.read_endpoint(fd)
+        {
+            (pid, pipe)
         } else {
-            fd
+            // Named coprocess arrays carry their PID as a virtual descriptor.
+            let pipe = self.coproc_read_file(fd)?;
+            (fd, pipe)
         };
-        if !self.coproc_stdout_readers.contains_key(&pid) {
-            return None;
-        }
-        let mut reader = self.coproc_stdout_readers.remove(&pid)?;
+        let _ = pid;
         let mut bytes = Vec::new();
         let mut consumed_chars = 0usize;
         let mut ended = false;
-        use std::io::Read;
 
         // Bash keeps the coprocess descriptor open across read builtin calls.
         // Read only one logical input record (or the requested character
-        // limit), then retain the reader for the next call instead of
-        // draining the pipe and losing unread records.
+        // limit), then retain the pipe for the next call instead of
+        // draining it and losing unread records.
         loop {
-            let mut byte = [0u8; 1];
-            match reader.read(&mut byte) {
-                Ok(0) => {
+            match crate::fd::read_some(pipe.handle, 1) {
+                Ok(buf) if buf.is_empty() => {
                     ended = true;
                     break;
                 }
-                Ok(_) => {
-                    bytes.push(byte[0]);
-                    if byte[0] == delimiter as u8 && !exact_char_limit {
+                Ok(buf) => {
+                    bytes.push(buf[0]);
+                    if buf[0] == delimiter as u8 && !exact_char_limit {
                         break;
                     }
                     if let Some(limit) = char_limit {
@@ -255,12 +253,12 @@ impl Executor {
             }
         }
 
-        if !ended {
-            self.coproc_stdout_readers.insert(pid, reader);
-        } else if matches!(
-            self.fd_table.read_endpoint(fd),
-            Some(FdReadEndpoint::CoprocStdout(_))
-        ) {
+        if ended
+            && matches!(
+                self.fd_table.read_endpoint(fd),
+                Some(FdReadEndpoint::CoprocStdout { .. })
+            )
+        {
             // EOF closes this shell-owned read capability. Job reaping remains
             // separate so wait can still consume the child's final status.
             self.fd_table.close_input(fd);
@@ -357,7 +355,7 @@ impl Executor {
         // value as shell input.
         if matches!(
             self.fd_table.read_endpoint(fd),
-            Some(FdReadEndpoint::CoprocStdout(_))
+            Some(FdReadEndpoint::CoprocStdout { .. })
         ) {
             return None;
         }

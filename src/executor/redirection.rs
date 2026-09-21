@@ -262,7 +262,9 @@ impl Executor {
                             OutputTarget::Path(path)
                         }
                     }
-                    FdWriteEndpoint::CoprocStdin(pid) => OutputTarget::CoprocStdin(*pid),
+                    FdWriteEndpoint::CoprocStdin { pid, .. } => {
+                        OutputTarget::CoprocStdin(*pid)
+                    }
                     FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                         OutputTarget::Path(path.to_string_lossy().into_owned())
                     }
@@ -515,8 +517,8 @@ impl OutputFdState {
             OutputTarget::Stderr => executor.write_default_stderr(output),
             OutputTarget::Null | OutputTarget::Closed => Ok(()),
             OutputTarget::CoprocStdin(fd) => {
-                if let Some(writer) = executor.coproc_stdin_writers.get_mut(&fd) {
-                    writer.write_all(output)?;
+                if let Some(pipe) = executor.coproc_write_file(fd) {
+                    crate::fd::write_all(pipe.handle, output)?;
                 } else {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::BrokenPipe,

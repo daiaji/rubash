@@ -534,23 +534,20 @@ impl Executor {
     }
 
     fn retire_completed_coproc(&mut self, pid: u32) {
-        let is_coproc = self.coproc_stdin_writers.contains_key(&pid)
-            || self.coproc_stdout_readers.contains_key(&pid)
-            || self.fd_table.entries.values().any(|entry| {
+        let is_coproc = self.fd_table.entries.values().any(|entry| {
                 matches!(
                     entry.read.as_ref(),
-                    Some(FdReadEndpoint::CoprocStdout(endpoint_pid)) if *endpoint_pid == pid
+                    Some(FdReadEndpoint::CoprocStdout { pid: endpoint_pid, .. }) if *endpoint_pid == pid
                 ) || matches!(
                     entry.write.as_ref(),
-                    Some(FdWriteEndpoint::CoprocStdin(endpoint_pid)) if *endpoint_pid == pid
+                    Some(FdWriteEndpoint::CoprocStdin { pid: endpoint_pid, .. }) if *endpoint_pid == pid
                 )
             });
         if !is_coproc {
             return;
         }
 
-        self.coproc_stdin_writers.remove(&pid);
-        self.coproc_stdout_readers.remove(&pid);
+        self.close_coproc_endpoints(pid);
 
         let endpoint_fds = self
             .fd_table
@@ -559,11 +556,11 @@ impl Executor {
             .filter_map(|(fd, entry)| {
                 let matches_read = matches!(
                     entry.read.as_ref(),
-                    Some(FdReadEndpoint::CoprocStdout(endpoint_pid)) if *endpoint_pid == pid
+                    Some(FdReadEndpoint::CoprocStdout { pid: endpoint_pid, .. }) if *endpoint_pid == pid
                 );
                 let matches_write = matches!(
                     entry.write.as_ref(),
-                    Some(FdWriteEndpoint::CoprocStdin(endpoint_pid)) if *endpoint_pid == pid
+                    Some(FdWriteEndpoint::CoprocStdin { pid: endpoint_pid, .. }) if *endpoint_pid == pid
                 );
                 (matches_read || matches_write).then_some(*fd)
             })
@@ -602,11 +599,11 @@ impl Executor {
             .filter_map(|(fd, entry)| {
                 let matches_read = matches!(
                     entry.read.as_ref(),
-                    Some(FdReadEndpoint::CoprocStdout(endpoint_pid)) if *endpoint_pid == pid
+                    Some(FdReadEndpoint::CoprocStdout { pid: endpoint_pid, .. }) if *endpoint_pid == pid
                 );
                 let matches_write = matches!(
                     entry.write.as_ref(),
-                    Some(FdWriteEndpoint::CoprocStdin(endpoint_pid)) if *endpoint_pid == pid
+                    Some(FdWriteEndpoint::CoprocStdin { pid: endpoint_pid, .. }) if *endpoint_pid == pid
                 );
                 (matches_read || matches_write).then_some(*fd)
             })
@@ -614,8 +611,7 @@ impl Executor {
         for fd in endpoint_fds {
             self.fd_table.close(fd);
         }
-        self.coproc_stdin_writers.remove(&pid);
-        self.coproc_stdout_readers.remove(&pid);
+        self.close_coproc_endpoints(pid);
         self.fd_table.close(pid);
         // GNU reaps dead coprocs through wait_for too; coproc_unsetvars runs
         // there, not only on the background-refresh path.
@@ -787,9 +783,8 @@ impl Executor {
                 self.background_children.clear();
                 self.shell_state.background_jobs.clear();
                 self.shell_state.background_job_order.clear();
-                self.coproc_stdin_writers.clear();
-                self.coproc_stdout_readers.clear();
                 for pid in pids {
+                    self.close_coproc_endpoints(pid);
                     self.fd_table.close(pid);
                     self.job_table.remove_job_by_pid(pid);
                 }
@@ -815,8 +810,7 @@ impl Executor {
                         self.background_children.remove(&pid);
                         self.shell_state.background_jobs.remove(&pid);
                         self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
-                        self.coproc_stdin_writers.remove(&pid);
-                        self.coproc_stdout_readers.remove(&pid);
+                        self.close_coproc_endpoints(pid);
                         self.fd_table.close(pid);
                         self.job_table.remove_job_by_pid(pid);
                     } else {
@@ -847,8 +841,7 @@ impl Executor {
         self.background_children.remove(&pid);
         self.shell_state.background_jobs.remove(&pid);
         self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
-        self.coproc_stdin_writers.remove(&pid);
-        self.coproc_stdout_readers.remove(&pid);
+        self.close_coproc_endpoints(pid);
         self.fd_table.close(pid);
         self.job_table.remove_job_by_pid(pid);
         true
@@ -963,16 +956,14 @@ impl Executor {
         let Some(mut child) = self.background_children.remove(&pid) else {
             self.shell_state.background_jobs.remove(&pid);
             self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
-            self.coproc_stdin_writers.remove(&pid);
-            self.coproc_stdout_readers.remove(&pid);
+            self.close_coproc_endpoints(pid);
             self.fd_table.close(pid);
             self.write_job_not_found("fg", job, stderr)?;
             return Ok(1);
         };
         self.shell_state.background_jobs.remove(&pid);
         self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
-        self.coproc_stdin_writers.remove(&pid);
-        self.coproc_stdout_readers.remove(&pid);
+        self.close_coproc_endpoints(pid);
         self.fd_table.close(pid);
         let status = child.wait()?.code().unwrap_or(1);
         self.job_table.mark_completed(pid, status);

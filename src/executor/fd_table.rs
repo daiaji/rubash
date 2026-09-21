@@ -62,7 +62,7 @@ pub(crate) enum FdReadEndpoint {
     File(Rc<FileFd>),
     InheritedProcessStdin,
     ProcessSubstitution(Rc<RefCell<TextInput>>),
-    CoprocStdout(u32),
+    CoprocStdout { pid: u32, fd: Rc<FileFd> },
 }
 
 #[derive(Debug, Clone)]
@@ -70,7 +70,7 @@ pub(crate) enum FdWriteEndpoint {
     Stdout,
     Stderr,
     File(Rc<FileFd>),
-    CoprocStdin(u32),
+    CoprocStdin { pid: u32, fd: Rc<FileFd> },
     ProcessSubstitution { path: PathBuf, command: String },
 }
 
@@ -330,7 +330,13 @@ impl FdTable {
         exact: bool,
     ) -> Option<Vec<u8>> {
         let endpoint = self.entries.get(&fd)?.read.clone()?;
-        if let FdReadEndpoint::File(file) = endpoint {
+        let file = match &endpoint {
+            FdReadEndpoint::File(file) | FdReadEndpoint::CoprocStdout { fd: file, .. } => {
+                Some(file.clone())
+            }
+            _ => None,
+        };
+        if let Some(file) = file {
             return self.read_file_bytes(file, delimiter, char_limit, exact);
         }
         let input = match endpoint {
@@ -427,7 +433,7 @@ impl FdTable {
 
     pub(crate) fn read_all_bytes(&mut self, fd: u32) -> Option<Vec<u8>> {
         let endpoint = self.entries.get(&fd)?.read.clone()?;
-        if let FdReadEndpoint::File(file) = endpoint {
+        if let FdReadEndpoint::File(file) | FdReadEndpoint::CoprocStdout { fd: file, .. } = endpoint {
             let mut out = Vec::new();
             loop {
                 match crate::fd::read_some(file.handle, 8192) {
@@ -452,6 +458,9 @@ impl FdTable {
         let endpoint = self.entries.get(&fd)?.read.clone()?;
         if let FdReadEndpoint::File(file) = endpoint {
             let _ = crate::fd::seek_end(file.handle);
+            return None;
+        }
+        if let FdReadEndpoint::CoprocStdout { .. } = endpoint {
             return None;
         }
         let input = match endpoint {
@@ -484,7 +493,7 @@ impl FdTable {
     /// (input.c bash_input). Returns `None` when the fd is not a buffered
     /// text endpoint, `Some(vec![])` at end of the buffer.
     pub(crate) fn take_buffered_input_line(&self, fd: u32) -> Option<Vec<u8>> {
-        if let Some(FdReadEndpoint::File(file)) = self
+        if let Some(FdReadEndpoint::File(file) | FdReadEndpoint::CoprocStdout { fd: file, .. }) = self
             .entries
             .get(&fd)
             .filter(|entry| !entry.closed)
@@ -552,13 +561,17 @@ impl FdTable {
                     FdReadEndpoint::InheritedProcessStdin => {
                         MaterializedRead::InheritedProcessStdin
                     }
-                    FdReadEndpoint::CoprocStdout(pid) => MaterializedRead::CoprocStdout(*pid),
+                    FdReadEndpoint::CoprocStdout { pid, .. } => {
+                        MaterializedRead::CoprocStdout(*pid)
+                    }
                 });
                 let write = entry.write.as_ref().map(|endpoint| match endpoint {
                     FdWriteEndpoint::Stdout => MaterializedWrite::Stdout,
                     FdWriteEndpoint::Stderr => MaterializedWrite::Stderr,
                     FdWriteEndpoint::File(file) => MaterializedWrite::File(file.path.clone()),
-                    FdWriteEndpoint::CoprocStdin(pid) => MaterializedWrite::CoprocStdin(*pid),
+                    FdWriteEndpoint::CoprocStdin { pid, .. } => {
+                        MaterializedWrite::CoprocStdin(*pid)
+                    }
                     FdWriteEndpoint::ProcessSubstitution { path, command } => {
                         MaterializedWrite::ProcessSubstitution {
                             path: path.clone(),
@@ -592,7 +605,7 @@ impl PartialEq for FdReadEndpoint {
             (Self::File(a), Self::File(b)) => Rc::ptr_eq(a, b),
             (Self::InheritedProcessStdin, Self::InheritedProcessStdin) => true,
             (Self::ProcessSubstitution(a), Self::ProcessSubstitution(b)) => Rc::ptr_eq(a, b),
-            (Self::CoprocStdout(a), Self::CoprocStdout(b)) => a == b,
+            (Self::CoprocStdout { pid: a, .. }, Self::CoprocStdout { pid: b, .. }) => a == b,
             _ => false,
         }
     }
@@ -603,7 +616,7 @@ impl PartialEq for FdWriteEndpoint {
         match (self, other) {
             (Self::Stdout, Self::Stdout) | (Self::Stderr, Self::Stderr) => true,
             (Self::File(a), Self::File(b)) => Rc::ptr_eq(a, b),
-            (Self::CoprocStdin(a), Self::CoprocStdin(b)) => a == b,
+            (Self::CoprocStdin { pid: a, .. }, Self::CoprocStdin { pid: b, .. }) => a == b,
             (
                 Self::ProcessSubstitution { path: p1, command: c1 },
                 Self::ProcessSubstitution { path: p2, command: c2 },

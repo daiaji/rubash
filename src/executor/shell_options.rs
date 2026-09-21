@@ -136,7 +136,7 @@ impl Executor {
                     "stdio file descriptor",
                 ));
             }
-            FdWriteEndpoint::CoprocStdin(_) => {
+            FdWriteEndpoint::CoprocStdin { .. } => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "coprocess file descriptor",
@@ -170,11 +170,8 @@ impl Executor {
         match endpoint {
             FdWriteEndpoint::Stdout => write_stdout_bytes(output)?,
             FdWriteEndpoint::Stderr => write_stderr_bytes(output)?,
-            FdWriteEndpoint::CoprocStdin(pid) => {
-                let Some(writer) = self.coproc_stdin_writers.get_mut(&pid) else {
-                    return Ok(false);
-                };
-                writer.write_all(output)?;
+            FdWriteEndpoint::CoprocStdin { fd, .. } => {
+                crate::fd::write_all(fd.handle, output)?;
             }
             FdWriteEndpoint::File(file_fd) => {
                 crate::fd::write_all(file_fd.handle, output)?;
@@ -273,15 +270,10 @@ impl Executor {
         match endpoint {
             FdWriteEndpoint::Stdout => write_stdout_bytes(output)?,
             FdWriteEndpoint::Stderr => write_stderr_bytes(output)?,
-            FdWriteEndpoint::CoprocStdin(pid) => {
-                let Some(writer) = self.coproc_stdin_writers.get_mut(&pid) else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "coprocess input is closed",
-                    )
-                    .into());
-                };
-                writer.write_all(output)?;
+            FdWriteEndpoint::CoprocStdin { fd, .. } => {
+                crate::fd::write_all(fd.handle, output).map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "coprocess input is closed")
+                })?;
             }
             FdWriteEndpoint::File(file_fd) => {
                 crate::fd::write_all(file_fd.handle, output)?;

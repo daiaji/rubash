@@ -1324,7 +1324,7 @@ impl Executor {
                 self.shell_state.env_vars
                     .remove(&fd_output_process_substitution_key(target_fd));
             }
-            Some(FdWriteEndpoint::CoprocStdin(pid)) => {
+            Some(FdWriteEndpoint::CoprocStdin { pid, .. }) => {
                 self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
                 self.shell_state.env_vars.insert(
                     fd_output_key(target_fd),
@@ -1378,7 +1378,7 @@ impl Executor {
             let _ = self.close_persistent_output_fd(target_fd);
             self.shell_state.env_vars
                 .insert(fd_closed_key(target_fd), "1".to_string());
-        } else if self.coproc_stdin_writers.contains_key(&source_fd) {
+        } else if self.coproc_write_file(source_fd).is_some() {
             self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
             self.shell_state.env_vars.insert(
                 fd_output_key(target_fd),
@@ -1448,23 +1448,12 @@ impl Executor {
             .get(&fd)
             .filter(|entry| !entry.closed)
             .and_then(|entry| match entry.write.as_ref() {
-                Some(FdWriteEndpoint::CoprocStdin(pid)) => Some(*pid),
+                Some(FdWriteEndpoint::CoprocStdin { pid, .. }) => Some(*pid),
                 _ => None,
             });
         self.fd_table.close_output(fd);
         if let Some(pid) = coproc_pid {
             self.mark_coproc_array_endpoint_closed(pid, fd);
-            let has_alias = self.fd_table.entries.values().any(|entry| {
-                !entry.closed
-                    && matches!(
-                        entry.write.as_ref(),
-                        Some(FdWriteEndpoint::CoprocStdin(alias_pid))
-                            if *alias_pid == pid
-                    )
-            });
-            if !has_alias {
-                self.coproc_stdin_writers.remove(&pid);
-            }
         }
         let target = self.shell_state.env_vars.remove(&fd_output_key(fd));
         let source = self
@@ -1484,23 +1473,12 @@ impl Executor {
             .fd_table
             .read_endpoint(fd)
             .and_then(|endpoint| match endpoint {
-                FdReadEndpoint::CoprocStdout(pid) => Some(pid),
+                FdReadEndpoint::CoprocStdout { pid, .. } => Some(pid),
                 _ => None,
             });
         self.fd_table.close_input(fd);
         if let Some(pid) = coproc_pid {
             self.mark_coproc_array_endpoint_closed(pid, fd);
-            let has_alias = self.fd_table.entries.values().any(|entry| {
-                !entry.closed
-                    && matches!(
-                        entry.read.as_ref(),
-                        Some(FdReadEndpoint::CoprocStdout(alias_pid))
-                            if *alias_pid == pid
-                    )
-            });
-            if !has_alias {
-                self.coproc_stdout_readers.remove(&pid);
-            }
         }
         self.shell_state.env_vars.remove(&fd_stdin_key(fd));
         self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
@@ -2090,7 +2068,7 @@ impl Executor {
                         self.shell_state.env_vars.remove(&fd_stdin_offset_key(target_fd));
                         self.shell_state.env_vars.remove(&fd_dynamic_input_key(target_fd));
                     }
-                    Some(FdReadEndpoint::CoprocStdout(pid)) => {
+                    Some(FdReadEndpoint::CoprocStdout { pid, .. }) => {
                         self.shell_state.env_vars.insert(
                             fd_stdin_key(target_fd),
                             format!("{FD_COPROC_STDIN_TARGET_PREFIX}{pid}"),

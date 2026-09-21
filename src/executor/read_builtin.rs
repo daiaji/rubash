@@ -2228,15 +2228,15 @@ impl Executor {
             Some(
                 FdReadEndpoint::Text(_)
                     | FdReadEndpoint::ProcessSubstitution(_)
-                    | FdReadEndpoint::CoprocStdout(_)
+                    | FdReadEndpoint::CoprocStdout { .. }
                     | FdReadEndpoint::InheritedProcessStdin
             )
         )
     }
 
     fn read_fd_is_available(&self, cmd: &CommandNode, fd: u32) -> bool {
-        if self.coproc_stdout_readers.contains_key(&fd)
-            || (fd == 0 && !self.coproc_stdout_readers.is_empty())
+        if self.coproc_read_file(fd).is_some()
+            || (fd == 0 && self.first_coproc_read().is_some())
         {
             return true;
         }
@@ -2305,7 +2305,7 @@ impl Executor {
                 Some(
                     FdReadEndpoint::Text(_)
                         | FdReadEndpoint::ProcessSubstitution(_)
-                        | FdReadEndpoint::CoprocStdout(_)
+                        | FdReadEndpoint::CoprocStdout { .. }
                 )
             )
             || self.shell_state.env_vars.contains_key(FUNCTION_STDIN)

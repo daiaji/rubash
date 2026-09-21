@@ -168,18 +168,15 @@ impl Executor {
             if redirect.fd.unwrap_or(0) == 0 {
                 if let Some(fd) = redirect_target_fd(&target) {
                     match self.fd_table.read_endpoint(fd) {
-                        Some(FdReadEndpoint::CoprocStdout(pid)) => {
-                            let reader = self
-                                .coproc_stdout_readers
-                                .get(&pid)
-                                .ok_or_else(|| {
+                        Some(FdReadEndpoint::CoprocStdout { fd: pipe, .. }) => {
+                            let dup = crate::fd::duplicate_handle_inheritable(pipe.handle)
+                                .map_err(|_| {
                                     io::Error::new(
                                         io::ErrorKind::BrokenPipe,
                                         "coprocess output is closed",
                                     )
-                                })?
-                                .try_clone()?;
-                            process.stdin(Stdio::from(reader));
+                                })?;
+                            process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
                             return Ok(());
                         }
                         // `< /dev/fd/N` (and `<&N`) on a file-backed fd dup

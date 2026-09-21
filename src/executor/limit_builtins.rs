@@ -100,8 +100,7 @@ impl Executor {
                 self.job_table.mark_completed(pid, 128 + request.signal);
                 self.shell_state.background_jobs.remove(&pid);
                 self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
-                self.coproc_stdin_writers.remove(&pid);
-                self.coproc_stdout_readers.remove(&pid);
+                self.close_coproc_endpoints(pid);
                 self.fd_table.close(pid);
                 self.job_table.remove_job_by_pid(pid);
             }
