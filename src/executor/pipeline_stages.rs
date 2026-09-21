@@ -32,6 +32,14 @@ impl Executor {
         let stderr = self.stderr_capture.take().unwrap_or_default();
         self.stdout_capture = saved_stdout_capture;
         self.stderr_capture = saved_stderr_capture;
+        // In-shell stage: the cursor visible on self is the element's real
+        // fd-0 consumption within `input` (execute_cmd.c:2758 lastpipe).
+        let consumed = self
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        self.pipeline_stdin_consumed.set(Some(consumed));
         restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
         restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
         // GNU execute_cmd.c:2758: the lastpipe stage runs in the current
@@ -124,6 +132,14 @@ impl Executor {
             Err(ExecuteError::ExitCode(code)) | Err(ExecuteError::ExpansionFailure(code)) => code,
             Err(error) => return Err(error),
         };
+        // The subshell's FUNCTION_STDIN cursor is the element's fd-0
+        // consumption within `input`; report it for the driver writeback.
+        let consumed = subshell
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        self.pipeline_stdin_consumed.set(Some(consumed));
 
         Ok((
             crate::executor::substitution_metadata::bytes_to_shell_text(&output),
@@ -198,6 +214,12 @@ impl Executor {
             Err(ExecuteError::ExitCode(code)) | Err(ExecuteError::ExpansionFailure(code)) => code,
             Err(error) => return Err(error),
         };
+        let consumed = subshell
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        self.pipeline_stdin_consumed.set(Some(consumed));
         // Drain output substitutions (none expected for <( ) arguments) and
         // delete the materialized input temp files after the call.
         self.finish_process_substitutions(procsub_files)?;
@@ -282,6 +304,12 @@ impl Executor {
             Err(ExecuteError::ExitCode(code)) | Err(ExecuteError::ExpansionFailure(code)) => code,
             Err(error) => return Err(error),
         };
+        let consumed = subshell
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        self.pipeline_stdin_consumed.set(Some(consumed));
         Ok(Some((
             crate::executor::substitution_metadata::bytes_to_shell_text(&output),
             crate::executor::substitution_metadata::bytes_to_shell_text(&stderr),
@@ -488,6 +516,10 @@ impl Executor {
             stdin.write_all(
                 &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
             )?;
+            // The child was handed the whole payload; model it as consumed
+            // (same approximation as comsub_stdin_writeback — a spawned
+            // process's read() calls are not observable here).
+            self.pipeline_stdin_consumed.set(Some(input.len()));
         }
         let output = child.wait_with_output()?;
 

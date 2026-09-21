@@ -1,6 +1,6 @@
 use super::{parse_array_tokens, split_storage_words, unquote_storage_value};
 
-pub(in crate::builtins::declare) fn parse_assoc_words(value: &str) -> Vec<(String, String)> {
+pub(in crate::builtins) fn parse_assoc_words(value: &str) -> Vec<(String, String)> {
     let Some(inner) = value
         .strip_prefix('(')
         .and_then(|value| value.strip_suffix(')'))
@@ -49,7 +49,7 @@ pub(in crate::builtins::declare) fn parse_assoc_words(value: &str) -> Vec<(Strin
         })
         .collect()
 }
-pub(in crate::builtins::declare) fn append_assoc_value(
+pub(in crate::builtins) fn append_assoc_value(
     current: &str,
     value: &str,
     integer: bool,
@@ -257,7 +257,7 @@ fn merge_assoc_subscript_tokens(tokens: Vec<String>) -> Vec<String> {
     out
 }
 
-pub(in crate::builtins::declare) fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
+pub(in crate::builtins) fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
     format!(
         "({})",
         entries

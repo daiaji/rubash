@@ -378,6 +378,7 @@ impl Executor {
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
+
         if offset >= input.len() {
             return None;
         }

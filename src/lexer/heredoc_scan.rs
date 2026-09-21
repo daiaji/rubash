@@ -1,4 +1,14 @@
-pub(super) fn skip_heredoc_in_chars_with_closure(chars: &[char], start: usize) -> (usize, bool) {
+/// Returns the resume index plus, when a `)` on the heredoc header line
+/// closed the enclosing `$(...)` and the delimiter line was found, the
+/// `)` position and the header line's `\n` position. GNU parse.y
+/// parse_comsub (PST_EOFTOKEN) treats that `)` as the substitution's eof
+/// token and gathers the pending body from the following input lines
+/// (parse.y:4564 gather_here_documents); print_comsub reprints the word
+/// with the body inside the closing `)`.
+pub(super) fn skip_heredoc_in_chars_with_closure(
+    chars: &[char],
+    start: usize,
+) -> (usize, Option<(usize, usize)>) {
     let mut index = start + 2;
     let strip_tabs = if chars.get(index) == Some(&'-') {
         index += 1;
@@ -30,15 +40,16 @@ pub(super) fn skip_heredoc_in_chars_with_closure(chars: &[char], start: usize) -
         delimiter = delimiter.trim_start_matches('\t').to_string();
     }
     if delimiter.is_empty() {
-        return (index, false);
+        return (index, None);
     }
-    let mut header_closes_command_substitution = false;
+    let mut header_close_paren = None;
     while chars.get(index).is_some_and(|ch| *ch != '\n') {
-        if chars.get(index) == Some(&')') {
-            header_closes_command_substitution = true;
+        if chars.get(index) == Some(&')') && header_close_paren.is_none() {
+            header_close_paren = Some(index);
         }
         index += 1;
     }
+    let header_end = index;
     if chars.get(index) == Some(&'\n') {
         index += 1;
     }
@@ -90,5 +101,10 @@ pub(super) fn skip_heredoc_in_chars_with_closure(chars: &[char], start: usize) -
         }
     }
 
-    (index, header_closes_command_substitution && found_delimiter)
+    let closure = if header_close_paren.is_some() && found_delimiter {
+        header_close_paren.map(|paren| (paren, header_end))
+    } else {
+        None
+    };
+    (index, closure)
 }

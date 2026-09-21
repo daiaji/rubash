@@ -306,6 +306,16 @@ fn tokenize_with_heredocs(
         if has_unclosed_compound_assignment(&logical_line) {
             continue;
         }
+        // GNU parse.y parse_comsub (PST_EOFTOKEN) + print_comsub
+        // (parse.y:4632): a `)` on a heredoc header line inside `$(...)`
+        // closes the substitution while the still-pending body was gathered
+        // from the following input lines, and the substitution text is
+        // reprinted with the body inside the closing `)`. Rotate
+        // `$(cat <<EOF)\nfoo\nEOF` into `$(cat <<EOF\nfoo\nEOF)` so every
+        // downstream consumer sees the GNU reprint order (heredoc7.sub).
+        if let Some(rotated) = relocate_comsub_heredoc_paren(&logical_line) {
+            logical_line = rotated;
+        }
         let mut line_tokens = tokenize_plain(&logical_line, parse_posix);
         if let Some(updated) = line_posix_mode_change(&line_tokens) {
             parse_posix = updated;
@@ -482,6 +492,16 @@ fn tokenize_with_heredocs(
     }
 
     if !logical_line.is_empty() {
+        // GNU parse.y parse_comsub (PST_EOFTOKEN) + print_comsub
+        // (parse.y:4632): a `)` on a heredoc header line inside `$(...)`
+        // closes the substitution while the still-pending body was gathered
+        // from the following input lines, and the substitution text is
+        // reprinted with the body inside the closing `)`. Rotate
+        // `$(cat <<EOF)\nfoo\nEOF` into `$(cat <<EOF\nfoo\nEOF)` so every
+        // downstream consumer sees the GNU reprint order (heredoc7.sub).
+        if let Some(rotated) = relocate_comsub_heredoc_paren(&logical_line) {
+            logical_line = rotated;
+        }
         let mut line_tokens = tokenize_plain(&logical_line, parse_posix);
         for token in &mut line_tokens {
             token.position = logical_start_line;
@@ -619,6 +639,88 @@ pub fn has_unclosed_input_syntax(input: &str) -> bool {
     has_unclosed_quotes(input)
         || (has_unclosed_command_substitution(input)
             && !skip::command_substitutions_balanced(input))
+}
+
+
+/// Rotate the `)`-that-closed-on-the-header-line segment of a command
+/// substitution's heredoc past the gathered body, mirroring GNU
+/// print_comsub's reprint order. Returns None when the input carries no such
+/// pattern.
+fn relocate_comsub_heredoc_paren(input: &str) -> Option<String> {
+    if !input.contains("$(") || !input.contains("<<") {
+        return None;
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' if !double => {
+                single = true;
+                index += 1;
+            }
+            '"' if !single => {
+                double = !double;
+                index += 1;
+            }
+            '$' if !double
+                && chars.get(index + 1) == Some(&'(')
+                && chars.get(index + 2) != Some(&'(') =>
+            {
+                depth += 1;
+                index += 2;
+            }
+            '(' if depth > 0 && !double => {
+                depth += 1;
+                index += 1;
+            }
+            ')' if depth > 0 && !double => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            '<' if depth > 0
+                && !double
+                && chars.get(index + 1) == Some(&'<')
+                && chars.get(index + 2) != Some(&'<') =>
+            {
+                let (next, closure) = heredoc_scan::skip_heredoc_in_chars_with_closure(&chars, index);
+                if let Some((paren, header_end)) = closure {
+                    // `)` + its header-line tail move past the gathered body:
+                    // `$(cat <<EOF)\nbody\nEOF` reads as GNU's reprint
+                    // `$(cat <<EOF\nbody\nEOF)`.
+                    let mut out: String = chars[..paren].iter().collect();
+                    out.extend(chars[header_end..next].iter());
+                    out.extend(chars[paren..header_end].iter());
+                    out.extend(chars[next..].iter());
+                    return Some(out);
+                }
+                index = next.max(index + 1);
+            }
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 fn tokenize_plain(input: &str, posix: bool) -> Vec<Token> {

@@ -708,7 +708,7 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
             && chars.get(index + 2) != Some(&'<')
         {
             let (next, closes) = skip_heredoc_in_chars_with_closure(chars, index);
-            if closes {
+            if closes.is_some() {
                 return Some(next);
             }
             index = next;
@@ -955,7 +955,7 @@ pub(crate) fn has_unclosed_command_substitution(input: &str) -> bool {
         }
         if depth > 0 && ch == '<' && chars.get(index + 1) == Some(&'<') {
             let (next, closes) = skip_heredoc_in_chars_with_closure(&chars, index);
-            if closes {
+            if closes.is_some() {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return false;

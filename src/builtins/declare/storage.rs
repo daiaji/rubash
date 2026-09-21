@@ -2,11 +2,11 @@ mod array;
 mod assoc;
 mod words;
 
-pub(super) use array::{append_array_value, format_indexed_array_storage, indexed_array_entries};
-pub(super) use assoc::{
-    append_assoc_value, format_assoc_storage, parse_assoc_words, quote_assoc_key,
-    quote_assoc_storage_value,
-};
+pub(in crate::builtins) use array::append_array_value;
+pub(in crate::builtins) use array::{format_indexed_array_storage, indexed_array_entries};
+pub(in crate::builtins) use assoc::append_assoc_value;
+pub(in crate::builtins) use assoc::{format_assoc_storage, parse_assoc_words};
+pub(super) use assoc::{quote_assoc_key, quote_assoc_storage_value};
 pub(super) use words::{
     parse_array_tokens, split_indexed_tagged_token, split_storage_words, unquote_storage_value,
 };

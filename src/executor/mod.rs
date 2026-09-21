@@ -654,6 +654,13 @@ pub struct Executor {
     /// cursor plus a fingerprint of the shared buffer and apply it lazily at
     /// the next `&mut self` stdin consumer.
     comsub_stdin_writeback: Cell<Option<(usize, u64)>>,
+    /// GNU execute_cmd.c execute_pipeline gives the first pipeline element
+    /// the shell's own fd 0: the shared open-file cursor advances only by
+    /// what the element actually read. Stage helpers run on subshell clones
+    /// or real child processes, so the measured consumption is reported back
+    /// through this cell and folded into FUNCTION_STDIN_OFFSET by the
+    /// pipeline driver (initial_pipeline_input must not eagerly drain).
+    pipeline_stdin_consumed: Cell<Option<usize>>,
     /// Tracks the source of the last heredoc EOF warning emitted from
     /// command_substitution_heredoc_output_mut_typed, to avoid duplicate
     /// warnings when the same comsub is expanded through multiple paths

@@ -205,6 +205,13 @@ impl Executor {
             // be trapped or reset, but no error is reported"). Runtime
             // ignores of plain subshells stay mutable; only this
             // shell-entry boundary freezes them.
+            // A spawned rubash child seeds its startup trap table in
+            // Executor::new (init.rs seed_startup_traps): orig-ignored
+            // entries are rebuilt and the WSL-inherited SIGRTMIN ignore is
+            // added, so `trap` in the child lists it. The in-process child
+            // takes the same fresh-shell boundary and must seed identically,
+            // or varenv22's last `trap` loses the SIGRTMIN line.
+            crate::builtins::trap::seed_startup_traps(&mut self.env_vars);
             crate::builtins::trap::mark_startup_ignores(&mut self.env_vars);
         }
         let saved_pipestatus = self.pipestatus.clone();

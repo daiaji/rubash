@@ -12,6 +12,12 @@ const TRAP_PREFIX: &str = "__RUBASH_TRAP_";
 /// sigmodes SIG_HARD_IGNORE). They cannot be trapped or reset, and POSIX
 /// reports no error when attempted (trap.c set_signal/ignore_signal).
 pub(crate) const TRAP_ORIG_IGNORES: &str = "__RUBASH_TRAP_ORIG_IGN";
+/// Signals whose dispositions were reset on subshell entry. GNU
+/// reset_signal_handlers (trap.c:1480 -> reset_or_restore_signal_handlers:1433)
+/// restores the original handler for trapped signals but deliberately does
+/// not free trap_list strings, so `trap` in a subshell still lists the
+/// parent's traps; the reset set records which entries may not fire.
+const TRAP_RESET: &str = "__RUBASH_TRAP_RESET";
 const EX_USAGE: i32 = 2;
 /// Linux signal numbering (the GNU 5.3.0 contract baseline runs on WSL,
 /// where BASH_TRAPSIG, `trap 17`, `kill -l 10` and friends all speak this
@@ -227,6 +233,9 @@ pub fn list_first_signal_for_sed() -> &'static str {
 }
 
 pub(crate) fn take_exit_trap(env_vars: &mut HashMap<String, String>) -> Option<String> {
+    if reset_trap_signals(env_vars).contains("EXIT") {
+        return None;
+    }
     let action = env_vars.remove(&trap_key("EXIT"));
     let mut signals = trap_list(env_vars);
     signals.remove("EXIT");
@@ -235,6 +244,9 @@ pub(crate) fn take_exit_trap(env_vars: &mut HashMap<String, String>) -> Option<S
 }
 
 pub(crate) fn get_trap_action(env_vars: &HashMap<String, String>, signal: &str) -> Option<String> {
+    if reset_trap_signals(env_vars).contains(signal) {
+        return None;
+    }
     env_vars.get(&trap_key(signal)).cloned()
 }
 
@@ -343,6 +355,12 @@ fn set_trap(env_vars: &mut HashMap<String, String>, signal: &str, action: &str) 
     let mut signals = trap_list(env_vars);
     signals.insert(signal.to_string());
     store_trap_list(env_vars, signals);
+    // GNU set_signal re-arms a subshell-reset disposition: the new handler
+    // is trapped, not reset, so it fires and stays listed.
+    let mut reset = reset_trap_signals(env_vars);
+    if reset.remove(signal) {
+        store_reset_traps(env_vars, reset);
+    }
 }
 
 fn remove_trap(env_vars: &mut HashMap<String, String>, signal: &str) {
@@ -353,6 +371,10 @@ fn remove_trap(env_vars: &mut HashMap<String, String>, signal: &str) {
     let mut signals = trap_list(env_vars);
     signals.remove(signal);
     store_trap_list(env_vars, signals);
+    let mut reset = reset_trap_signals(env_vars);
+    if reset.remove(signal) {
+        store_reset_traps(env_vars, reset);
+    }
 }
 
 fn is_hard_ignored(env_vars: &HashMap<String, String>, signal: &str) -> bool {
@@ -451,13 +473,10 @@ pub(crate) fn seed_startup_traps(env_vars: &mut HashMap<String, String>) {
     }
     // WSL's init leaves SIGRTMIN ignored for every child process, so the
     // GNU 5.3.0 contract baseline lists "trap -- '' SIGRTMIN" in every
-    // fresh shell (both 5.2.21 and 5.3.0 under WSL show it). Seed that
-    // inherited ignore here when no trap table entry arrived, but only for
-    // script execution: the cli subshell-reset contract runs "rubash -c"
-    // with a pristine environment where no RTMIN ignore is inherited, and
-    // its listing expectation omits it.
-    let is_command_string = std::env::args().any(|arg| arg == "-c");
-    if !is_command_string && env_vars.get(&trap_key("SIGRTMIN")).is_none() {
+    // fresh shell (both 5.2.21 and 5.3.0 under WSL show it, including
+    // `bash -c 'trap'`). Seed that inherited ignore when no trap table
+    // entry arrived.
+    if env_vars.get(&trap_key("SIGRTMIN")).is_none() {
         env_vars.insert(trap_key("SIGRTMIN"), String::new());
         let mut signals = trap_list(env_vars);
         signals.insert("SIGRTMIN".to_string());
@@ -565,24 +584,45 @@ fn trap_key(signal: &str) -> String {
     format!("{TRAP_PREFIX}{signal}")
 }
 
-/// Reset caught signal traps when entering a subshell. Bash preserves ignored
-/// dispositions (`trap ''`) but restores non-empty handlers to defaults.
+/// Reset caught signal traps when entering a subshell. GNU
+/// reset_signal_handlers (trap.c:1480) restores the original handler for
+/// trapped signals but does not free trap_list strings: `trap` in a subshell
+/// still lists the parent's traps (`trap 'x' TERM; (trap)` prints the TERM
+/// entry). Ignored dispositions (`trap ''`) stay ignored. Keep every table
+/// entry and record the reset dispositions so get_trap_action/take_exit_trap
+/// skip firing them while the listing still shows them.
 pub(crate) fn reset_for_subshell(env_vars: &mut HashMap<String, String>) {
-    let mut signals = trap_list(env_vars);
-    signals.retain(|signal| {
+    let mut reset = reset_trap_signals(env_vars);
+    for signal in trap_list(env_vars) {
         // DEBUG and RETURN are tracing hooks, not OS signal dispositions;
         // functrace/extdebug controls their inheritance separately.
         if matches!(signal.as_str(), "DEBUG" | "RETURN") {
-            return true;
+            continue;
         }
-        let key = trap_key(signal);
-        let keep = env_vars.get(&key).is_some_and(String::is_empty);
-        if !keep {
-            env_vars.remove(&key);
+        let key = trap_key(&signal);
+        if env_vars.get(&key).is_some_and(|action| !action.is_empty()) {
+            reset.insert(signal);
         }
-        keep
-    });
-    store_trap_list(env_vars, signals);
+    }
+    store_reset_traps(env_vars, reset);
+}
+
+fn reset_trap_signals(env_vars: &HashMap<String, String>) -> BTreeSet<String> {
+    env_vars
+        .get(TRAP_RESET)
+        .map(|value| value.split(':').map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn store_reset_traps(env_vars: &mut HashMap<String, String>, signals: BTreeSet<String>) {
+    if signals.is_empty() {
+        env_vars.remove(TRAP_RESET);
+    } else {
+        env_vars.insert(
+            TRAP_RESET.to_string(),
+            signals.into_iter().collect::<Vec<_>>().join(":"),
+        );
+    }
 }
 
 fn trap_list(env_vars: &HashMap<String, String>) -> BTreeSet<String> {

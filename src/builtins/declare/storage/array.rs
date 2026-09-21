@@ -28,7 +28,7 @@ fn token_is_subscript_assignment(unquoted_token: &str) -> bool {
 /// reports a failglob pathname-expansion failure on one element word —
 /// expand_compound_array_assignment (arrayfunc.c:557) aborts the operand
 /// before bind, so `declare -a g=(zzz-*)` leaves g unset.
-pub(in crate::builtins::declare) fn append_array_value(
+pub(in crate::builtins) fn append_array_value(
     current: &str,
     value: &str,
     integer: bool,
@@ -149,7 +149,7 @@ pub(in crate::builtins::declare) fn append_array_value(
     Ok(format_indexed_array_storage(entries))
 }
 
-pub(in crate::builtins::declare) fn indexed_array_entries(value: &str) -> BTreeMap<usize, String> {
+pub(in crate::builtins) fn indexed_array_entries(value: &str) -> BTreeMap<usize, String> {
     if let Some(rendered) = value.strip_prefix('\x1d') {
         return rendered_array_entries(rendered);
     }
@@ -182,7 +182,7 @@ fn rendered_array_entries(rendered: &str) -> BTreeMap<usize, String> {
         .collect()
 }
 
-pub(in crate::builtins::declare) fn format_indexed_array_storage(
+pub(in crate::builtins) fn format_indexed_array_storage(
     entries: BTreeMap<usize, String>,
 ) -> String {
     let rendered = entries

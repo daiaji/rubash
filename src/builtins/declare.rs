@@ -13,7 +13,7 @@ mod marks;
 mod names;
 mod output;
 mod print;
-mod storage;
+pub(in crate::builtins) mod storage;
 
 use crate::shell::VariableStore;
 use assign::assign_declare_names;

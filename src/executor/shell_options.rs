@@ -711,9 +711,7 @@ impl Executor {
                 return Some(input);
             }
         }
-        let function_stdin_is_source = cmd.redirect_in.is_none()
-            && self.virtual_fd_stdin_remaining(0).is_none()
-            && self.function_stdin_remaining().is_some();
+        let function_stdin_is_source = self.function_stdin_is_command_source(cmd);
         let result = self.stdin_string_for_command(cmd);
         if result.is_some() && function_stdin_is_source {
             // The child drains the stream from the cursor onward; GNU's
@@ -727,6 +725,18 @@ impl Executor {
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), end.to_string());
         }
         result
+    }
+
+    /// True when the command's effective fd 0 resolves to the shared
+    /// FUNCTION_STDIN buffer: no explicit `<` redirect wins and no virtual
+    /// fd-0 endpoint shadows it (same predicate the drain above applies).
+    pub(in crate::executor) fn function_stdin_is_command_source(
+        &self,
+        cmd: &CommandNode,
+    ) -> bool {
+        cmd.redirect_in.is_none()
+            && self.virtual_fd_stdin_remaining(0).is_none()
+            && self.function_stdin_remaining().is_some()
     }
 
     pub(in crate::executor) fn stdin_string_for_command(

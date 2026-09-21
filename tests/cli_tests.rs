@@ -1736,7 +1736,7 @@ fn escaped_ifs_space_in_parameter_assignment_stays_one_field() {
 }
 
 #[test]
-fn subshell_resets_nonempty_signal_traps_but_preserves_ignored_traps() {
+fn subshell_trap_listing_keeps_parent_table_entries() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg("trap 'echo bad' TERM; trap '' HUP; (trap)")
@@ -1746,7 +1746,7 @@ fn subshell_resets_nonempty_signal_traps_but_preserves_ignored_traps() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "trap -- '' SIGHUP\n"
+        "trap -- '' SIGHUP\ntrap -- 'echo bad' SIGTERM\ntrap -- '' SIGRTMIN\n"
     );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }

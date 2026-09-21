@@ -364,8 +364,11 @@ impl Executor {
                 .filter(|_| stage_index == 0)
                 .map(|prefix| &prefix.command)
                 .unwrap_or(command);
+            let mut stage0_stdin_base = None;
             if stage_index == 0 {
-                input = self.initial_pipeline_input(stage);
+                let (stage_input, base) = self.initial_pipeline_input(stage);
+                input = stage_input;
+                stage0_stdin_base = base;
             }
             self.set_current_command(stage);
             let last_stage = stage_index + 1 == commands.len();
@@ -444,6 +447,16 @@ impl Executor {
                 std::io::stderr().write_all(
                     &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&next_stderr),
                 )?;
+            }
+            if let Some(base) = stage0_stdin_base {
+                // Fold the element's measured fd-0 reads into the shared
+                // cursor — a non-reader (echo) leaves it untouched while a
+                // drainer (cat) pushes it to EOF (GNU redir.c shared fd).
+                let consumed = self.pipeline_stdin_consumed.take().unwrap_or(0);
+                self.env_vars.insert(
+                    FUNCTION_STDIN_OFFSET.to_string(),
+                    (base + consumed).to_string(),
+                );
             }
             input = next_input;
             statuses.push(next_status);
@@ -920,7 +933,15 @@ impl Executor {
         // Spawn every stage before writing a heredoc. A large heredoc can fill
         // the first stdin pipe while the downstream stages are still absent.
         if let Some(mut stdin) = processes[0].stdin.take() {
-            let input = self.initial_pipeline_input(commands[0]);
+            let (input, stdin_base) = self.initial_pipeline_input(commands[0]);
+            if let Some(base) = stdin_base {
+                // The spawned child was handed the whole unread tail; GNU's
+                // shared fd 0 models that as consumed.
+                self.env_vars.insert(
+                    FUNCTION_STDIN_OFFSET.to_string(),
+                    (base + input.len()).to_string(),
+                );
+            }
             if !input.is_empty() {
                 stdin.write_all(
                     &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
@@ -1119,7 +1140,13 @@ impl Executor {
         }
 
         if let Some(mut stdin) = first_stdin {
-            let input = self.initial_pipeline_input(commands[0]);
+            let (input, stdin_base) = self.initial_pipeline_input(commands[0]);
+            if let Some(base) = stdin_base {
+                self.env_vars.insert(
+                    FUNCTION_STDIN_OFFSET.to_string(),
+                    (base + input.len()).to_string(),
+                );
+            }
             stdin.write_all(
                 &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
             )?;
@@ -1317,6 +1344,7 @@ impl Executor {
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
         self.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        self.pipeline_stdin_consumed.set(None);
         let result = if command_has_pipeline_process_substitution(command) {
             // The substitution child inherits the stage's stdin — the
             // upstream pipe — so expose the captured input while the
@@ -1343,6 +1371,17 @@ impl Executor {
         } else {
             self.execute_pipeline_stage_inner(command, input)
         };
+        // Inline stage arms that ran on `self` consumed FUNCTION_STDIN
+        // directly; subshell/child stages report through the cell. Whichever
+        // is missing falls back to the cursor visible here.
+        if self.pipeline_stdin_consumed.get().is_none() {
+            let measured = self
+                .env_vars
+                .get(FUNCTION_STDIN_OFFSET)
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            self.pipeline_stdin_consumed.set(Some(measured));
+        }
         restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
         restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
         let nounset_hit = self.restore_arithmetic_error_flags(&saved);
@@ -1880,14 +1919,39 @@ impl Executor {
         crate::builtins::shopt::option_enabled(&self.env_vars, "lastpipe")
     }
 
-    fn initial_pipeline_input(&mut self, command: &CommandNode) -> String {
-        self.stdin_string_for_command_mut(command)
+    /// Computes the first pipeline element's fd-0 payload. GNU gives every
+    /// element the same open file description (execute_cmd.c execute_pipeline):
+    /// the shared FUNCTION_STDIN cursor may move only when the element
+    /// actually reads. stdin_string_for_command_mut's drain-to-EOF models a
+    /// consumer, so the cursor is snapshot/restored here and the real
+    /// consumption is folded back by execute_simple_pipeline after the stage
+    /// runs (pipeline_stdin_consumed reports subshell/child reads). Returns
+    /// the input plus the FUNCTION_STDIN base offset when the buffer was the
+    /// source (None for heredoc/redirect/virtual-fd/process-stdin sources,
+    /// whose cursors live elsewhere).
+    fn initial_pipeline_input(&mut self, command: &CommandNode) -> (String, Option<usize>) {
+        self.apply_comsub_stdin_writeback();
+        let base = self
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let from_function_stdin = self.function_stdin_is_command_source(command);
+        let input = self
+            .stdin_string_for_command_mut(command)
             .or_else(|| {
                 pipeline_stage_reads_stdin_by_default(command)
                     .then(|| self.read_inherited_process_stdin_to_string())
                     .flatten()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if from_function_stdin {
+            self.env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), base.to_string());
+            (input, Some(base))
+        } else {
+            (input, None)
+        }
     }
 }
 

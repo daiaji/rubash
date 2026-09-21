@@ -372,7 +372,12 @@ pub(in crate::executor) fn copy_command_substitution_heredoc(
             } else {
                 line.as_str()
             };
-            if comparable == delimiter && ch == ')' {
+            // GNU make_cmd.c:605-611 (PST_EOFTOKEN): any body line that
+            // starts with the delimiter and reaches `)` later ends the
+            // document; the `)` is left for the caller so the command
+            // substitution sees its closer (`EOFx)` counts too -- the `x`
+            // stays in the collected source).
+            if comparable.starts_with(delimiter.as_str()) && ch == ')' {
                 source.push('\x1c');
                 return;
             }

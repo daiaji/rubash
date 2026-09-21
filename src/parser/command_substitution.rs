@@ -142,12 +142,23 @@ fn dollar_command_substitution(
         }
         // Heredoc bodies are opaque to command-substitution delimiter matching.
         if ch == '<' && !single && !double && chars.get(index + 1) == Some(&'<') {
-            if let Some((next_index, header_closes)) =
+            if let Some((next_index, header_close)) =
                 skip_command_substitution_heredoc(chars, index)
             {
-                if header_closes {
-                    let text = chars[start..next_index].iter().collect();
-                    let source = chars[start + 2..next_index].iter().collect();
+                if let Some((paren, header_end)) = header_close {
+                    // GNU parse.y parse_comsub:4564 + print_comsub
+                    // (parse.y:4632): the `)` on the heredoc header line
+                    // closes the substitution while the pending body is
+                    // gathered from the following input lines and reprinted
+                    // inside the word (`echo $(cat << EOF)` + `foo`/`bar`/
+                    // `EOF` lines yields `foo bar`).  Rebuild the inner
+                    // source the same way: header text up to the `)`, then
+                    // the gathered body lines.
+                    let mut source: String = chars[start + 2..paren].iter().collect();
+                    source.extend(chars[header_end..next_index].iter());
+                    let mut text = String::from("$(");
+                    text.push_str(&source);
+                    text.push(')');
                     return Some((
                         command_substitution_node(text, source, false, false, false),
                         next_index,
@@ -259,7 +270,10 @@ fn braced_command_substitution(
     None
 }
 
-fn skip_command_substitution_heredoc(chars: &[char], start: usize) -> Option<(usize, bool)> {
+fn skip_command_substitution_heredoc(
+    chars: &[char],
+    start: usize,
+) -> Option<(usize, Option<(usize, usize)>)> {
     let mut header_end = start + 2;
     while header_end < chars.len() && chars[header_end] != '\n' {
         header_end += 1;
@@ -268,21 +282,99 @@ fn skip_command_substitution_heredoc(chars: &[char], start: usize) -> Option<(us
         return None;
     }
 
-    let mut header = chars[start + 2..header_end].iter().collect::<String>();
-    let strip_tabs = header.trim_start().starts_with('-');
-    if strip_tabs {
-        header = header.trim_start_matches([' ', '\t', '-']).to_string();
+    // GNU parse.y (PST_EOFTOKEN): inside `$(...)` the `)` is the
+    // substitution's eof token and a shell break character, so the heredoc
+    // delimiter word ends at the first unquoted `)` and that `)` closes the
+    // substitution on the header line (`cat << EOF)`).  parse_comsub then
+    // gathers the still-pending heredoc body from the following input lines
+    // (parse.y:4564 gather_here_documents) and print_comsub reprints the
+    // command with the body inside the word.  Parse the delimiter word
+    // quote/escape aware so `<<\)` keeps `)` as delimiter text.
+    let mut index = start + 2;
+    let strip_tabs = if chars.get(index) == Some(&'-') {
+        index += 1;
+        true
+    } else {
+        false
+    };
+    while index < header_end && matches!(chars[index], ' ' | '\t') {
+        index += 1;
     }
-    let raw_delimiter = header.split_whitespace().next()?;
-    let delimiter = raw_delimiter
-        .trim_matches(['\'', '"'])
-        .trim_start_matches('\\')
-        .to_string();
+    let mut delimiter = String::new();
+    let mut single = false;
+    let mut double = false;
+    while index < header_end {
+        let ch = chars[index];
+        if single {
+            if ch == '\'' {
+                single = false;
+            } else {
+                delimiter.push(ch);
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '"' {
+                double = false;
+            } else {
+                delimiter.push(ch);
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' => single = true,
+            '"' => double = true,
+            '\\' if index + 1 < header_end => {
+                delimiter.push(chars[index + 1]);
+                index += 1;
+            }
+            c if c.is_whitespace() || matches!(c, ';' | '|' | '&' | ')') => break,
+            _ => delimiter.push(ch),
+        }
+        index += 1;
+    }
+    if strip_tabs {
+        delimiter = delimiter.trim_start_matches('\t').to_string();
+    }
     if delimiter.is_empty() {
         return None;
     }
 
-    let header_closes_command_substitution = header.contains(')');
+    // An unquoted `)` anywhere after the delimiter word on the header line
+    // closes the substitution (it is the eof token, not body text).
+    let mut header_close_paren = None;
+    {
+        let mut rest = index;
+        let mut rest_single = false;
+        let mut rest_double = false;
+        while rest < header_end {
+            let ch = chars[rest];
+            if rest_single {
+                if ch == '\'' {
+                    rest_single = false;
+                }
+            } else if rest_double {
+                if ch == '"' {
+                    rest_double = false;
+                }
+            } else {
+                match ch {
+                    '\'' => rest_single = true,
+                    '"' => rest_double = true,
+                    '\\' => rest += 1,
+                    ')' => {
+                        header_close_paren = Some(rest);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            rest += 1;
+        }
+    }
+
     let mut line_start = header_end + 1;
     while line_start <= chars.len() {
         let mut line_end = line_start;
@@ -298,7 +390,7 @@ fn skip_command_substitution_heredoc(chars: &[char], start: usize) -> Option<(us
         if candidate == delimiter {
             return Some((
                 (line_end + (line_end < chars.len()) as usize).min(chars.len()),
-                header_closes_command_substitution,
+                header_close_paren.map(|paren| (paren, header_end)),
             ));
         }
         // GNU parse.y gather_here_documents reads the whole heredoc body
@@ -314,7 +406,7 @@ fn skip_command_substitution_heredoc(chars: &[char], start: usize) -> Option<(us
                 let paren_index = line_start
                     + (line.chars().count() - candidate.chars().count())
                     + delimiter.chars().count();
-                return Some((paren_index, false));
+                return Some((paren_index, None));
             }
         }
         if line_end >= chars.len() {

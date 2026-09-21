@@ -7,10 +7,10 @@ use super::marks::{
     unmark_exported,
 };
 use super::value::{
-    array_attribute_assignment_value, diagnostic_prefix, eval_arith_value, is_array_value,
+    array_attribute_assignment_value, diagnostic_prefix,
     readonly_error_subject, split_assignment, valid_identifier,
 };
-use super::{ExportMode, EXECUTION_FAILURE, EXECUTION_SUCCESS, INTEGER_VARS, READONLY_VARS};
+use super::{ExportMode, EXECUTION_FAILURE, EXECUTION_SUCCESS, READONLY_VARS};
 
 pub(super) fn apply_export_arg<W>(
     arg: &str,
@@ -70,32 +70,26 @@ where
             // `export -a name` alone just marks att_exported.
             let has_assign = value.is_some();
             let converted = env_vars.contains_key(name) || env::var(name).is_ok();
-            let value = value
+            let (value, bound_array) = value
                 .map(|value| {
-                    array_attribute_assignment_value(value, array || assoc, env_vars, name)
+                    array_attribute_assignment_value(value, array, assoc, append, env_vars, name)
                 })
-                .or_else(|| env_vars.get(name).cloned())
-                .or_else(|| env::var(name).ok())
-                .unwrap_or_default();
-            let value = if append {
-                let mut current = env_vars.get(name).cloned().unwrap_or_default();
-                if marked_vars(env_vars, INTEGER_VARS).contains(name) {
-                    (eval_arith_value(&current) + eval_arith_value(&value)).to_string()
-                } else {
-                    current.push_str(&value);
-                    current
-                }
-            } else {
-                value
-            };
+                .unwrap_or_else(|| {
+                    (
+                        env_vars
+                            .get(name)
+                            .cloned()
+                            .or_else(|| env::var(name).ok())
+                            .unwrap_or_default(),
+                        array || assoc,
+                    )
+                });
             env_vars.insert(name.to_string(), value.clone());
             env::set_var(name, value);
             mark_exported(env_vars, name);
             if assoc && has_assign {
                 mark_assoc(env_vars, name, converted);
-            } else if (array && has_assign)
-                || is_array_value(env_vars.get(name).map(String::as_str).unwrap_or(""))
-            {
+            } else if (array && has_assign) || bound_array {
                 mark_array(env_vars, name);
             }
         }
@@ -188,30 +182,26 @@ where
     // printed list, so the marks below need the assignment word.
     let has_assign = value.is_some();
     let converted = env_vars.contains_key(name) || env::var(name).is_ok();
-    let value = value
-        .map(|value| array_attribute_assignment_value(value, array || assoc, env_vars, name))
-        .or_else(|| env_vars.get(name).cloned())
-        .or_else(|| env::var(name).ok())
-        .unwrap_or_default();
-    let value = if append {
-        let mut current = env_vars.get(name).cloned().unwrap_or_default();
-        if marked_vars(env_vars, INTEGER_VARS).contains(name) {
-            (eval_arith_value(&current) + eval_arith_value(&value)).to_string()
-        } else {
-            current.push_str(&value);
-            current
-        }
-    } else {
-        value
-    };
+    let (value, bound_array) = value
+        .map(|value| {
+            array_attribute_assignment_value(value, array, assoc, append, env_vars, name)
+        })
+        .unwrap_or_else(|| {
+            (
+                env_vars
+                    .get(name)
+                    .cloned()
+                    .or_else(|| env::var(name).ok())
+                    .unwrap_or_default(),
+                array || assoc,
+            )
+        });
     env_vars.insert(name.to_string(), value.clone());
     env::set_var(name, value);
     mark_readonly(env_vars, name);
     if assoc && has_assign {
         mark_assoc(env_vars, name, converted);
-    } else if (array && has_assign)
-        || is_array_value(env_vars.get(name).map(String::as_str).unwrap_or(""))
-    {
+    } else if (array && has_assign) || bound_array {
         mark_array(env_vars, name);
     }
     Ok(EXECUTION_SUCCESS)

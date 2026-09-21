@@ -1669,21 +1669,72 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
                 source.push(source_ch);
                 source.push(chars.next().expect("heredoc second less-than"));
                 let mut header = String::new();
-                while let Some(header_ch) = chars.next() {
+                // Delimiter text with quoting resolved the way the parser
+                // reports it (make_cmd.c heredoc delimiter): quote bytes are
+                // removed and a backslash contributes its escaped character.
+                // `<<\)` names delimiter `)`; leaving the backslash in made
+                // the body comparison impossible (comsub-eof5.sub `cat <<\)`).
+                let mut delimiter = String::new();
+                let mut header_single = false;
+                let mut header_double = false;
+                while let Some(&header_ch) = chars.peek() {
+                    match header_ch {
+                        '\'' if !header_double => header_single = !header_single,
+                        '"' if !header_single => header_double = !header_double,
+                        // An unquoted `)` ends the `<<word` header -- GNU's
+                        // parser tokenizes it as the substitution closer
+                        // (PST_EOFTOKEN), not as delimiter text.
+                        ')' if !header_single && !header_double => break,
+                        '\\' if !header_single => {
+                            chars.next();
+                            source.push(header_ch);
+                            header.push(header_ch);
+                            if let Some(&escaped) = chars.peek() {
+                                chars.next();
+                                source.push(escaped);
+                                header.push(escaped);
+                                if escaped != '\n' {
+                                    delimiter.push(escaped);
+                                }
+                            }
+                            continue;
+                        }
+                        _ => delimiter.push(header_ch),
+                    }
+                    chars.next();
                     source.push(header_ch);
                     if header_ch == '\n' {
                         break;
                     }
                     header.push(header_ch);
                 }
-                let raw_delimiter = header.trim_end().trim_start_matches('-').trim();
-                let delimiter = raw_delimiter
-                    .trim_matches('\'')
-                    .trim_matches('\"')
-                    .to_string();
+                let strip_tabs = header.trim_start().starts_with('-');
+                let delimiter = delimiter.trim().trim_start_matches('-').trim().to_string();
                 if !delimiter.is_empty() {
                     let mut body_line = String::new();
                     while let Some(body_ch) = chars.next() {
+                        // GNU make_cmd.c:605-611 (PST_EOFTOKEN): a heredoc
+                        // body line that starts with the delimiter and
+                        // carries the eof token `)` later on ends the
+                        // document as if it hit EOF; the `)` is pushed back
+                        // to the parser input, where it closes the command
+                        // substitution. A `)` inside an ordinary body line
+                        // is data (`x=$(cat <<EOF` + `this paren ) ...`),
+                        // while `EOF)` both ends the document and closes
+                        // the substitution. Text between the delimiter and
+                        // the `)` stays in the collected source the way
+                        // GNU's ungets feeds it back to the comsub parser.
+                        if body_ch == ')'
+                            && (if strip_tabs {
+                                body_line.trim_start_matches('\t')
+                            } else {
+                                body_line.as_str()
+                            })
+                            .starts_with(delimiter.as_str())
+                        {
+                            closed = true;
+                            break;
+                        }
                         source.push(body_ch);
                         if body_ch == '\n' {
                             if body_line.trim_end() == delimiter {
@@ -1693,6 +1744,9 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
                         } else {
                             body_line.push(body_ch);
                         }
+                    }
+                    if closed {
+                        break;
                     }
                 }
                 continue;
@@ -1766,7 +1820,8 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
         }
     }
 
-    (unescape_storage_command_substitution_source(&source), closed)
+    let result = unescape_storage_command_substitution_source(&source);
+    (result, closed)
 }
 
 fn command_substitution_status(result: Result<(), ExecuteError>, exit_code: i32) -> i32 {

@@ -1,7 +1,14 @@
 use std::collections::HashMap;
 use std::env;
 
+use super::marks::marked_vars;
 use super::COMPOUND_ASSIGNMENT_MARKER;
+use super::{ARRAY_VARS, ASSOC_VARS, INTEGER_VARS};
+use crate::builtins::declare::storage::{
+    format_assoc_storage, format_indexed_array_storage, indexed_array_entries,
+    parse_assoc_words,
+};
+use crate::builtins::declare::storage::{append_array_value, append_assoc_value};
 
 pub(super) fn is_array_value(value: &str) -> bool {
     value.starts_with('(') && value.ends_with(')')
@@ -9,20 +16,109 @@ pub(super) fn is_array_value(value: &str) -> bool {
 
 pub(super) fn array_attribute_assignment_value(
     value: &str,
-    explicit_array: bool,
-    _env_vars: &HashMap<String, String>,
-    _name: &str,
-) -> String {
-    if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
-        return compound.to_string();
+    array: bool,
+    assoc: bool,
+    append: bool,
+    env_vars: &HashMap<String, String>,
+    name: &str,
+) -> (String, bool) {
+    // The bool reports whether the bind produced array storage (a compound
+    // assignment or a scalar bound to an existing array's element 0) so the
+    // caller marks att_array only for real array binds — a quoted literal
+    // `(...)` scalar must stay scalar (setattr.def:269-274).
+    // GNU setattr.def:240-258 (export -a/-A) and :292 (readonly -a/-A)
+    // rewrite the builtin as `declare -gx{a,A}` / `declare -gr{a,A}`, so a
+    // compound `(...)` operand is tokenized by
+    // expand_compound_array_assignment (arrayfunc.c:557) instead of being
+    // stored verbatim. The operand arrives tagged with
+    // COMPOUND_ASSIGNMENT_MARKER plus ARRAY_FIELD_SPLIT_MARKER element
+    // tags — declare's append_*_value helpers consume both; storing the
+    // tagged text raw leaked \x10 and quote syntax into the value.
+    let compound = value
+        .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
+        .unwrap_or(value);
+    let tagged = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
+    let compound_shape = is_array_value(compound);
+    if compound_shape && (tagged || array || assoc) {
+        let current = if append {
+            env_vars
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| "()".to_string())
+        } else {
+            "()".to_string()
+        };
+        let integer = marked_vars(env_vars, INTEGER_VARS).contains(name);
+        let assoc_target = assoc
+            || marked_vars(env_vars, ASSOC_VARS).contains(name)
+            || marked_vars(env_vars, crate::executor::types::ASSOC_128_VARS).contains(name);
+        return (
+            if assoc_target {
+                append_assoc_value(&current, compound, integer, env_vars)
+            } else {
+                append_array_value(&current, compound, integer, env_vars)
+                    .unwrap_or_else(|_| compound.to_string())
+            },
+            true,
+        );
     }
-    // TODO(array.c/variables.c): Bash distinguishes compound array syntax
-    // from a quoted scalar assigned to an existing array. The lexer has removed
-    // quote state by this point, so preserve attr.tests' existing-array shape.
-    if !explicit_array && is_array_value(value) {
-        return format!("({value})");
+    // Scalar bind: the flagless operand went through GNU's
+    // do_assignment_no_expand (setattr.def:269-274), a plain scalar
+    // assignment. On an array target bind_variable (variables.c:3441)
+    // routes it to element 0 and keeps the remaining elements
+    // (`readonly 'a=(x)'` on a=(p q) stores "(x)" at [0]); on a plain or
+    // missing target it is a scalar literal.
+    let integer = marked_vars(env_vars, INTEGER_VARS).contains(name);
+    let literal = if integer {
+        eval_arith_value(compound).to_string()
+    } else {
+        compound.to_string()
+    };
+    let assoc_target = assoc
+        || marked_vars(env_vars, ASSOC_VARS).contains(name)
+        || marked_vars(env_vars, crate::executor::types::ASSOC_128_VARS)
+            .contains(name);
+    let array_target = array
+        || marked_vars(env_vars, ARRAY_VARS).contains(name)
+        || env_vars.get(name).is_some_and(|current| {
+            current.starts_with('\x1d')
+                || (current.starts_with('(') && current.ends_with(')'))
+        });
+    if assoc_target {
+        let current = env_vars.get(name).cloned().unwrap_or_default();
+        let mut entries = parse_assoc_words(&current);
+        match entries.iter_mut().find(|(key, _)| key == "0") {
+            Some(entry) if append => entry.1.push_str(&literal),
+            Some(entry) => entry.1 = literal,
+            None => entries.push(("0".to_string(), literal)),
+        }
+        return (format_assoc_storage(entries), true);
     }
-    value.to_string()
+    if array_target {
+        let current = env_vars.get(name).cloned().unwrap_or_default();
+        let mut entries = indexed_array_entries(&current);
+        let stored = if append {
+            let prior = entries.get(&0).cloned().unwrap_or_default();
+            format!("{prior}{literal}")
+        } else {
+            literal
+        };
+        entries.insert(0, stored);
+        return (format_indexed_array_storage(entries), true);
+    }
+    if !append {
+        return (literal, false);
+    }
+    let mut current = env_vars.get(name).cloned().unwrap_or_default();
+    (
+        if integer {
+            (eval_arith_value(&current) + eval_arith_value(&literal)).to_string()
+        } else {
+            current.push_str(&literal);
+            current
+        },
+        false,
+    )
 }
 
 pub(super) fn readonly_error_subject(

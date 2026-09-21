@@ -15,7 +15,21 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-20，合并后 `fix/array6-patsub-quotes`）：49 零差 / 34 有 DIFF / 总 848 行**
+> **最新台账（2026-09-21，master 回归修复后全量 true-baseline 重跑）：57 零差 / 26 有 DIFF / 总 733 行**
+> （DIFF 1-50：19 套件；51-250：7 套件；251+：0。较 848 行净减 115，
+> 逐套件对比无任何套件变差：attr 40→0、shopt 38→0、varenv 18→0、
+> heredoc 5→0、lastpipe 5→0、comsub-eof 2→0、comsub-posix 19→14、
+> nameref 1→0、trap 1→0。修复要点：① readonly/export 标量 `(...)` RHS
+> 走 GNU setattr.def:240-268 do_assignment_no_expand 语义，`\x10` 载体
+> 不再泄漏进 declare -p 回显；② comsub 头部行 `)` 关闭与跨界 pending
+> heredoc 体收集对齐 parse.y:4564 parse_comsub/make_cmd.c:602-611
+> PST_EOFTOKEN；③ 管道 stage0 不再把 FUNCTION_STDIN 游标无条件推 EOF，
+> 按实际消费字节回写（execute_cmd.c execute_pipeline fd0 共享语义）；
+> ④ reset_for_subshell 改为 GNU trap.c:1480 模型——保留 trap_list
+> 字符串、单独记录已重置 disposition；⑤ ${THIS_SH} 同进程子壳补
+> seed_startup_traps（Executor::new init.rs:36 对齐）。）
+>
+> 上一台账（2026-09-20，合并后 `fix/array6-patsub-quotes`）：49 零差 / 34 有 DIFF / 总 848 行
 > （DIFF 1-50：27 套件；51-250：7 套件；251+：0。较合并前基线 849 行净减 1，
 > 逐套件对比无任何套件变差；nameref 6→1。零差套件名单见 README）
 >

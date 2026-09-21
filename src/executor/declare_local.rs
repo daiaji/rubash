@@ -267,6 +267,7 @@ impl Executor {
         &mut self,
         args: &[String],
         word_metadata: &[crate::parser::WordMetadata],
+        command_name: &str,
     ) -> Result<Vec<String>, ()> {
         // Whether the operand list carries `-A` (set form); an unmarked
         // variable declared with -A takes the assoc element rules.
@@ -322,7 +323,99 @@ impl Executor {
                 let compound = value
                     .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
                     .unwrap_or(value);
-                let is_compound = compound.starts_with('(') && compound.ends_with(')');
+                let paren_value = compound.starts_with('(') && compound.ends_with(')');
+                // GNU declare.def:935-947 (shell_compatibility_level > 43):
+                // a `(...)` operand binds as a compound assignment only
+                // when the word carried W_COMPASSIGN (unquoted `=(`, the
+                // COMPOUND_ASSIGNMENT_MARKER carrier here), when -a/-A
+                // creates the array, or when the target already is an
+                // array/assoc; a quoted `(x)` on a scalar target stays a
+                // literal string (declare.def:946 simple_array_assign).
+                // For export/readonly GNU setattr.def:240-268 delegates
+                // only the -a/-A form to declare_builtin — the flagless
+                // form calls do_assignment_no_expand (plain scalar bind),
+                // so an existing array target alone does not make the
+                // operand compound there.
+                let w_compassign = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
+                let array_exists = is_marked_var(&self.env_vars, ASSOC_VARS, lhs)
+                    || is_marked_var(&self.env_vars, ARRAY_VARS, lhs);
+                let declare_family = !matches!(command_name, "export" | "readonly");
+                let is_compound = paren_value
+                    && (w_compassign
+                        || assoc_hint
+                        || array_hint
+                        || (declare_family && array_exists));
+                // GNU subst.c:12949-13036 expand_declaration_argument: a
+                // W_COMPASSIGN operand of an assignment builtin is bound by
+                // a nested declare_builtin during word expansion, with the
+                // command's -a/-A option letters replayed (omap). Its
+                // diagnostics use the expansion-time this_command_name —
+                // the enclosing function name (builtin_error,
+                // builtins/common.c:83-105) — while the readonly bind
+                // failure is err_readonly -> report_error (error.c:455),
+                // which prints the bare name. A nested failure discards
+                // the whole command at top level (exp_jump_to_top_level
+                // DISCARD) but only skips the bind inside a function body
+                // (W_FORCELOCAL, subst.c:13033), letting the outer builtin
+                // report the same operand again with its own name.
+                if w_compassign {
+                    // Scope of the nested bind: inside a function without
+                    // -g the operand declares/binds a LOCAL variable, so an
+                    // existing GLOBAL indexed cell is untouched and no
+                    // conversion error fires — unless localvar_inherit
+                    // (declare.def / shopt) makes the local inherit the
+                    // global's indexed attribute (varenv14.sub), or the
+                    // local scope already carries the mark.
+                    let local_context =
+                        self.function_depth > 0 && !declare_args_force_global(args);
+                    let locally_scoped = local_context
+                        && !self
+                            .local_var_scopes
+                            .last()
+                            .is_some_and(|scope| scope.contains_key(lhs))
+                        && !crate::builtins::shopt::option_enabled(
+                            &self.env_vars,
+                            "localvar_inherit",
+                        );
+                    let target_indexed = !locally_scoped
+                        && is_marked_var(&self.env_vars, ARRAY_VARS, lhs);
+                    let target_assoc = !locally_scoped
+                        && is_marked_var(&self.env_vars, ASSOC_VARS, lhs);
+                    let nested_assoc_convert =
+                        assoc_hint && target_indexed && !target_assoc;
+                    let nested_indexed_convert =
+                        array_hint && target_assoc && !target_indexed;
+                    let nested_readonly =
+                        is_marked_var(&self.env_vars, READONLY_VARS, lhs);
+                    if nested_assoc_convert || nested_indexed_convert {
+                        let kind = if nested_assoc_convert {
+                            "indexed to associative"
+                        } else {
+                            "associative to indexed"
+                        };
+                        match self.function_name_stack.first() {
+                            Some(func) => eprintln!(
+                                "{}{func}: {lhs}: cannot convert {kind} array",
+                                self.diagnostic_prefix()
+                            ),
+                            None => eprintln!(
+                                "{}{lhs}: cannot convert {kind} array",
+                                self.diagnostic_prefix()
+                            ),
+                        }
+                        if self.function_depth == 0 {
+                            return Err(());
+                        }
+                    } else if nested_readonly {
+                        eprintln!(
+                            "{}{lhs}: readonly variable",
+                            self.diagnostic_prefix()
+                        );
+                        if self.function_depth == 0 {
+                            return Err(());
+                        }
+                    }
+                }
                 // Sequential operand binding (declare.def:660+): a plain
                 // `name=value`/`name+=value` operand is visible to the
                 // expansion of every LATER operand's compound body.
@@ -586,7 +679,12 @@ impl Executor {
             self.sync_dirstack_cell();
         }
         let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
-        let mut args = match self.rewrite_declare_operand_subscripts(&args, &cmd.word_metadata) {
+        let command_name = cmd.words.first().map(String::as_str).unwrap_or("declare");
+        let mut args = match self.rewrite_declare_operand_subscripts(
+            &args,
+            &cmd.word_metadata,
+            command_name,
+        ) {
             Ok(args) => args,
             // array_expand_index -> evalexp failure: diagnostic + evalerror
             // abort already raised; GNU discards the rest of the list.
@@ -825,8 +923,11 @@ impl Executor {
             2
         } else {
             let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
-            let mut args = match self.rewrite_declare_operand_subscripts(&args, &cmd.word_metadata)
-            {
+            let mut args = match self.rewrite_declare_operand_subscripts(
+                &args,
+                &cmd.word_metadata,
+                "local",
+            ) {
                 Ok(args) => args,
                 Err(()) => return Ok(1),
             };

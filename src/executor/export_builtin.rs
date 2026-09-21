@@ -19,6 +19,7 @@ impl Executor {
         let args = match self.rewrite_declare_operand_subscripts(
             &cmd.words[1..],
             &cmd.word_metadata,
+            "export",
         ) {
             Ok(args) => args,
             Err(()) => return Ok(1),

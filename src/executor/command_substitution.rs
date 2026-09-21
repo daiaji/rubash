@@ -814,6 +814,7 @@ impl Executor {
             debug_trap_function_line: None,
             last_command_substitution_status: Cell::new(None),
             comsub_stdin_writeback: Cell::new(None),
+            pipeline_stdin_consumed: Cell::new(None),
             last_heredoc_warning_source: RefCell::new(None),
             comsub_leading_newlines: Cell::new(0),
             current_shell_substitution_exit: Cell::new(self.current_shell_substitution_exit.get()),
