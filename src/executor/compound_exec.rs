@@ -1726,7 +1726,7 @@ impl Executor {
             // restore the real backslash so case_pattern_matches can apply its
             // escape semantics (`\]` is a bracket member, `\"` matches `"`).
             let protected = pattern.text.replace(
-                |c| c == '\\' || c == '\x18',
+                |c| c == '\\' || c == crate::executor::markers::DATA_DQUOTE,
                 &PROTECTED_CASE_PATTERN_BACKSLASH.to_string(),
             );
             // Use the mutable expander: case pattern expansion is not an

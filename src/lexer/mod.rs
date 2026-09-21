@@ -245,7 +245,7 @@ fn tokenize_with_heredocs(
                         .unwrap_or(0);
                     if let Some(rel_pos) = logical_line[after_delim..].find(')') {
                         let abs_pos = after_delim + rel_pos;
-                        logical_line.insert(abs_pos, '\x1c');
+                        logical_line.insert(abs_pos, crate::executor::markers::IFS_GLUE);
                     }
                 }
             }
@@ -480,7 +480,7 @@ fn tokenize_with_heredocs(
             if !found_delimiter {
                 body.insert(0, DATA_DOLLAR);
             } else if found_with_warning {
-                body.insert(0, '\x1e');
+                body.insert(0, crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX);
             }
             if delimiter.quoted {
                 body.insert_str(0, QUOTED_HEREDOC_MARKER);

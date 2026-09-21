@@ -166,7 +166,7 @@ pub(in crate::executor) fn redirect_target_fd(target: &str) -> Option<u32> {
 }
 
 pub(in crate::executor) fn redirect_target_fd_and_move(target: &str) -> Option<(u32, bool)> {
-    let target = target.trim_start_matches(['\x1b', STORAGE_WORD_PREFIX]);
+    let target = target.trim_start_matches([crate::executor::markers::QUOTED_WORD_PREFIX, STORAGE_WORD_PREFIX]);
     let Some(fd) = target.strip_prefix('&') else {
         return dev_stdio_redirect_fd(target).map(|fd| (fd, false));
     };
@@ -256,13 +256,13 @@ pub(in crate::executor) fn command_has_unterminated_heredoc(cmd: &CommandNode) -
 pub(in crate::executor) fn command_has_warned_heredoc(cmd: &CommandNode) -> bool {
     cmd.heredoc
         .as_deref()
-        .is_some_and(|body| strip_quoted_heredoc_marker(body).starts_with('\x1e'))
+        .is_some_and(|body| strip_quoted_heredoc_marker(body).starts_with(crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX))
 }
 
 pub(in crate::executor) fn strip_unterminated_heredoc_marker(body: &str) -> &str {
     let stripped = body
         .strip_prefix(DATA_DOLLAR)
-        .or_else(|| body.strip_prefix('\x1e'));
+        .or_else(|| body.strip_prefix(crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX));
     match stripped {
         Some(s) => s,
         None => body,
@@ -379,7 +379,7 @@ pub(in crate::executor) fn copy_command_substitution_heredoc(
             // substitution sees its closer (`EOFx)` counts too -- the `x`
             // stays in the collected source).
             if comparable.starts_with(delimiter.as_str()) && ch == ')' {
-                source.push('\x1c');
+                source.push(crate::executor::markers::IFS_GLUE);
                 return;
             }
             if ch == '\n' {
@@ -470,7 +470,7 @@ pub(in crate::executor) fn word_has_unquoted_command_substitution(word: &str) ->
 }
 
 pub(in crate::executor) fn for_word_has_unquoted_expansion(word: &str, raw: Option<&str>) -> bool {
-    if word.starts_with('\x1b') || word.starts_with(STORAGE_WORD_PREFIX) {
+    if word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) || word.starts_with(STORAGE_WORD_PREFIX) {
         return false;
     }
     let source = raw.unwrap_or(word);
@@ -584,9 +584,9 @@ pub(in crate::executor) fn eval_source_for_reparse(source: &str) -> String {
     let source = source
         .replace(crate::lexer::QUOTED_HEREDOC_MARKER, "")
         .replace(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER, "")
-        .replace('\x1c', "")
+        .replace(crate::executor::markers::IFS_GLUE, "")
         .replace(DATA_DOLLAR, "$")
-        .replace('\x17', "'")
+        .replace(crate::executor::markers::DATA_SQUOTE, "'")
         // GNU expand_word_internal's single-quote arm (subst.c:11882) takes the
         // region body from string_extract_single_quoted (subst.c:1088), which
         // only substrings the raw text, and then calls remove_quoted_escapes
@@ -600,7 +600,7 @@ pub(in crate::executor) fn eval_source_for_reparse(source: &str) -> String {
         // here; otherwise eval re-parses the marker as literal data.
         // niubash #124: `eval 'd='\''x'\''; mkdir -p "$d"'` handed the quotes
         // to the child (`mkdir: cannot create directory '"/x"'`).
-        .replace('\x18', "\"")
+        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
         .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
         .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
     protect_unmatched_double_quoted_backticks(&source)
@@ -632,7 +632,7 @@ fn protect_unmatched_double_quoted_backticks(source: &str) -> String {
                 in_double = !in_double;
                 output.push(ch);
             }
-            '`' if in_double && !in_single => output.push('\x1a'),
+            '`' if in_double && !in_single => output.push(crate::executor::markers::DATA_BACKTICK),
             _ => output.push(ch),
         }
     }
@@ -740,7 +740,7 @@ pub(in crate::executor) fn command_substitution_value_needs_payload_protection(
     source.contains('$')
         && !source.contains('`')
         && !value.contains(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX)
-        && value.chars().any(|ch| ('\x10'..=DATA_DOLLAR).contains(&ch))
+        && value.chars().any(|ch| (crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER..=DATA_DOLLAR).contains(&ch))
 }
 
 pub(in crate::executor) fn protect_command_substitution_output(value: &str) -> String {
@@ -751,13 +751,13 @@ pub(in crate::executor) fn protect_command_substitution_output(value: &str) -> S
     let mut output = String::with_capacity(escaped_value.len());
     for ch in escaped_value.chars() {
         match ch {
-            '\x10'..=DATA_DOLLAR => output.push_str(&format!(
+            crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER..=DATA_DOLLAR => output.push_str(&format!(
                 "{COMMAND_SUBSTITUTION_PAYLOAD_PREFIX}{:02x};",
                 ch as u32
             )),
-            '`' => output.push('\x1a'),
+            '`' => output.push(crate::executor::markers::DATA_BACKTICK),
             '$' => output.push(DATA_DOLLAR),
-            '\\' => output.push('\x15'),
+            '\\' => output.push(crate::executor::markers::PROTECTED_BACKSLASH),
             _ => output.push(ch),
         }
     }
@@ -766,10 +766,10 @@ pub(in crate::executor) fn protect_command_substitution_output(value: &str) -> S
 
 pub(in crate::executor) fn restore_command_substitution_output(value: &str) -> String {
     value
-        .replace('\x1a', "`")
+        .replace(crate::executor::markers::DATA_BACKTICK, "`")
         .replace(DATA_DOLLAR, "$")
-        .replace('\x15', "\\")
-        .replace('\x14', "\\")
+        .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
+        .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
 }
 
 pub(in crate::executor) fn decode_command_substitution_payload(value: &str) -> String {
@@ -822,7 +822,7 @@ mod command_substitution_payload_tests {
     fn decodes_c0_payload_without_utf8_loss() {
         assert_eq!(
             decode_command_substitution_payload("a__RUBASH_CSB1_15;b"),
-            "a\x15b"
+            format!("{}{}{}", "a", crate::executor::markers::PROTECTED_BACKSLASH_STR, "b")
         );
     }
 

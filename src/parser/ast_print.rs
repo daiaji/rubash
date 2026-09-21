@@ -1159,7 +1159,7 @@ fn heredoc_body_text(cmd: &CommandNode, info: &HereDocRedirect) -> String {
 /// single quotes (with `'"'"'` escaping) for shell metacharacters and
 /// control characters, verbatim otherwise.
 fn render_assignment_value(value: &str) -> String {
-    let Some(quoted_value) = value.strip_prefix('\x1c') else {
+    let Some(quoted_value) = value.strip_prefix(crate::executor::markers::IFS_GLUE) else {
         return value.to_string();
     };
     if quoted_value.chars().any(|ch| ch.is_control()) {

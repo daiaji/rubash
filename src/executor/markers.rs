@@ -99,6 +99,27 @@ pub(crate) const STORAGE_WORD_PREFIX: char = '\u{1d}';
 /// separator / arithmetic subscript transport.
 pub(crate) const SUBSCRIPT_CARRIER: char = '\u{1e}';
 
+/// Pattern-domain role of \x18: inside case/parameter pattern text the
+/// same codepoint is a protected literal backslash
+/// (conditional/pattern.rs case_pattern_atom_matches). Word transport
+/// reads it as DATA_DQUOTE — the two channels never mix, but the alias
+/// keeps call sites honest about which protocol they mean.
+pub(crate) const PATTERN_LITERAL_BACKSLASH: char = '\u{18}';
+/// `&str` companion of PATTERN_LITERAL_BACKSLASH.
+pub(crate) const PATTERN_LITERAL_BACKSLASH_STR: &str = "\u{18}";
+
+/// Field separator inside `__RUBASH_PARSE_ERROR_*` assignment payloads
+/// (parser/parse_loop.rs producer, command_execute.rs consumer). Shares
+/// the SUBSCRIPT_CARRIER codepoint — disjoint channel (env-string
+/// payloads, never word text).
+pub(crate) const PARSE_ERROR_FIELD_SEP: char = '\u{1e}';
+
+/// Prefix on a HereDocBody token whose delimiter was found but emitted a
+/// warning (lexer/mod.rs producer; execution_misc.rs and
+/// parser/parse_loop.rs consumers). Shares the SUBSCRIPT_CARRIER
+/// codepoint — disjoint channel (token-body prefix position).
+pub(crate) const HEREDOC_WARNED_BODY_PREFIX: char = '\u{1e}';
+
 /// Data `$` — dollar that must not re-trigger expansion.
 pub(crate) const DATA_DOLLAR: char = '\u{1f}';
 
@@ -311,6 +332,8 @@ pub(crate) const DIR_STACK_FIELD_SEP: char = '\u{1f}';
 /// (expand/tilde/tilde.rs QUOTED_ASSIGNMENT_VALUE). Same codepoint as
 /// IFS_GLUE; the prefix position disambiguates.
 pub(crate) const QUOTED_WORD_VALUE_PREFIX: char = IFS_GLUE;
+/// `&str` companion of QUOTED_WORD_VALUE_PREFIX.
+pub(crate) const QUOTED_WORD_VALUE_PREFIX_STR: &str = "\u{1c}";
 
 /// Field separator inside the `__RUBASH_HASH_TABLE` env serialization
 /// (builtins/hash.rs). Shares the SUBSCRIPT_CARRIER byte but lives in the

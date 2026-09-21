@@ -361,7 +361,7 @@ impl Executor {
             .into_iter()
             .map(|word| {
                 crate::executor::command_prepare::restore_pathname_escape_markers(
-                    &word.replace('\x15', "\\").replace('\x14', "\\"),
+                    &word.replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\").replace(crate::executor::markers::DATA_BACKSLASH, "\\"),
                 )
             });
         let expanded_name = first_fields.next().unwrap_or_default();
@@ -419,12 +419,12 @@ impl Executor {
                 .map(|metadata| metadata.raw.as_str());
             for expanded in self.expand_command_word(command, index, word, raw) {
                 let value = crate::executor::command_prepare::restore_pathname_escape_markers(
-                    &expanded.replace('\x15', "\\").replace('\x14', "\\"),
+                    &expanded.replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\").replace(crate::executor::markers::DATA_BACKSLASH, "\\"),
                 )
                 .to_string();
                 // \x1d marks a fully quoted word and \x1b a quoted tilde;
                 // both stay literal, as command_prepare does.
-                if expanded.starts_with(STORAGE_WORD_PREFIX) || expanded.starts_with('\x1b') {
+                if expanded.starts_with(STORAGE_WORD_PREFIX) || expanded.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) {
                     args.push(value);
                     continue;
                 }

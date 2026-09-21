@@ -18,10 +18,10 @@ use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 fn dequote_storage_marks(value: &str) -> String {
     value
         .replace(DATA_DOLLAR, "$")
-        .replace('\x1a', "`")
-        .replace('\x17', "'")
-        .replace('\x18', "\"")
-        .replace('\x14', "\\")
+        .replace(crate::executor::markers::DATA_BACKTICK, "`")
+        .replace(crate::executor::markers::DATA_SQUOTE, "'")
+        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
+        .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
         .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
         .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
 }
@@ -262,7 +262,7 @@ impl Executor {
             match matching_parameter_brace(after) {
                 Some(end) => {
                     slots.push(format!("${{{}}}", &after[..end]));
-                    masked.push('\x1c');
+                    masked.push(crate::executor::markers::IFS_GLUE);
                     masked.push_str(&(slots.len() - 1).to_string());
                     rest = &after[end + 1..];
                 }
@@ -280,24 +280,24 @@ impl Executor {
         // leaves a bare `%`/`#` which `replace_parameter_pattern` would
         // misinterpret as an anchor (subst.c parameter_brace_patsub:9451-
         // 9465). Mark the escaped anchor with \x11 so the backslash survives
-        // as a glob escape (`\%`) after the final `.replace('\x11', "\\")`,
+        // as a glob escape (`\%`) after the final `.replace(crate::executor::markers::CTLESC, "\\")`,
         // routing through the glob matcher for a literal match instead of
         // the anchor fast path. Only mark backslashes that are not
         // themselves escaped (`\\%` keeps `\\` for the decoder).
         let masked = mark_escaped_pattern_anchors(&masked);
 
-        let decoded = decode_parameter_pattern_quotes(&masked).replace('\x1b', "");
+        let decoded = decode_parameter_pattern_quotes(&masked).replace(crate::executor::markers::QUOTED_WORD_PREFIX, "");
 
         let mut restored = String::with_capacity(decoded.len());
         let mut rest = decoded.as_str();
-        while let Some(pos) = rest.find('\x1c') {
+        while let Some(pos) = rest.find(crate::executor::markers::IFS_GLUE) {
             restored.push_str(&rest[..pos]);
             let digits: String = rest[pos + 1..]
                 .chars()
                 .take_while(|ch| ch.is_ascii_digit())
                 .collect();
             if digits.is_empty() {
-                restored.push('\x1c');
+                restored.push(crate::executor::markers::IFS_GLUE);
                 rest = &rest[pos + 1..];
                 continue;
             }
@@ -314,11 +314,11 @@ impl Executor {
         // as a double-quote marker and converts it to `"`.  Protect it by mapping
         // to \x14 (which the expander preserves as a literal backslash) and restore
         // after expansion so the pattern matcher sees the correct marker.
-        let protected = restored.replace('\x18', "\x14");
+        let protected = restored.replace(crate::executor::markers::PATTERN_LITERAL_BACKSLASH, crate::executor::markers::DATA_BACKSLASH_STR);
         let expanded = self.expand_embedded_parameters_preserving_escaped_single_quotes(&protected);
         // Quoted glob metacharacters remain pattern literals. Preserve the
         // escape for the parameter matcher instead of exposing a raw marker.
-        expanded.replace('\x11', "\\").replace('\x14', "\x18")
+        expanded.replace(crate::executor::markers::CTLESC, "\\").replace(crate::executor::markers::DATA_BACKSLASH, crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR)
     }
 
     /// The key of an associative-array subscript, expanded through the one
@@ -448,7 +448,7 @@ fn mark_escaped_pattern_anchors(pattern: &str) -> String {
                     i += 2;
                 }
                 '%' | '#' => {
-                    output.push('\x11');
+                    output.push(crate::executor::markers::CTLESC);
                     output.push(chars[i + 1]);
                     i += 2;
                 }

@@ -55,8 +55,8 @@ pub(in crate::builtins) fn append_array_value(
         // are stored as bare elements even if they look like [2]=2]
         // (array19.sub: declare -a var=($value) with value containing
         // "[2]=2]" stores [3]="[2]=2]", not [2]="2]").
-        let from_field_split = token.starts_with('\x10');
-        let token = token.strip_prefix('\x10').unwrap_or(&token);
+        let from_field_split = token.starts_with(crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER);
+        let token = token.strip_prefix(crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER).unwrap_or(&token);
         // GNU arrayfunc.c assign_compound_array_list: the raw compound word
         // keeps its quote characters, but [subscript]=value detection must
         // see through outer quotes (array19.sub: "0)]=1" is a bare element,

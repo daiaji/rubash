@@ -196,7 +196,7 @@ fn split_ifs_whitespace(value: &str, ifs: &str) -> Vec<String> {
     let mut current = String::new();
     let mut chars = value.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\x1c' {
+        if ch == crate::executor::markers::IFS_GLUE {
             if let Some(protected) = chars.next() {
                 current.push(protected);
             }
@@ -224,7 +224,7 @@ fn split_mixed_ifs(value: &str, ifs: &str) -> Vec<String> {
 
     while index < chars.len() {
         let ch = chars[index];
-        if ch == '\x1c' {
+        if ch == crate::executor::markers::IFS_GLUE {
             index += 1;
             if index < chars.len() {
                 current.push(chars[index]);
@@ -480,7 +480,7 @@ pub(super) fn field_split_values_with_ifs(value: &str, ifs: Option<&str>) -> Vec
     let mut index = 0;
     while index < chars.len() {
         let ch = chars[index];
-        if ch == '\x1c' {
+        if ch == crate::executor::markers::IFS_GLUE {
             // Protected literal character — add next char to current field
             index += 1;
             if index < chars.len() {
@@ -688,10 +688,10 @@ fn token_is_subscript_assignment(token: &str) -> bool {
 fn restore_quote_carriers(value: &str) -> String {
     value
         .replace(DATA_DOLLAR, "$")
-        .replace('\x1a', "`")
-        .replace('\x14', "\\")
-        .replace('\x17', "'")
-        .replace('\x18', "\"")
+        .replace(crate::executor::markers::DATA_BACKTICK, "`")
+        .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
+        .replace(crate::executor::markers::DATA_SQUOTE, "'")
+        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
         .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
         .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
 }

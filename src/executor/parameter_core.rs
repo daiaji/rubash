@@ -42,7 +42,7 @@ impl Executor {
         let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
         self.apply_parameter_assignment_expansions_in_word(word);
 
-        if let Some(word) = word.strip_prefix('\x1b') {
+        if let Some(word) = word.strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX) {
             return self.expand_embedded_parameters_mut(word);
         }
 

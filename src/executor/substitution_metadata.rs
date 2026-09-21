@@ -823,17 +823,17 @@ mod tests {
     #[test]
     fn payload_protection_boundary_rejects_lexical_backticks_and_existing_tokens() {
         assert!(command_substitution_value_needs_payload_protection(
-            "$x", "a\x1a"
+            "$x", &format!("{}{}", "a", crate::executor::markers::DATA_BACKTICK_STR)
         ));
         assert!(!command_substitution_value_needs_payload_protection(
-            "`$x`", "a\x1a"
+            "`$x`", &format!("{}{}", "a", crate::executor::markers::DATA_BACKTICK_STR)
         ));
         assert!(!command_substitution_value_needs_payload_protection(
             "$x",
             "__RUBASH_CSB1_1a;",
         ));
         assert!(!command_substitution_value_needs_payload_protection(
-            "literal", "a\x1a"
+            "literal", &format!("{}{}", "a", crate::executor::markers::DATA_BACKTICK_STR)
         ));
     }
 

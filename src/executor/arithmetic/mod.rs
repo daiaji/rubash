@@ -182,17 +182,17 @@ impl Executor {
             .replace("$#", &self.shell_state.positional_params.len().to_string())
             .replace("$-", "0");
         let protected = routed
-            .replace("\\\"", "\x18")
-            .replace('"', "\x18")
-            .replace('\'', "\x17")
+            .replace("\\\"", crate::executor::markers::DATA_DQUOTE_STR)
+            .replace('"', crate::executor::markers::DATA_DQUOTE_STR)
+            .replace('\'', crate::executor::markers::DATA_SQUOTE_STR)
             .replace("\\$", DATA_DOLLAR_STR);
         let expanded = self.expand_embedded_parameters(&protected);
         expanded
             .replace(DATA_DOLLAR, "$")
-            .replace('\x1a', "`")
-            .replace('\x14', "\\")
-            .replace('\x17', "'")
-            .replace('\x18', "\"")
+            .replace(crate::executor::markers::DATA_BACKTICK, "`")
+            .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
+            .replace(crate::executor::markers::DATA_SQUOTE, "'")
+            .replace(crate::executor::markers::DATA_DQUOTE, "\"")
     }
 
     /// Splice current-shell `${ ...; }` / `${| ...; }` substitution values
@@ -425,10 +425,10 @@ impl Executor {
             if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once") {
                 resolved
                     .replace(DATA_DOLLAR, "$")
-                    .replace('\x1a', "`")
-                    .replace('\x14', "\\")
-                    .replace('\x17', "'")
-                    .replace('\x18', "\"")
+                    .replace(crate::executor::markers::DATA_BACKTICK, "`")
+                    .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
+                    .replace(crate::executor::markers::DATA_SQUOTE, "'")
+                    .replace(crate::executor::markers::DATA_DQUOTE, "\"")
             } else {
                 self.expand_arithmetic_subscript_mut(resolved)
             };
@@ -880,7 +880,7 @@ impl Executor {
             }
             match ch {
                 b'\\' if bytes.get(index + 1) == Some(&b'"') => {
-                    protected.push('\x18');
+                    protected.push(crate::executor::markers::DATA_DQUOTE);
                     index += 2;
                 }
                 b'\\' if bytes.get(index + 1) == Some(&b'$') => {
@@ -888,7 +888,7 @@ impl Executor {
                     index += 2;
                 }
                 b'\'' => {
-                    protected.push('\x17');
+                    protected.push(crate::executor::markers::DATA_SQUOTE);
                     index += 1;
                 }
                 _ => {

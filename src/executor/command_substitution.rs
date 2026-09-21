@@ -68,7 +68,7 @@ impl Executor {
 
     fn expand_protected_tilde(&self, word: &str, was_quoted: Option<bool>) -> String {
         let expanded = if was_quoted == Some(true) && word.starts_with('~') {
-            self.expand_word(&format!("\x1b{word}"))
+            self.expand_word(&format!("{}{word}", crate::executor::markers::QUOTED_WORD_PREFIX_STR))
         } else {
             self.expand_word(word)
         };
@@ -992,9 +992,9 @@ fn strip_command_substitution_comments(source: &str) -> String {
 fn restore_old_style_backtick_markers(value: &str) -> String {
     value
         .replace(DATA_DOLLAR, "$")
-        .replace('\x1a', "`")
-        .replace('\x15', "\\")
-        .replace('\x14', "\\")
+        .replace(crate::executor::markers::DATA_BACKTICK, "`")
+        .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
+        .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
 }
 
 fn readfile_path_is_quoted(path: &str) -> bool {

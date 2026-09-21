@@ -128,7 +128,7 @@ impl Executor {
 
             match chars.next() {
                 Some('a') => output.push('\x07'),
-                Some('e') | Some('E') => output.push('\x1b'),
+                Some('e') | Some('E') => output.push(crate::executor::markers::QUOTED_WORD_PREFIX),
                 Some('n') => output.push('\n'),
                 Some('r') => output.push('\r'),
                 Some('t') => output.push_str(&self.prompt_time("%H:%M:%S")),

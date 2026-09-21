@@ -85,7 +85,7 @@ impl Executor {
 
         while let Some(ch) = chars.next() {
             if protect_ifs && in_double && matches!(ch, ' ' | '\t' | '\n') {
-                output.push('\x1c');
+                output.push(crate::executor::markers::IFS_GLUE);
                 output.push(ch);
                 continue;
             }
@@ -96,7 +96,7 @@ impl Executor {
                 // into the expansion output.
                 continue;
             }
-            if ch == '\x1a' {
+            if ch == crate::executor::markers::DATA_BACKTICK {
                 output.push('`');
                 continue;
             }
@@ -106,18 +106,18 @@ impl Executor {
                 continue;
             }
 
-            if ch == '\x17' {
+            if ch == crate::executor::markers::DATA_SQUOTE {
                 // In preserve_quotes (compound RHS) the \x17 carrier is the
                 // CTLESC port for a data quote: it must survive into the
                 // storage word so split_storage_words does not re-read it as
                 // quote syntax (array6.sub: ("${a[@]/#/-iname \'}") stores
                 // `-iname 'abc`). unquote_storage_value decodes it.
-                output.push(if preserve_quotes { '\x17' } else { '\'' });
+                output.push(if preserve_quotes { crate::executor::markers::DATA_SQUOTE } else { '\'' });
                 continue;
             }
 
-            if ch == '\x18' {
-                output.push(if preserve_quotes { '\x18' } else { '"' });
+            if ch == crate::executor::markers::DATA_DQUOTE {
+                output.push(if preserve_quotes { crate::executor::markers::DATA_DQUOTE } else { '"' });
                 continue;
             }
             if ch == crate::lexer::ANSI_C_QUOTE_MARKER {
@@ -201,7 +201,7 @@ impl Executor {
                         break;
                     }
                     if protect_ifs && matches!(quoted_ch, ' ' | '\t' | '\n') {
-                        output.push('\x1c');
+                        output.push(crate::executor::markers::IFS_GLUE);
                     }
                     output.push(quoted_ch);
                 }
@@ -214,7 +214,7 @@ impl Executor {
                     output.push('\\');
                     output.push('`');
                 } else {
-                    output.push('\x1a');
+                    output.push(crate::executor::markers::DATA_BACKTICK);
                 }
                 continue;
             }
@@ -242,7 +242,7 @@ impl Executor {
                     // consuming it and leaving the substitution unclosed.
                     // Push both the marker and the next character as
                     // literal data so the closing backtick is recognised.
-                    if source_ch == '\x11' {
+                    if source_ch == crate::executor::markers::CTLESC {
                         source.push(source_ch);
                         if let Some(next) = chars.next() {
                             source.push(next);
@@ -586,7 +586,7 @@ impl Executor {
         }
 
         output
-            .replace('\x14', "\\")
+            .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
             .replace(crate::lexer::PARAM_NAME_END_MARKER, "")
     }
 
@@ -628,11 +628,11 @@ impl Executor {
             }
         }
         let protected = escaped_dollar_protected
-            .replace('\x17', "\x16")
-            .replace('\x14', &PROTECTED_LITERAL_BACKSLASH.to_string());
+            .replace(crate::executor::markers::DATA_SQUOTE, crate::executor::markers::PROTECTED_ESCAPED_SQUOTE_STR)
+            .replace(crate::executor::markers::DATA_BACKSLASH, &PROTECTED_LITERAL_BACKSLASH.to_string());
         self.expand_embedded_parameters(&protected)
-            .replace(PROTECTED_ESCAPED_SINGLE_QUOTE, "\x17")
-            .replace(PROTECTED_LITERAL_BACKSLASH, "\x14")
+            .replace(PROTECTED_ESCAPED_SINGLE_QUOTE, crate::executor::markers::DATA_SQUOTE_STR)
+            .replace(PROTECTED_LITERAL_BACKSLASH, crate::executor::markers::DATA_BACKSLASH_STR)
             .replace(PROTECTED_LITERAL_DOLLAR, "$")
             // Decode protected backslash from command substitution output.
             // protect_command_substitution_output converts `\` to `\x15`;
@@ -640,17 +640,17 @@ impl Executor {
             // survives expansion.  In a pattern context the `\x15` must be
             // restored to `\` so the pattern matcher sees a literal
             // backslash (comsub2.sub: `${qpath//"`printf '%s' \\`"/}`).
-            .replace('\x15', "\\")
+            .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
     }
 }
 
 fn decode_backtick_substitution_source(source: &str) -> String {
     source
-        .replace('\x1a', "`")
-        .replace('\x11', "")
+        .replace(crate::executor::markers::DATA_BACKTICK, "`")
+        .replace(crate::executor::markers::CTLESC, "")
         .replace(crate::lexer::PARAM_NAME_END_MARKER, "")
         .replace(DATA_DOLLAR, "$")
-        .replace('\x15', "\\")
+        .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
 }
 
 fn push_backtick_escaped_source_char(

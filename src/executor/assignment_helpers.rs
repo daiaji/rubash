@@ -525,7 +525,7 @@ pub(in crate::executor) fn split_indexed_tagged_token(token: &str) -> Vec<String
     let mut current = String::new();
     let mut chars = token.chars().peekable();
     while let Some(ch) = chars.next() {
-        if (ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG)
+        if (ch == crate::executor::markers::IFS_GLUE || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG)
             && matches!(chars.peek(), Some(' ' | '\t' | '\n'))
         {
             chars.next();
@@ -615,7 +615,7 @@ impl Iterator for StorageWordIter<'_> {
             // the marker and its whitespace into the word so assoc kv-pairs
             // keep them; the indexed callers re-split on the marker. The
             // \x1c IFS-protection sentinel takes the same glued form here.
-            if ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG {
+            if ch == crate::executor::markers::IFS_GLUE || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG {
                 word.push(ch);
                 if let Some((_, next)) = chars.next() {
                     word.push(next);
@@ -735,13 +735,13 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
     fn restore_quote_markers(value: &str) -> String {
         value
             .replace(DATA_DOLLAR, "$")
-            .replace('\x1a', "`")
-            .replace('\x17', "'")
-            .replace('\x14', "\\")
+            .replace(crate::executor::markers::DATA_BACKTICK, "`")
+            .replace(crate::executor::markers::DATA_SQUOTE, "'")
+            .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
             // The \x1c expansion-whitespace tag (embedded_mutations
             // expansion_ws_marked) marks the whitespace itself as data;
             // strip the tag and keep the character it protected.
-            .replace('\x1c', "")
+            .replace(crate::executor::markers::IFS_GLUE, "")
             .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
             .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
             .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
@@ -830,7 +830,7 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
         // \x1c is the expansion-whitespace tag (expansion_ws_marked): the
         // whitespace it precedes is data, the tag itself is not.
         return decoded
-            .replace('\x1c', "")
+            .replace(crate::executor::markers::IFS_GLUE, "")
             .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "");
     };
 

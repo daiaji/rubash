@@ -827,9 +827,9 @@ fn expand_compound_array_value(value: &str, variables: &HashMap<String, String>)
     // stores \x1f0 literally without this restore).
     result
         .replace(DATA_DOLLAR, "$")
-        .replace('\x1a', "`")
-        .replace('\x17', "'")
-        .replace('\x14', "\\")
+        .replace(crate::executor::markers::DATA_BACKTICK, "`")
+        .replace(crate::executor::markers::DATA_SQUOTE, "'")
+        .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
         .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
         .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
 }

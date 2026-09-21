@@ -124,7 +124,7 @@ impl Executor {
         // canonical form reads and the kvlist path produce.
         let expanded = expanded
             .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
-            .replace('\x1c', "");
+            .replace(crate::executor::markers::IFS_GLUE, "");
         // A leading unquoted `~` tilde-expands; `x~` and `a:~` stay literal
         // and `"~"` never reaches here (its first character is the quote).
         if raw.starts_with('~') {
@@ -394,7 +394,7 @@ impl Executor {
         // such protection, so hoist cooked `'`/`"` to the \x17/\x18 data
         // carriers before running the flag-0 validity scan — an expansion-
         // produced `'` is data, never an opening quote.
-        let hoisted_operand = operand.replace('\'', "\x17").replace('"', "\x18");
+        let hoisted_operand = operand.replace('\'', crate::executor::markers::DATA_SQUOTE_STR).replace('"', crate::executor::markers::DATA_DQUOTE_STR);
         let valid = if arrayref && assoc {
             !subscript.is_empty()
         } else {
@@ -415,7 +415,7 @@ impl Executor {
         let source = if arrayref {
             SubscriptSource::Protected(subscript)
         } else {
-            hoisted = subscript.replace('\'', "\x17").replace('"', "\x18");
+            hoisted = subscript.replace('\'', crate::executor::markers::DATA_SQUOTE_STR).replace('"', crate::executor::markers::DATA_DQUOTE_STR);
             SubscriptSource::Raw(&hoisted)
         };
         if assoc {
@@ -909,7 +909,7 @@ impl Executor {
         let mut escaped = String::with_capacity(raw_value.len());
         let mut chars = raw_value.chars().peekable();
         while let Some(ch) = chars.next() {
-            if ch == '\x1c' || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG {
+            if ch == crate::executor::markers::IFS_GLUE || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG {
                 if let Some(next) = chars.next() {
                     escaped.push('\\');
                     escaped.push(next);
@@ -1211,7 +1211,7 @@ fn dequote_compound_subscript(sub: &str) -> String {
     // key is cooked text only — strip the tags the same way
     // expand_subscript_string does for its freshly-expanded result.
     out.replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
-        .replace('\x1c', "")
+        .replace(crate::executor::markers::IFS_GLUE, "")
 }
 
 /// Encode a resolved associative compound-element key for the `[key]=value`
@@ -1224,7 +1224,7 @@ fn encode_compound_assoc_key(key: &str) -> String {
         && !key.chars().any(|ch| {
             matches!(
                 ch,
-                '[' | ']' | '=' | '+' | '\'' | '"' | '\\' | '\x1e' | DATA_DOLLAR
+                '[' | ']' | '=' | '+' | '\'' | '"' | '\\' | crate::executor::markers::SUBSCRIPT_CARRIER | DATA_DOLLAR
                     | '`' | '$'
             ) || ch.is_ascii_whitespace()
         });
@@ -1347,7 +1347,7 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
     let mut saw_span = false;
     while !rest.is_empty() {
         // '\u{E307}' is the compound-assignment hoisted single-quote
-        // sentinel (SQ_DATA, assignment_expansion.rs) and '\x17' is the
+        // sentinel (SQ_DATA, assignment_expansion.rs) and crate::executor::markers::DATA_SQUOTE is the
         // embedded-parameter walker's literal-single-quote data marker —
         // arithmetic input arrives with `'` already converted to `\x17`
         // (expand_arithmetic_special_parameters), so `$(( ${A['$(..)']}
@@ -1357,8 +1357,8 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
             (inner, '\'')
         } else if let Some(inner) = rest.strip_prefix('\u{E307}') {
             (inner, '\u{E307}')
-        } else if let Some(inner) = rest.strip_prefix('\x17') {
-            (inner, '\x17')
+        } else if let Some(inner) = rest.strip_prefix(crate::executor::markers::DATA_SQUOTE) {
+            (inner, crate::executor::markers::DATA_SQUOTE)
         } else {
             return None;
         };

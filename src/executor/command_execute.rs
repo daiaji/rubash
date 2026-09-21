@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::{PARSE_ERROR_FIELD_SEP, STORAGE_WORD_PREFIX};
 
 impl Executor {
     /// Execute an AST
@@ -67,7 +67,7 @@ impl Executor {
 
         if let Some(spec) = cmd
             .get_assignment("__RUBASH_PARSE_ERROR_EOF_SUBSHELL__")
-            .map(|value| format!("(\x1e{value}"))
+            .map(|value| format!("({PARSE_ERROR_FIELD_SEP}{value}"))
             .or_else(|| {
                 cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__")
                     .cloned()
@@ -80,7 +80,7 @@ impl Executor {
             // gather warnings during the parse (make_cmd.c:626), so emit
             // them first.
             self.mark_parse_error();
-            let mut fields = spec.split('\x1e');
+            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
             let compound_name = fields.next().unwrap_or("(");
             let open_line = fields
                 .next()
@@ -95,7 +95,7 @@ impl Executor {
                 let Some(warn) = cmd.get_assignment(&key) else {
                     break;
                 };
-                let mut parts = warn.split('\x1e');
+                let mut parts = warn.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
                 let delimiter = parts.next().unwrap_or("");
                 let at_line = parts
                     .next()

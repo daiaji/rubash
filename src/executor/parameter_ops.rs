@@ -7,11 +7,11 @@ pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
     let mut index = 0;
     while index < chars.len() {
         match chars[index] {
-            '\x17' => {
+            crate::executor::markers::DATA_SQUOTE => {
                 output.push('\'');
                 index += 1;
             }
-            '\x18' => {
+            crate::executor::markers::DATA_DQUOTE => {
                 output.push('"');
                 index += 1;
             }
@@ -48,7 +48,7 @@ pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
 }
 
 pub(in crate::executor) fn restore_protected_replacement_quotes(value: &str) -> String {
-    value.replace('\x16', "\\'")
+    value.replace(crate::executor::markers::PROTECTED_ESCAPED_SQUOTE, "\\'")
 }
 
 pub(in crate::executor) fn parse_parameter_error_operator(
@@ -514,7 +514,7 @@ pub(in crate::executor) fn parse_parameter_replacement(
 ) -> Option<(&str, &str, &str, bool)> {
     if let Some((var_name, rest)) = name
         .split_once("//")
-        .filter(|(var_name, _)| !var_name.ends_with('\\') && !var_name.ends_with('\x14'))
+        .filter(|(var_name, _)| !var_name.ends_with('\\') && !var_name.ends_with(crate::executor::markers::DATA_BACKSLASH))
     {
         // A slash immediately after `//` is part of the pattern. This is
         // ambiguous with the pattern/replacement separator, so skip it and
@@ -541,7 +541,7 @@ fn split_unescaped_parameter_separator(value: &str) -> Option<(&str, &str)> {
             escaped = false;
             continue;
         }
-        if ch == '\\' || ch == '\x14' {
+        if ch == '\\' || ch == crate::executor::markers::DATA_BACKSLASH {
             escaped = true;
             continue;
         }
@@ -586,8 +586,8 @@ mod tests {
     #[test]
     fn encoded_backslash_does_not_split_escaped_slash_pattern() {
         assert_eq!(
-            parse_parameter_replacement("v/b\x14//x"),
-            Some(("v", "b\x14/", "x", false))
+            parse_parameter_replacement(&format!("{}{}{}", "v/b", crate::executor::markers::DATA_BACKSLASH_STR, "//x")),
+            Some(("v", format!("{}{}/", "b", crate::executor::markers::DATA_BACKSLASH_STR).as_str(), "x", false))
         );
     }
 

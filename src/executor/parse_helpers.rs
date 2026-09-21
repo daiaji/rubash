@@ -205,7 +205,7 @@ pub(in crate::executor) fn decode_ansi_c_escapes(value: &str) -> String {
         match chars.next() {
             Some('a') => output.push('\x07'),
             Some('b') => output.push('\x08'),
-            Some('e') | Some('E') => output.push('\x1b'),
+            Some('e') | Some('E') => output.push(crate::executor::markers::QUOTED_WORD_PREFIX),
             Some('f') => output.push('\x0c'),
             Some('n') => output.push('\n'),
             Some('r') => output.push('\r'),

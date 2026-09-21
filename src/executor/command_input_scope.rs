@@ -322,7 +322,7 @@ fn prepare_unquoted_heredoc_expansion(body: &str) -> String {
         }
 
         for _ in 0..(slash_count / 2) {
-            output.push('\x14');
+            output.push(crate::executor::markers::DATA_BACKSLASH);
         }
         if slash_count % 2 == 0 {
             continue;
@@ -335,7 +335,7 @@ fn prepare_unquoted_heredoc_expansion(body: &str) -> String {
             }
             Some('`') => {
                 chars.next();
-                output.push('\x1a');
+                output.push(crate::executor::markers::DATA_BACKTICK);
             }
             Some('\\') => unreachable!("backslash runs are consumed above"),
             _ => output.push('\\'),

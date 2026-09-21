@@ -85,7 +85,7 @@ pub(in crate::executor) fn replace_parameter_pattern(
     // of converting to a real `\` which would be treated as a glob escape.
     // Convert \x14 (another internal backslash marker) to \x18 so the
     // matcher handles it uniformly.
-    let pattern = pattern.replace('\x14', "\x18");
+    let pattern = pattern.replace(crate::executor::markers::DATA_BACKSLASH, crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR);
     let pattern = pattern.as_str();
     let indices: Vec<usize> = value
         .char_indices()
@@ -147,9 +147,9 @@ fn parameter_pattern_match(pattern: &str, word: &str, nocase: bool, extglob: boo
 
 fn normalize_parameter_pattern_backslashes(pattern: &str) -> String {
     pattern
-        .replace("\x18\x18", "\\")
-        .replace('\x14', "\\")
-        .replace('\x18', "\\")
+        .replace(&crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR.repeat(2), "\\")
+        .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
+        .replace(crate::executor::markers::PATTERN_LITERAL_BACKSLASH, "\\")
 }
 
 pub(in crate::executor) fn replace_parameter_prefix(
@@ -645,7 +645,7 @@ fn ansic_quote_bytes(bytes: &[u8]) -> String {
 fn push_ansic_escaped_chars(output: &mut String, chars: impl Iterator<Item = char>) {
     for ch in chars {
         match ch {
-            '\x1b' => output.push_str("\\E"),
+            crate::executor::markers::QUOTED_WORD_PREFIX => output.push_str("\\E"),
             '\x07' => output.push_str("\\a"),
             '\x08' => output.push_str("\\b"),
             '\x0b' => output.push_str("\\v"),
@@ -690,7 +690,7 @@ fn ansic_quote_value(value: &str) -> String {
     let mut output = String::from("$'");
     for ch in value.chars() {
         match ch {
-            '\x1b' => output.push_str("\\E"),
+            crate::executor::markers::QUOTED_WORD_PREFIX => output.push_str("\\E"),
             '\x07' => output.push_str("\\a"),
             '\x08' => output.push_str("\\b"),
             '\x0b' => output.push_str("\\v"),

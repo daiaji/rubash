@@ -120,7 +120,7 @@ fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
             fingerprint.push_str(key);
             fingerprint.push('~');
             fingerprint.push_str(&value);
-            fingerprint.push('\x1e');
+            fingerprint.push(crate::executor::markers::SUBSCRIPT_CARRIER);
         }
     }
     fingerprint

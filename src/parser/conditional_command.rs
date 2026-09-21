@@ -148,7 +148,7 @@ fn collect_conditional_args(
 }
 
 fn strip_conditional_quote_markers(value: &str) -> String {
-    value.replace('\x11', "")
+    value.replace(crate::executor::markers::CTLESC, "")
 }
 
 fn matching_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {

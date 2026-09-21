@@ -146,7 +146,7 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                         // downstream expansion, but do not protect literal globs.
                         out.push(DATA_DOLLAR);
                     } else if protect_dquote && quoted == '"' {
-                        out.push('\x18');
+                        out.push(crate::executor::markers::DATA_DQUOTE);
                     } else {
                         out.push(quoted);
                     }
@@ -180,9 +180,9 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                 if escaped == '$' {
                     out.push(DATA_DOLLAR);
                 } else if escaped == '`' {
-                    out.push('\x1a');
+                    out.push(crate::executor::markers::DATA_BACKTICK);
                 } else if escaped == '\'' {
-                    out.push('\x17');
+                    out.push(crate::executor::markers::DATA_SQUOTE);
                 } else if escaped == '"' {
                     if subscript_depth > 0 {
                         // Inside a subscript the escaped quote is still CTLESC
@@ -191,7 +191,7 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                         // (GNU 5.3 verified). Emit the data-double-quote
                         // marker — a bare `"` is re-read as a quote delimiter
                         // by the expansion walker and silently stripped.
-                        out.push('\x18');
+                        out.push(crate::executor::markers::DATA_DQUOTE);
                     } else {
                         // `\"` outside quotes is a literal double quote that
                         // must survive as data: downstream expansion scanners
@@ -199,14 +199,14 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                         // swallow it (posixexp2 case 8, `echo \"`). \x18 is
                         // the walker's data-double-quote marker, restored on
                         // output.
-                        out.push('\x18');
+                        out.push(crate::executor::markers::DATA_DQUOTE);
                     }
                 } else if escaped == '\\' {
                     // Keep a literal backslash distinct from the protected
                     // double-quote marker used by expansion internals.
-                    out.push('\x14');
+                    out.push(crate::executor::markers::DATA_BACKSLASH);
                 } else if matches!(escaped, '*' | '?' | '[' | '@' | '+' | '!') {
-                    out.push('\x11');
+                    out.push(crate::executor::markers::CTLESC);
                     out.push(escaped);
                 } else {
                     out.push(escaped);
@@ -283,9 +283,9 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                     continue;
                 };
                 if escaped == '\'' {
-                    out.push('\x17');
+                    out.push(crate::executor::markers::DATA_SQUOTE);
                 } else if escaped == '`' {
-                    out.push('\x1a');
+                    out.push(crate::executor::markers::DATA_BACKTICK);
                 } else {
                     out.push(escaped);
                 }
@@ -372,15 +372,15 @@ fn remove_double_quoted_into(
                     if escaped != '\n' {
                         match escaped {
                             '$' => out.push(DATA_DOLLAR),
-                            '`' => out.push('\x1a'),
-                            '\\' => out.push('\x14'),
+                            '`' => out.push(crate::executor::markers::DATA_BACKTICK),
+                            '\\' => out.push(crate::executor::markers::DATA_BACKSLASH),
                             // A de-escaped `"` must travel as the walker's
                             // data-double-quote marker (same as `\"` outside
                             // quotes): downstream expansion scanners toggle
                             // quote state on a bare quote and would swallow
                             // it (`echo "a\"b"` printed `ab`, bash prints
                             // `a"b`).
-                            '"' => out.push('\x18'),
+                            '"' => out.push(crate::executor::markers::DATA_DQUOTE),
                             _ => out.push(escaped),
                         }
                     }
@@ -396,11 +396,11 @@ fn remove_double_quoted_into(
                 // of re-reading it as a single-quote delimiter (which would
                 // also suppress parameter expansion across the pseudo span).
                 pending_name = false;
-                out.push('\x17');
+                out.push(crate::executor::markers::DATA_SQUOTE);
             }
             _ if matches!(quoted, '*' | '?' | '[' | '@' | '+' | '!') => {
                 pending_name = false;
-                out.push('\x11');
+                out.push(crate::executor::markers::CTLESC);
                 out.push(quoted);
             }
             _ => {
@@ -588,7 +588,7 @@ mod tests {
         // quotes is ordinary data, carried with the same protected marker
         // as an escaped quote so expansion never re-reads it as a
         // single-quote delimiter.
-        assert_eq!(remove_shell_quotes("\"a:'b' c\""), "a:\x17b\x17 c");
+        assert_eq!(remove_shell_quotes("\"a:'b' c\""), format!("{}{}{}{}{}", "a:", crate::executor::markers::DATA_SQUOTE_STR, "b", crate::executor::markers::DATA_SQUOTE_STR, " c"));
     }
 }
 

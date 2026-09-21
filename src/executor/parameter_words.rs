@@ -1116,13 +1116,13 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
             // the following character (GNU slashify_in_quotes: `\\` → `\`
             // but does NOT escape `$`; rhs-exp: `\\$selvecs` → `\&m68kcoff_vec`).
             if chars[index + 1] == '\\' {
-                output.push('\x14');
+                output.push(crate::executor::markers::DATA_BACKSLASH);
             } else if chars[index + 1] == '\'' {
                 // GNU retains the backslash: `\'` inside a double-quoted
                 // "${var op word}" survives quote removal as literal
                 // backslash+quote (rhs-exp.tests `\'$selvecs\'`).
-                output.push('\x14');
-                output.push('\x17');
+                output.push(crate::executor::markers::DATA_BACKSLASH);
+                output.push(crate::executor::markers::DATA_SQUOTE);
             } else {
                 output.push(chars[index]);
                 output.push(chars[index + 1]);
@@ -1134,7 +1134,7 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
             // Non-POSIX "${var op word}": ' is literal text, never an sq
             // opener. Emit it escaped so the expansion pass yields a data
             // quote and any following $( still expands (braces.tests).
-            output.push('\x17');
+            output.push(crate::executor::markers::DATA_SQUOTE);
             index += 1;
             continue;
         }
@@ -1162,13 +1162,13 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
                         // slashify_in_quotes: `\\` → `\` but does NOT escape
                         // `$`; rhs-exp: `"\\$selvecs"` → `\&m68kcoff_vec`).
                         '\\' => {
-                            output.push('\x14');
+                            output.push(crate::executor::markers::DATA_BACKSLASH);
                         }
                         // Protect `$` and `` ` `` from re-expansion: inside
                         // double quotes `\$` and `\`` are literal data that
                         // must not trigger parameter/command substitution.
                         '$' => output.push(DATA_DOLLAR),
-                        '`' => output.push('\x1a'),
+                        '`' => output.push(crate::executor::markers::DATA_BACKTICK),
                         _ => output.push(escaped),
                     }
                 }
@@ -1203,7 +1203,7 @@ fn unescape_double_quoted_backslashes(value: &str) -> String {
         // resolves to a literal backslash here. The mut path already did
         // this via restore_protected_replacement_quotes; the non-mut path
         // reaches this function with \x14 still intact.
-        if ch == '\x14' {
+        if ch == crate::executor::markers::DATA_BACKSLASH {
             output.push('\\');
             continue;
         }

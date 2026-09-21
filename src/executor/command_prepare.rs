@@ -6,11 +6,11 @@ fn materialize_expanded_command_word(word: &str) -> String {
     // Strip CTLESC (\x11) markers — they protect glob metacharacters during
     // expansion and must not reach argv (find -name "*.txt" received \x11*
     // and matched nothing).
-    let word = word.replace('\x11', "");
+    let word = word.replace(crate::executor::markers::CTLESC, "");
     decode_command_substitution_payload(&restore_pathname_escape_markers(
         &word
-            .replace('\x15', "\\")
-            .replace('\x14', "\\")
+            .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
+            .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
             .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
             .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\""),
     ))
@@ -27,7 +27,7 @@ fn materialize_expanded_command_word(word: &str) -> String {
 /// current-shell extension and never takes this path.
 fn whitespace_led_bad_substitution_word(word: &str) -> Option<String> {
     let word = word
-        .strip_prefix('\x1b')
+        .strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX)
         .or_else(|| word.strip_prefix(STORAGE_WORD_PREFIX))
         .unwrap_or(word);
     if word.contains("${|") {
@@ -552,7 +552,7 @@ impl Executor {
                 let metadata = cmd.word_metadata.get(index);
                 let raw = metadata.map(|metadata| metadata.raw.as_str());
                 let suppress_glob = assignment_builtin_receives_assignment_word(cmd, index, word)
-                    || word.starts_with('\x1b')
+                    || word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
                     || word.starts_with(STORAGE_WORD_PREFIX)
                     || raw_word_suppresses_pathname_expansion(raw, metadata)
                     || compound_assignment_operand_word(cmd, index, word);
@@ -603,17 +603,17 @@ impl Executor {
                 };
                 if suppress_glob {
                     let materialized =
-                        materialize_expanded_command_word(word_text).replace('\x17', "'");
+                        materialize_expanded_command_word(word_text).replace(crate::executor::markers::DATA_SQUOTE, "'");
                     words.push(remark(materialized));
                 } else {
                     match pathname_expand_word(word_text, &self.shell_state.env_vars) {
                         PathnameExpansion::Matches(matches) => words.extend(
                             matches
                                 .into_iter()
-                                .map(|value| remark(value.replace('\x17', "'"))),
+                                .map(|value| remark(value.replace(crate::executor::markers::DATA_SQUOTE, "'"))),
                         ),
                         PathnameExpansion::NoMatch => words.push(remark(
-                            materialize_expanded_command_word(word_text).replace('\x17', "'"),
+                            materialize_expanded_command_word(word_text).replace(crate::executor::markers::DATA_SQUOTE, "'"),
                         )),
                         PathnameExpansion::Fail(pattern) => {
                             self.report_failglob(&pattern);
@@ -837,13 +837,13 @@ impl Executor {
         // the caller read it for suppress_glob, so it must not leak into
         // builtin arguments (dstack2/tilde `printf %q '~'`).
         if raw_word_is_fully_single_quoted(raw) {
-            let word = word.strip_prefix('\x1b').unwrap_or(word);
+            let word = word.strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX).unwrap_or(word);
             // The \x1c quoted-assignment-value marker (word.rs) is placed
             // after the first '=' to suppress tilde expansion on the RHS.
             // It must be stripped here so it does not leak into builtin
             // arguments (issue: `printf 'foo=abc\n' | grep ^foo=`).
             let word = if let Some((name, value)) = word.split_once('=') {
-                if let Some(stripped) = value.strip_prefix('\x1c') {
+                if let Some(stripped) = value.strip_prefix(crate::executor::markers::IFS_GLUE) {
                     format!("{name}={stripped}")
                 } else {
                     word.to_string()
@@ -1063,7 +1063,7 @@ impl Executor {
             .unwrap_or(false);
         let needs_ifs_marking = ifs_has_non_whitespace
             && !word.starts_with(STORAGE_WORD_PREFIX)
-            && !word.starts_with('\x1b')
+            && !word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
             && raw.is_some_and(|raw| {
                 raw_word_has_unquoted_parameter_expansion(raw)
                     || word_has_unquoted_command_substitution(raw)
@@ -2150,7 +2150,7 @@ pub(in crate::executor) fn restore_pathname_escape_markers(word: &str) -> String
                 .map(|value| format!("{name}={value}"))
         })
         .unwrap_or_else(|| word.to_string());
-    word.replace('\x11', "")
+    word.replace(crate::executor::markers::CTLESC, "")
 }
 
 pub(in crate::executor) fn raw_word_suppresses_pathname_expansion(
@@ -2528,13 +2528,13 @@ fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
             continue;
         }
         // Protected markers from the lexer — copy through
-        if matches!(ch, DATA_DOLLAR | '\x1a' | '\x17' | '\x18' | '\x14' | '\x13') {
+        if matches!(ch, DATA_DOLLAR | crate::executor::markers::DATA_BACKTICK | crate::executor::markers::DATA_SQUOTE | crate::executor::markers::DATA_DQUOTE | crate::executor::markers::DATA_BACKSLASH | crate::executor::markers::PARAM_NAME_END_MARKER) {
             output.push(ch);
             index += 1;
             continue;
         }
         // CTLESC (\x11) — protects the next character, copy both through
-        if ch == '\x11' {
+        if ch == crate::executor::markers::CTLESC {
             output.push(ch);
             index += 1;
             if index < chars.len() {
@@ -2544,7 +2544,7 @@ fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
             continue;
         }
         // Existing \x1c markers — copy through with the protected char
-        if ch == '\x1c' {
+        if ch == crate::executor::markers::IFS_GLUE {
             output.push(ch);
             index += 1;
             if index < chars.len() {
@@ -2555,7 +2555,7 @@ fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
         }
         // Literal character — mark non-whitespace IFS chars with \x1c
         if ifs.contains(ch) && !matches!(ch, ' ' | '\t' | '\n') {
-            output.push('\x1c');
+            output.push(crate::executor::markers::IFS_GLUE);
         }
         output.push(ch);
         index += 1;
@@ -2567,7 +2567,7 @@ fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
 /// return paths where the markers served their purpose (or were never
 /// needed) and must not leak into command arguments or assignment values.
 fn strip_ifs_protection_markers(value: &str) -> String {
-    value.replace('\x1c', "")
+    value.replace(crate::executor::markers::IFS_GLUE, "")
 }
 
 fn field_split_escaped_ifs(value: &str, ifs: Option<&str>) -> Vec<String> {
@@ -2599,7 +2599,7 @@ fn expanded_ends_with_ifs_separator(expanded: &str, executor: &Executor) -> bool
         return false;
     };
     // A \x1c-protected literal IFS char at the end is data, not a separator.
-    if chars.len() >= 2 && chars[chars.len() - 2] == '\x1c' {
+    if chars.len() >= 2 && chars[chars.len() - 2] == crate::executor::markers::IFS_GLUE {
         return false;
     }
     executor
@@ -2717,7 +2717,7 @@ mod command_word_materialization_tests {
     #[test]
     fn leaves_ordinary_command_word_bytes_unchanged() {
         assert_eq!(
-            materialize_expanded_command_word("plain\x15word"),
+            materialize_expanded_command_word(&format!("{}{}{}", "plain", crate::executor::markers::PROTECTED_BACKSLASH_STR, "word")),
             "plain\\word"
         );
     }
@@ -2725,7 +2725,7 @@ mod command_word_materialization_tests {
     #[test]
     fn materializes_pathname_marker_before_payload_decode() {
         assert_eq!(
-            materialize_expanded_command_word("prefix\x15__RUBASH_CSB1_41;suffix"),
+            materialize_expanded_command_word(&format!("{}{}{}", "prefix", crate::executor::markers::PROTECTED_BACKSLASH_STR, "__RUBASH_CSB1_41;suffix")),
             "prefix\\Asuffix"
         );
     }

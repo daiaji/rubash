@@ -46,7 +46,7 @@ pub(super) fn tilde_expansions_in_word_with_raw(word: &str, raw: &str) -> Vec<Ti
 }
 
 pub(super) fn tilde_expansions_in_word(word: &str) -> Vec<TildeExpansion> {
-    if word.starts_with('\x1b') {
+    if word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) {
         return Vec::new();
     }
 
@@ -108,7 +108,7 @@ fn tilde_expansions_in_assignment_value(value: &str) -> Vec<TildeExpansion> {
 
 fn strip_tilde_quote_marker(value: &str) -> &str {
     value
-        .strip_prefix('\x1b')
+        .strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX)
         .or_else(|| value.strip_prefix(crate::expand::tilde::tilde::QUOTED_ASSIGNMENT_VALUE))
         .unwrap_or(value)
 }

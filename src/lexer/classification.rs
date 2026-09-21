@@ -169,7 +169,7 @@ pub(super) fn protect_fully_single_quoted_assignment(raw: &str) -> String {
         match ch {
             '\'' => {}
             '$' => out.push(DATA_DOLLAR),
-            '`' => out.push('\x1a'),
+            '`' => out.push(crate::executor::markers::DATA_BACKTICK),
             _ => out.push(ch),
         }
     }
@@ -186,12 +186,12 @@ pub(super) fn mark_quoted_assignment_value(raw: &str, value: &str) -> String {
         && !raw_rhs.contains("$(")
         && !raw_rhs.contains('`')
     {
-        rhs.replace('\'', "\x16")
+        rhs.replace('\'', crate::executor::markers::PROTECTED_ESCAPED_SQUOTE_STR)
     } else {
         rhs.to_string()
     };
 
-    format!("{name}=\x1c{rhs}")
+    format!("{name}={}{rhs}", crate::executor::markers::QUOTED_WORD_VALUE_PREFIX_STR)
 }
 
 pub(super) fn quoted_literal_tilde(raw: &str, value: &str) -> bool {

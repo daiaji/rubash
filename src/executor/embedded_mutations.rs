@@ -18,7 +18,7 @@ pub(in crate::executor) fn mark_alternate_whitespace(value: &str) -> String {
     let mut marked = String::with_capacity(value.len());
     for ch in value.chars() {
         if matches!(ch, ' ' | '\t' | '\n') {
-            marked.push('\x1c');
+            marked.push(crate::executor::markers::IFS_GLUE);
         }
         marked.push(ch);
     }
@@ -175,8 +175,8 @@ impl Executor {
         };
         let restored = restore_protected_replacement_quotes(&expanded)
             .replace(DATA_DOLLAR, "$")
-            .replace('\x1a', "`")
-            .replace('\x14', "\\")
+            .replace(crate::executor::markers::DATA_BACKTICK, "`")
+            .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
             .replace(crate::lexer::PARAM_NAME_END_MARKER, "");
         // Quoted-null markers only matter to the alternate field splitter
         // (unquoted_outer_braced_alternate_values); every other consumer
@@ -212,11 +212,11 @@ impl Executor {
             // Alternate rhs: whitespace inside a quoted region is quote
             // data for the field splitter even after quote removal.
             if alternate && in_double && matches!(ch, ' ' | '\t' | '\n') {
-                output.push('\x1c');
+                output.push(crate::executor::markers::IFS_GLUE);
                 output.push(ch);
                 continue;
             }
-            if ch == '\x1a' {
+            if ch == crate::executor::markers::DATA_BACKTICK {
                 output.push('`');
                 continue;
             }
@@ -233,18 +233,18 @@ impl Executor {
                 continue;
             }
 
-            if ch == '\x17' {
+            if ch == crate::executor::markers::DATA_SQUOTE {
                 // Only command-substitution words cross a later quote-removal
                 // pass; ordinary words retain their existing decoding path.
                 if word.contains("$(") || word.contains('`') {
-                    output.push('\x17');
+                    output.push(crate::executor::markers::DATA_SQUOTE);
                 } else {
                     output.push('\'');
                 }
                 continue;
             }
 
-            if ch == '\x18' {
+            if ch == crate::executor::markers::DATA_DQUOTE {
                 // Quoted double marks are lexer sentinels; preserve the
                 // quote and its expansion context for nested single quotes.
                 if matches!(context, SubstitutionQuoteContext::Unquoted) {
@@ -329,7 +329,7 @@ impl Executor {
                         break;
                     }
                     if alternate && matches!(quoted_ch, ' ' | '\t' | '\n') {
-                        output.push('\x1c');
+                        output.push(crate::executor::markers::IFS_GLUE);
                     }
                     output.push(quoted_ch);
                 }
@@ -360,7 +360,7 @@ impl Executor {
                 match chars.peek().copied() {
                     Some('`') => {
                         chars.next();
-                        output.push('\x1a');
+                        output.push(crate::executor::markers::DATA_BACKTICK);
                         continue;
                     }
                     Some('$') | Some('"') => {
@@ -402,7 +402,7 @@ impl Executor {
                     }
                     Some(ws @ (' ' | '\t')) => {
                         chars.next();
-                        output.push('\x1c');
+                        output.push(crate::executor::markers::IFS_GLUE);
                         output.push(ws);
                         continue;
                     }
@@ -450,7 +450,7 @@ impl Executor {
                     match next {
                         '`' => {
                             chars.next();
-                            output.push('\x1a');
+                            output.push(crate::executor::markers::DATA_BACKTICK);
                             continue;
                         }
                         // GNU subst.c: backslash before backslash is
@@ -546,12 +546,12 @@ impl Executor {
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         let value = mark_expansion_whitespace(&protected, preserve_quotes);
                         if matches!(context, SubstitutionQuoteContext::HereDocument) {
-                            output.push_str(&value.replace('\x15', "\x14"));
+                            output.push_str(&value.replace(crate::executor::markers::PROTECTED_BACKSLASH, crate::executor::markers::DATA_BACKSLASH_STR));
                         } else {
                             output.push_str(&value);
                         }
                     } else if matches!(context, SubstitutionQuoteContext::HereDocument) {
-                        output.push_str(&protected.replace('\x15', "\x14"));
+                        output.push_str(&protected.replace(crate::executor::markers::PROTECTED_BACKSLASH, crate::executor::markers::DATA_BACKSLASH_STR));
                     } else {
                         output.push_str(&protected);
                     }
@@ -955,7 +955,7 @@ impl Executor {
                             } else if alternate {
                                 for ch in decoded.chars() {
                                     if matches!(ch, ' ' | '\t' | '\n') {
-                                        output.push('\x1c');
+                                        output.push(crate::executor::markers::IFS_GLUE);
                                     }
                                     output.push(ch);
                                 }
@@ -984,7 +984,7 @@ impl Executor {
                                 if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
                                     for ch in decoded.chars() {
                                         if matches!(ch, ' ' | '\t' | '\n') {
-                                            output.push('\x1c');
+                                            output.push(crate::executor::markers::IFS_GLUE);
                                         }
                                         output.push(ch);
                                     }

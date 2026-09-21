@@ -46,11 +46,11 @@ pub(in crate::executor) fn split_shell_words_with_quote_info(source: &str) -> Ve
                         continue;
                     };
                     match escaped {
-                        '\\' => current.push('\x14'),
+                        '\\' => current.push(crate::executor::markers::DATA_BACKSLASH),
                         '$' => current.push(DATA_DOLLAR),
-                        '`' => current.push('\x1a'),
-                        '\'' => current.push('\x17'),
-                        '"' => current.push('\x18'),
+                        '`' => current.push(crate::executor::markers::DATA_BACKTICK),
+                        '\'' => current.push(crate::executor::markers::DATA_SQUOTE),
+                        '"' => current.push(crate::executor::markers::DATA_DQUOTE),
                         '\n' => {}
                         _ => current.push(escaped),
                     }
@@ -60,10 +60,10 @@ pub(in crate::executor) fn split_shell_words_with_quote_info(source: &str) -> Ve
                     Some(escaped @ ('\\' | '"' | '$' | '`' | '\n')) => {
                         chars.next();
                         match escaped {
-                            '\\' => current.push('\x14'),
-                            '"' => current.push('\x18'),
+                            '\\' => current.push(crate::executor::markers::DATA_BACKSLASH),
+                            '"' => current.push(crate::executor::markers::DATA_DQUOTE),
                             '$' => current.push(DATA_DOLLAR),
-                            '`' => current.push('\x1a'),
+                            '`' => current.push(crate::executor::markers::DATA_BACKTICK),
                             '\n' => {}
                             _ => unreachable!(),
                         }
@@ -289,8 +289,8 @@ fn copy_backtick_word_part(
 fn push_single_quoted_shell_word_char(current: &mut String, ch: char) {
     match ch {
         '$' => current.push(DATA_DOLLAR),
-        '`' => current.push('\x1a'),
-        '\\' => current.push('\x15'),
+        '`' => current.push(crate::executor::markers::DATA_BACKTICK),
+        '\\' => current.push(crate::executor::markers::PROTECTED_BACKSLASH),
         _ => current.push(ch),
     }
 }
@@ -435,7 +435,7 @@ fn split_escaped_separator(value: &str, separator: char) -> Option<(&str, &str)>
 fn apply_simple_sed_line(line: &str, pattern: &str, replacement: &str) -> String {
     let pattern = pattern
         .replace(DATA_DOLLAR, "$")
-        .replace('\x11', "")
+        .replace(crate::executor::markers::CTLESC, "")
         .replace(r"\\.", r"\.");
     match pattern.as_str() {
         "'" => line.replace('\'', &unescape_sed_replacement(replacement)),

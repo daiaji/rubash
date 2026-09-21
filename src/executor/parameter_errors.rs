@@ -172,7 +172,7 @@ impl Executor {
         word: &str,
     ) -> Option<(String, &'static str)> {
         let word = word
-            .strip_prefix('\x1b')
+            .strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX)
             .or_else(|| word.strip_prefix(STORAGE_WORD_PREFIX))
             .unwrap_or(word);
         let mut rest = word;
@@ -633,7 +633,7 @@ impl Executor {
         quote_aware: bool,
     ) -> Option<(String, String, i32)> {
         let word = word
-            .strip_prefix('\x1b')
+            .strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX)
             .or_else(|| word.strip_prefix(STORAGE_WORD_PREFIX))
             .unwrap_or(word);
         // Preserve Rubash's nested current-shell extension; its `${| ... }`

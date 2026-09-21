@@ -21,7 +21,7 @@ fn contains_glob_or_extglob(word: &str) -> bool {
     let mut index = 0usize;
     while index < chars.len() {
         let ch = chars[index];
-        if ch == '\\' || ch == '\x11' {
+        if ch == '\\' || ch == crate::executor::markers::CTLESC {
             index += 2;
             continue;
         }

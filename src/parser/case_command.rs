@@ -311,7 +311,7 @@ fn collect_case_word(tokens: &[Token], index: usize) -> Option<(String, String, 
 }
 
 fn strip_case_quote_markers(value: &str) -> String {
-    value.replace('\x11', "")
+    value.replace(crate::executor::markers::CTLESC, "")
 }
 
 fn case_pattern_nodes(

@@ -28,8 +28,8 @@ impl Executor {
         let pattern = self.expand_parameter_pattern_word(
             &pattern
                 .replace(r"\/", "/")
-                .replace('\x14', "/")
-                .replace('\x18', "/"),
+                .replace(crate::executor::markers::DATA_BACKSLASH, "/")
+                .replace(crate::executor::markers::DATA_DQUOTE, "/"),
         );
         let replacement = self.expand_patsub_replacement_text(replacement);
         if let Some(value) =
@@ -91,7 +91,7 @@ impl Executor {
                     .get(index.saturating_sub(1))
                     .map(|value| {
                         self.replace_patsub_pattern(
-                            &value.replace('\x1b', ""),
+                            &value.replace(crate::executor::markers::QUOTED_WORD_PREFIX, ""),
                             &pattern,
                             &replacement,
                             global,
@@ -213,18 +213,18 @@ impl Executor {
                 '\\' => {
                     index = push_unquoted_escape(&mut marked, chars, index);
                 }
-                '\x14' => {
+                crate::executor::markers::DATA_BACKSLASH => {
                     // Lexer marker for an escaped backslash: one literal,
                     // quoted backslash.
                     marked.push(PATSUB_QUOTED_BACKSLASH);
                     index += 1;
                 }
-                '\x17' => {
-                    marked.push('\x17');
+                crate::executor::markers::DATA_SQUOTE => {
+                    marked.push(crate::executor::markers::DATA_SQUOTE);
                     index += 1;
                 }
-                '\x18' => {
-                    marked.push('\x18');
+                crate::executor::markers::DATA_DQUOTE => {
+                    marked.push(crate::executor::markers::DATA_DQUOTE);
                     index += 1;
                 }
                 '$' => {
@@ -325,13 +325,13 @@ impl Executor {
 fn push_single_quoted_replacement_char(marked: &mut String, ch: char) {
     match ch {
         '&' => marked.push(PATSUB_QUOTED_AMP),
-        '\\' | '\x14' => marked.push(PATSUB_QUOTED_BACKSLASH),
+        '\\' | crate::executor::markers::DATA_BACKSLASH => marked.push(PATSUB_QUOTED_BACKSLASH),
         '$' => marked.push(DATA_DOLLAR),
-        '`' => marked.push('\x1a'),
+        '`' => marked.push(crate::executor::markers::DATA_BACKTICK),
         // Decoded quote data must survive the expander, which drops a bare
         // quote as an unclosed span.
-        '\'' | '\x17' => marked.push('\x17'),
-        '"' | '\x18' => marked.push('\x18'),
+        '\'' | crate::executor::markers::DATA_SQUOTE => marked.push(crate::executor::markers::DATA_SQUOTE),
+        '"' | crate::executor::markers::DATA_DQUOTE => marked.push(crate::executor::markers::DATA_DQUOTE),
         other => marked.push(other),
     }
 }
@@ -354,10 +354,10 @@ fn push_double_quoted_replacement_char(marked: &mut String, chars: &[char], inde
                 index + 2
             }
             Some('"') => {
-                marked.push('\x18');
+                marked.push(crate::executor::markers::DATA_DQUOTE);
                 index + 2
             }
-            Some('\\') | Some('\x14') => {
+            Some('\\') | Some(&crate::executor::markers::DATA_BACKSLASH) => {
                 marked.push(PATSUB_QUOTED_BACKSLASH);
                 index + 2
             }
@@ -368,7 +368,7 @@ fn push_double_quoted_replacement_char(marked: &mut String, chars: &[char], inde
                     // reach the expander protected (GNU subst.c
                     // string_extract_double_quoted keeps \' literally; a bare
                     // quote here would be eaten as a span delimiter).
-                    '\'' | '\x17' => marked.push('\x17'),
+                    '\'' | crate::executor::markers::DATA_SQUOTE => marked.push(crate::executor::markers::DATA_SQUOTE),
                     '&' => marked.push(PATSUB_QUOTED_AMP),
                     _ => marked.push(*other),
                 }
@@ -390,23 +390,23 @@ fn push_double_quoted_replacement_char(marked: &mut String, chars: &[char], inde
             marked.extend(chars[index..end].iter());
             end
         }
-        '\x14' => {
+        crate::executor::markers::DATA_BACKSLASH => {
             marked.push(PATSUB_QUOTED_BACKSLASH);
             index + 1
         }
-        '\x17' => {
-            marked.push('\x17');
+        crate::executor::markers::DATA_SQUOTE => {
+            marked.push(crate::executor::markers::DATA_SQUOTE);
             index + 1
         }
-        '\x18' => {
-            marked.push('\x18');
+        crate::executor::markers::DATA_DQUOTE => {
+            marked.push(crate::executor::markers::DATA_DQUOTE);
             index + 1
         }
-        '\'' | '\x17' => {
+        '\'' | crate::executor::markers::DATA_SQUOTE => {
             // Quote data inside a double-quoted replacement span: protect it
             // from the expander, which drops a bare quote as a span
             // delimiter (GNU keeps dquoted ' as literal data).
-            marked.push('\x17');
+            marked.push(crate::executor::markers::DATA_SQUOTE);
             index + 1
         }
         other => {
@@ -489,15 +489,15 @@ fn push_ansi_c_replacement_span(marked: &mut String, chars: &[char], index: usiz
 /// `$`/quote/backtick become their literal protected forms.
 fn push_unquoted_escape(marked: &mut String, chars: &[char], index: usize) -> usize {
     match chars.get(index + 1) {
-        Some('\'') | Some('\x17') => {
-            marked.push('\x17');
+        Some('\'') | Some(&crate::executor::markers::DATA_SQUOTE) => {
+            marked.push(crate::executor::markers::DATA_SQUOTE);
             index + 2
         }
-        Some('"') | Some('\x18') => {
-            marked.push('\x18');
+        Some('"') | Some(&crate::executor::markers::DATA_DQUOTE) => {
+            marked.push(crate::executor::markers::DATA_DQUOTE);
             index + 2
         }
-        Some('\\') | Some('\x14') => {
+        Some('\\') | Some(&crate::executor::markers::DATA_BACKSLASH) => {
             marked.push(PATSUB_QUOTED_BACKSLASH);
             index + 2
         }
@@ -510,7 +510,7 @@ fn push_unquoted_escape(marked: &mut String, chars: &[char], index: usize) -> us
             index + 2
         }
         Some('`') => {
-            marked.push('\x1a');
+            marked.push(crate::executor::markers::DATA_BACKTICK);
             index + 2
         }
         Some(_) => {
@@ -551,16 +551,16 @@ fn push_replacement_dollar(
         marked.push('$');
         return match chars.get(index + 1) {
             Some('\'') => {
-                marked.push('\x17');
+                marked.push(crate::executor::markers::DATA_SQUOTE);
                 index + 2
             }
             Some('"') => {
-                marked.push('\x18');
+                marked.push(crate::executor::markers::DATA_DQUOTE);
                 index + 2
             }
-            Some('\\') | Some('\x14') => push_unquoted_escape(marked, chars, index + 1),
+            Some('\\') | Some(&crate::executor::markers::DATA_BACKSLASH) => push_unquoted_escape(marked, chars, index + 1),
             Some('`') => {
-                marked.push('\x1a');
+                marked.push(crate::executor::markers::DATA_BACKTICK);
                 index + 2
             }
             Some(other) => {

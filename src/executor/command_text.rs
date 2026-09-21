@@ -244,7 +244,7 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
     for (name, value) in &cmd.assignments {
         // Assignment values may carry the lexer's private quoted-RHS marker.
         // BASH_COMMAND exposes shell source, never that expansion sentinel.
-        let value = value.strip_prefix('\x1c').unwrap_or(value);
+        let value = value.strip_prefix(crate::executor::markers::IFS_GLUE).unwrap_or(value);
         parts.push(format!("{name}={value}"));
     }
     let words = command_words_source_text_for_command(cmd);

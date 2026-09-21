@@ -138,14 +138,14 @@ pub(in crate::executor) fn decode_old_style_backtick_source(source: &str) -> Str
             if lookahead.next() == Some('\\') && lookahead.next() == Some('"') {
                 chars.next();
                 chars.next();
-                output.push('\x18');
+                output.push(crate::executor::markers::DATA_DQUOTE);
                 continue;
             }
         }
 
         if double && chars.peek().copied() == Some('"') {
             chars.next();
-            output.push('\x18');
+            output.push(crate::executor::markers::DATA_DQUOTE);
             continue;
         }
 

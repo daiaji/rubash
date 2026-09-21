@@ -156,7 +156,7 @@ impl Executor {
             // raw marker instead of the dollar).
             return Ok(vec![word.replace('\u{1f}', "$")]);
         }
-        let suppress_glob = word.starts_with('\x1b')
+        let suppress_glob = word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
             || word.starts_with(STORAGE_WORD_PREFIX)
             || super::command_prepare::raw_word_suppresses_pathname_expansion(raw, metadata);
         if let Some(values) = self.quoted_positional_at_word_values_with_raw(word, raw, None) {

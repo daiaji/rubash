@@ -153,7 +153,7 @@ impl Executor {
     }
 
     fn expand_marked_or_special_word(&self, word: &str) -> Option<String> {
-        if let Some(word) = word.strip_prefix('\x1b') {
+        if let Some(word) = word.strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX) {
             return Some(self.expand_embedded_parameters(word));
         }
 
@@ -238,7 +238,7 @@ impl Executor {
             self.expand_embedded_parameters(value)
         };
         let expanded = if quoted {
-            expanded.replace('\x11', "")
+            expanded.replace(crate::executor::markers::CTLESC, "")
         } else {
             expanded
         };

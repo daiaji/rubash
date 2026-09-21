@@ -324,7 +324,7 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
         }
 
         match chars[index] {
-            '\x17' => {
+            crate::executor::markers::DATA_SQUOTE => {
                 output.push('\'');
                 index += 1;
             }
@@ -375,7 +375,7 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
             '\\' => {
                 if let Some(ch) = chars.get(index + 1) {
                     if *ch == '\\' {
-                        output.push('\x18');
+                        output.push(crate::executor::markers::DATA_DQUOTE);
                     } else {
                         push_literal_pattern_char(&mut output, *ch);
                     }
@@ -383,7 +383,7 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
                 } else {
                     // Trailing backslash is a literal backslash in a pattern
                     // (`${P#\}` matches a single `\`), not a dropped char.
-                    output.push('\x18');
+                    output.push(crate::executor::markers::DATA_DQUOTE);
                     index += 1;
                 }
             }
@@ -433,7 +433,7 @@ fn push_quoted_pattern_char(output: &mut String, ch: char) {
         return;
     }
     if matches!(ch, '*' | '?' | '[' | '\\') {
-        output.push('\x11');
+        output.push(crate::executor::markers::CTLESC);
     }
     output.push(ch);
 }

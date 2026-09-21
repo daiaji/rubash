@@ -609,7 +609,7 @@ where
 
     while let Some(ch) = chars.next() {
         match ch {
-            '\x1a' => decoded.push('`'),
+            crate::executor::markers::DATA_BACKTICK => decoded.push('`'),
             '\\' if chars.peek().copied() == Some('`') => {
                 chars.next();
                 decoded.push('`');

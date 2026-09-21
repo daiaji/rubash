@@ -120,10 +120,10 @@ fn remove_residual_shell_quotes(arg: &str, unescape_alias_quotes: bool) -> Strin
     // they are NOT produced by decode_ansi_c_quoted's push_ansi_c_byte
     // (which emits raw-byte markers for carrier bytes), so the replace
     // only affects the single-quote-origin markers.
-    if arg.starts_with('$') && arg.contains('\x15') {
-        let body = arg[1..].replace('\x15', "\\");
+    if arg.starts_with('$') && arg.contains(crate::executor::markers::PROTECTED_BACKSLASH) {
+        let body = arg[1..].replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\");
         let decoded = crate::lexer::decode_ansi_c_quoted(&body);
-        return decoded.replace(DATA_DOLLAR, "$").replace('\x1a', "`");
+        return decoded.replace(DATA_DOLLAR, "$").replace(crate::executor::markers::DATA_BACKTICK, "`");
     }
 
     arg.to_string()

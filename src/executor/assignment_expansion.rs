@@ -606,8 +606,8 @@ impl Executor {
             // renders as "\$\$", both matching GNU).
             let restored = value
                 .replace(DATA_DOLLAR, "$")
-                .replace('\x1a', "`")
-                .replace('\x14', "\\")
+                .replace(crate::executor::markers::DATA_BACKTICK, "`")
+                .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
                 // `\"` and `'` inside double quotes travel as the walker's
                 // data-quote markers (\x18 for \" and \x17 for ' inside "
                 // quotes, quotes.rs skip_double_quoted / quoted=='\'' arm):
@@ -617,8 +617,8 @@ impl Executor {
                 // path never un-did it, so the value leaked U+0018 into
                 // storage and into files written by printf). The PUA quote
                 // markers below are the $'...' family and are disjoint.
-                .replace('\x18', "\"")
-                .replace('\x17', "'")
+                .replace(crate::executor::markers::DATA_DQUOTE, "\"")
+                .replace(crate::executor::markers::DATA_SQUOTE, "'")
                 .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
                 .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
             // The lexer marks quoted glob metacharacters (*?[!@+) with a
@@ -779,12 +779,12 @@ impl Executor {
             // `${var@P}` reaches prompt_expansion; ordinary shell escapes
             // still undergo the normal assignment quote-removal pass.
             {
-                let mut restored = preserve_prompt_escapes(&expanded_value).replace('\x11', "");
-                if value.contains(['\x16', '\x17', '\x18']) {
+                let mut restored = preserve_prompt_escapes(&expanded_value).replace(crate::executor::markers::CTLESC, "");
+                if value.contains([crate::executor::markers::PROTECTED_ESCAPED_SQUOTE, crate::executor::markers::DATA_SQUOTE, crate::executor::markers::DATA_DQUOTE]) {
                     restored = restored
-                        .replace('\x16', "'")
-                        .replace('\x17', "'")
-                        .replace('\x18', "\"")
+                        .replace(crate::executor::markers::PROTECTED_ESCAPED_SQUOTE, "'")
+                        .replace(crate::executor::markers::DATA_SQUOTE, "'")
+                        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
                         .replace("\\'", "'");
                 }
                 restored
@@ -822,12 +822,12 @@ impl Executor {
             // need hoisting for this path.
             let hoisted_value = if compound_paren_value {
                 value
-                    .replace('\x17', DATA_SINGLE_QUOTE)
-                    .replace('\x18', DATA_DOUBLE_QUOTE)
+                    .replace(crate::executor::markers::DATA_SQUOTE, DATA_SINGLE_QUOTE)
+                    .replace(crate::executor::markers::DATA_DQUOTE, DATA_DOUBLE_QUOTE)
             } else {
                 value
-                    .replace('\x17', DATA_SINGLE_QUOTE)
-                    .replace('\x18', DATA_DOUBLE_QUOTE)
+                    .replace(crate::executor::markers::DATA_SQUOTE, DATA_SINGLE_QUOTE)
+                    .replace(crate::executor::markers::DATA_DQUOTE, DATA_DOUBLE_QUOTE)
             };
             // GNU arrayfunc.c:557 expand_compound_array_assignment tokenizes
             // the raw parenthesized text first; each element's own quote
@@ -1283,8 +1283,8 @@ impl Executor {
                     let pattern = self.expand_parameter_pattern_word(
                         &pattern
                             .replace(r"\/", "/")
-                            .replace('\x14', "/")
-                            .replace('\x18', "/"),
+                            .replace(crate::executor::markers::DATA_BACKSLASH, "/")
+                            .replace(crate::executor::markers::DATA_DQUOTE, "/"),
                     );
                     let replacement = self.expand_patsub_replacement_text(replacement);
                     changed = true;
@@ -1835,13 +1835,13 @@ fn normalize_dollar_double_quotes(value: &str) -> std::borrow::Cow<'_, str> {
 /// metacharacters (*?[!@+). Mirrors glob.rs `dequote_pathname`: the \x11
 /// is a marker, the following character is the data it protects.
 fn dequote_ctlesc(value: &str) -> String {
-    if !value.contains('\x11') {
+    if !value.contains(crate::executor::markers::CTLESC) {
         return value.to_string();
     }
     let mut output = String::with_capacity(value.len());
     let mut chars = value.chars();
     while let Some(ch) = chars.next() {
-        if ch == '\x11' {
+        if ch == crate::executor::markers::CTLESC {
             if let Some(next) = chars.next() {
                 output.push(next);
             }

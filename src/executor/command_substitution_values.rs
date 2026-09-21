@@ -35,9 +35,9 @@ impl Executor {
                     .iter()
                     .map(|word| {
                         self.expand_word(word)
-                            .replace('\x15', "\\")
+                            .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
                             .replace(DATA_DOLLAR, "$")
-                            .replace('\x11', "")
+                            .replace(crate::executor::markers::CTLESC, "")
                     })
                     .collect::<Vec<_>>();
                 apply_simple_sed_args(input, &args).map(|output| (output, 0))
@@ -47,7 +47,7 @@ impl Executor {
                     .iter()
                     .map(|word| {
                         self.expand_word(word)
-                            .replace('\x15', "\\")
+                            .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
                             .replace(DATA_DOLLAR, "$")
                     })
                     .collect::<Vec<_>>();
@@ -218,7 +218,7 @@ impl Executor {
         if let Some(values) = self.array_at_word_values(word) {
             return values;
         }
-        let suppress_glob = quoted || word.starts_with('\x1b') || word.starts_with(STORAGE_WORD_PREFIX);
+        let suppress_glob = quoted || word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) || word.starts_with(STORAGE_WORD_PREFIX);
         let expanded = strip_matching_quotes(&restore_command_substitution_output(
             &self.expand_word(word),
         ))
@@ -1105,10 +1105,10 @@ impl Executor {
 
 fn decode_backtick_substitution_source(source: &str) -> String {
     decode_old_style_backtick_source(source)
-        .replace('\x1a', "`")
-        .replace('\x11', "")
+        .replace(crate::executor::markers::DATA_BACKTICK, "`")
+        .replace(crate::executor::markers::CTLESC, "")
         .replace(DATA_DOLLAR, "$")
-        .replace('\x15', "\\")
+        .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
 }
 
 #[derive(Default)]
@@ -1649,7 +1649,7 @@ pub(in crate::executor) fn protect_ifs_field_chars(text: &str, ifs: Option<&str>
     let mut output = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
-        if ch == '\x1c' {
+        if ch == crate::executor::markers::IFS_GLUE {
             output.push(ch);
             if let Some(next) = chars.next() {
                 output.push(next);
@@ -1657,7 +1657,7 @@ pub(in crate::executor) fn protect_ifs_field_chars(text: &str, ifs: Option<&str>
             continue;
         }
         if ifs.contains(ch) {
-            output.push('\x1c');
+            output.push(crate::executor::markers::IFS_GLUE);
         }
         output.push(ch);
     }
@@ -1667,13 +1667,13 @@ pub(in crate::executor) fn protect_ifs_field_chars(text: &str, ifs: Option<&str>
 /// Decode `\x1c` protection pairs back to their literal characters for the
 /// no-splitting case (IFS explicitly empty).
 fn decode_protected_ifs_chars(text: &str) -> String {
-    if !text.contains('\x1c') {
+    if !text.contains(crate::executor::markers::IFS_GLUE) {
         return text.to_string();
     }
     let mut output = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
-        if ch == '\x1c' {
+        if ch == crate::executor::markers::IFS_GLUE {
             if let Some(next) = chars.next() {
                 output.push(next);
             }

@@ -223,8 +223,8 @@ impl Executor {
         if !source.contains("<<") {
             return None;
         }
-        let closed_by_paren = source.contains('\x1c');
-        let source = source.replace('\x1c', "");
+        let closed_by_paren = source.contains(crate::executor::markers::IFS_GLUE);
+        let source = source.replace(crate::executor::markers::IFS_GLUE, "");
         if heredoc_header_closes_command_substitution(&source) {
             // GNU parse.y:4563-4567: when the `)` that closes a command
             // substitution sits on the heredoc header line (`cat << EOF)`),
@@ -326,8 +326,8 @@ impl Executor {
             return None;
         }
 
-        let closed_by_paren = source.contains('\x1c');
-        let source = source.replace('\x1c', "");
+        let closed_by_paren = source.contains(crate::executor::markers::IFS_GLUE);
+        let source = source.replace(crate::executor::markers::IFS_GLUE, "");
         let comsub_start_line = self
             .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")

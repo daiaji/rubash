@@ -1,7 +1,7 @@
 use crate::lexer::{Token, TokenKind};
 
 use super::*;
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::{DATA_DOLLAR, PARSE_ERROR_FIELD_SEP};
 
 #[derive(Default)]
 pub struct ParseLoopOptions {
@@ -949,7 +949,7 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
         let unterminated = body.starts_with(DATA_DOLLAR);
         let body = body
             .strip_prefix(DATA_DOLLAR)
-            .or_else(|| body.strip_prefix('\x1e'))
+            .or_else(|| body.strip_prefix(crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX))
             .unwrap_or(body);
         let body_lines = body.lines().count();
         // A terminated or delimiter-prefixed `)` body also consumed the
@@ -969,12 +969,12 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
     );
     state.current_cmd.insert_assignment(
         "__RUBASH_PARSE_ERROR_EOF_SUBSHELL__".to_string(),
-        format!("{paren_line}\x1e{eof_line}"),
+        format!("{paren_line}{PARSE_ERROR_FIELD_SEP}{eof_line}"),
     );
     for (warn_index, (delimiter, at_line, warn_line)) in warned.iter().enumerate() {
         state.current_cmd.insert_assignment(
             format!("__RUBASH_PARSE_ERROR_HD_WARN_{warn_index}__"),
-            format!("{delimiter}\x1e{at_line}\x1e{warn_line}"),
+            format!("{delimiter}{PARSE_ERROR_FIELD_SEP}{at_line}{PARSE_ERROR_FIELD_SEP}{warn_line}"),
         );
     }
     state
@@ -1167,7 +1167,7 @@ fn compound_eof_error_node(
         let unterminated = body.starts_with(DATA_DOLLAR);
         let body = body
             .strip_prefix(DATA_DOLLAR)
-            .or_else(|| body.strip_prefix('\x1e'))
+            .or_else(|| body.strip_prefix(crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX))
             .unwrap_or(body);
         let body_lines = body.lines().count();
         let consumed_last = gather_line + body_lines + usize::from(!unterminated);
@@ -1194,12 +1194,12 @@ fn compound_eof_error_node(
     );
     command.insert_assignment(
         "__RUBASH_PARSE_ERROR_EOF_COMPOUND__".to_string(),
-        format!("{name}\x1e{name_line}\x1e{eof_line}"),
+        format!("{name}{PARSE_ERROR_FIELD_SEP}{name_line}{PARSE_ERROR_FIELD_SEP}{eof_line}"),
     );
     for (warn_index, (delimiter, at_line, warn_line)) in warned.iter().enumerate() {
         command.insert_assignment(
             format!("__RUBASH_PARSE_ERROR_HD_WARN_{warn_index}__"),
-            format!("{delimiter}\x1e{at_line}\x1e{warn_line}"),
+            format!("{delimiter}{PARSE_ERROR_FIELD_SEP}{at_line}{PARSE_ERROR_FIELD_SEP}{warn_line}"),
         );
     }
     command

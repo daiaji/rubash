@@ -367,7 +367,7 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
             .iter()
             .chain(command.append.iter())
             .any(|own| {
-                let target = own.target.trim_start_matches(['\x1b', STORAGE_WORD_PREFIX]);
+                let target = own.target.trim_start_matches([crate::executor::markers::QUOTED_WORD_PREFIX, STORAGE_WORD_PREFIX]);
                 crate::executor::execution_misc::redirect_target_fd(target).is_some()
                     || crate::executor::execution_misc::dev_stdio_redirect_fd(target).is_some()
             });
