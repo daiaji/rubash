@@ -12,6 +12,8 @@ A GNU Bash-compatible shell implementation written in Rust.
 
 Rubash is a from-scratch reimplementation of GNU Bash in Rust — lexer, parser, expansion engine, executor, builtins, and all. It targets byte-level compatibility with GNU Bash 5.3.0 and runs on Windows natively.
 
+**Why native matters**: shells billed as "bash on Windows" (Git Bash, MSYS2) ship a ported bash that rides on a POSIX emulation layer (`msys-2.0.dll`), with fork emulation and path translation that leak quirks into every script. Rubash has no such layer — one self-contained binary speaking Win32 directly. To our knowledge it is also the most thoroughly verified native Windows bash: compatibility is measured, not claimed, against GNU Bash's own 83-suite test corpus (49 suites byte-identical today, ledger below).
+
 **Current status**: 49 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 848 lines, down from 3427 on Sep 9 (−75%). (The previously reported `intl`=1209 was missing-locale environment noise; the harness now generates `en_US.UTF-8`, and `intl` measures 8 lines.) Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
 
 ## Compatibility at a Glance

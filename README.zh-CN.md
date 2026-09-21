@@ -12,6 +12,8 @@
 
 Rubash 是用 Rust 从零实现的 GNU Bash —— 词法分析、解析器、展开引擎、执行器、内建命令，全部重写。目标是与 GNU Bash 5.3.0 逐字节兼容，原生运行在 Windows 上。
 
+**原生的意义**：打着"Windows 上的 bash"旗号的方案（Git Bash、MSYS2）装的是移植版 bash，骑在 POSIX 模拟层（`msys-2.0.dll`）上——fork 模拟、路径翻译的怪癖会渗进每一个脚本。Rubash 没有这层：一个自包含二进制，直接对话 Win32。据我们所知，它也是**验证最充分的 Windows 原生 bash**：兼容性不是宣称出来的，是用 GNU Bash 自己的 83 套件语料实测出来的（当前 49 套件逐字节一致，台账见下）。
+
 **当前状态**：83 个 GNU Bash 上游测试套件中 49 个零差异通过。全部 83 套件总差异 848 行，11 天内从 3427 行下降 75%。（此前报告的 `intl`=1209 为缺 locale 的环境噪音；harness 现在自动生成 `en_US.UTF-8`，`intl` 实测为 8 行。）完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
 
 ## 兼容性一览
