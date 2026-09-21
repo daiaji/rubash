@@ -1042,8 +1042,11 @@ impl Executor {
         // builtins/history.def: The history builtin works for file I/O
         // (-r/-w/-a/-n) and listing even without `set -o history`.
         // remember_on_history only controls automatic recording. Create
-        // a session history on demand so the builtin can read/list.
-        if self.session_history.is_none() {
+        // a session history on demand so the builtin can read/list —
+        // but only when no host provider is installed: an installed
+        // provider IS the history list (the host owns interactive
+        // history), so an auto-created empty session must not shadow it.
+        if self.session_history.is_none() && self.history_provider.is_none() {
             let session = std::rc::Rc::new(std::cell::RefCell::new(
                 crate::history::SessionHistory::new(),
             ));

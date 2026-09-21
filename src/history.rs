@@ -55,6 +55,10 @@ pub struct SessionHistory {
     pub lines_this_session: usize,
     /// hist_last_line_added: the line currently executing added an entry.
     pub last_line_added: bool,
+    /// hist_last_line_pushed: a `history -s` already pushed an entry for
+    /// the command line currently executing (bashhist.c); once set, later
+    /// `-s`/`-p` calls in the same line skip the current-line pop.
+    pub last_line_pushed: bool,
     /// The HISTFILE load triggered by the first "set -o history" ran.
     pub histfile_loaded: bool,
     /// Entries already flushed by "history -a".
@@ -141,6 +145,7 @@ impl SessionHistory {
         self.base = 1;
         self.lines_this_session = 0;
         self.last_line_added = false;
+        self.last_line_pushed = false;
         self.entries_written = 0;
     }
 

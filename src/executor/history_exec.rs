@@ -286,18 +286,41 @@ pub(in crate::executor) fn execute_history_session(
             }
         }
         HistoryMode::Save => {
-            if shell.last_line_added && !shell.entries.is_empty() {
+            // history.def:425-448: `-s` pops the last entry only when it
+            // was added by the command line currently executing —
+            // remember_on_history (set -o history) && hist_last_line_added
+            // && !hist_last_line_pushed. A non-interactive shell never
+            // pops, and a second -s in one line never pops the first -s's
+            // entry. The push goes through check_add_history (FORCE=1),
+            // i.e. record() with HISTCONTROL/HISTIGNORE honored.
+            let remember =
+                crate::builtins::set::shell_option_enabled(&executor.env_vars, "history");
+            if remember
+                && !shell.last_line_pushed
+                && shell.last_line_added
+                && !shell.entries.is_empty()
+            {
                 shell.entries.pop();
             }
             let command = operands.join(" ");
             if !command.is_empty() {
-                shell.entries.push(command);
-                shell.stifle(histsize);
-                shell.lines_this_session += 1;
-                shell.last_line_added = true;
+                let control = executor.get_env("HISTCONTROL").unwrap_or_default();
+                let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
+                shell.record(&command, &control, &ignore, histsize);
+                shell.last_line_pushed = true;
             }
         }
         HistoryMode::Print => {
+            // history.def:462-463: `-p` pops the current-line entry under
+            // the same conditions as -s; failure to delete is a hard error.
+            let remember =
+                crate::builtins::set::shell_option_enabled(&executor.env_vars, "history");
+            if remember && !shell.last_line_pushed && shell.last_line_added {
+                if shell.entries.is_empty() {
+                    return Ok(1);
+                }
+                shell.entries.pop();
+            }
             for operand in &operands {
                 let result = shell.expand(operand, ctx);
                 if result.status < 0 {

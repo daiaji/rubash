@@ -1155,13 +1155,25 @@ fn run_history_group(
                     .borrow_mut()
                     .record(&record, &control, &ignore, histsize)
             };
-            session.borrow_mut().last_line_added = was_recorded;
+            // bashhist.c:961 really_add_history: recording the line resets
+            // hist_last_line_pushed so `history -s` may pop it.
+            {
+                let mut shell = session.borrow_mut();
+                shell.last_line_added = was_recorded;
+                if was_recorded {
+                    shell.last_line_pushed = false;
+                }
+            }
         } else {
             for text in record_texts.iter().flatten() {
                 let was_recorded = session
                     .borrow_mut()
                     .record(text, &control, &ignore, histsize);
-                session.borrow_mut().last_line_added = was_recorded;
+                let mut shell = session.borrow_mut();
+                shell.last_line_added = was_recorded;
+                if was_recorded {
+                    shell.last_line_pushed = false;
+                }
             }
         }
     } else {
