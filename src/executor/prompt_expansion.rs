@@ -8,7 +8,9 @@ fn xtrace_quote_word(word: &str) -> String {
     if super::execution_misc::word_needs_ansic_quote(word) {
         super::execution_misc::ansic_quote_with_markers(word)
     } else {
-        word.to_string()
+        // xtrace prints user-visible text: decode transport carriers
+        // (E400 literal-char escape, C0 carriers) or marker escapes leak.
+        crate::locale::decode_to_visible_text(word)
     }
 }
 
@@ -441,7 +443,10 @@ impl Executor {
             let expanded = expanded
                 .strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
                 .unwrap_or(&expanded);
-            parts.push(format!("{name}={expanded}"));
+            parts.push(format!(
+                "{name}={}",
+                crate::locale::decode_to_visible_text(expanded)
+            ));
         }
         parts
     }

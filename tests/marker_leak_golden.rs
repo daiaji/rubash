@@ -95,6 +95,20 @@ fn xtrace_carries_no_markers() {
     };
     assert_clean(&out, "xtrace stdout");
     assert_clean(&child_err, "xtrace stderr");
+
+    // PUA user data must trace as the literal char, not its E400
+    // literal-char escape (the xtrace verbatim-word arm leaked it once).
+    let child_err = {
+        let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+            .args(["-c", "set -x; v=$'\\uE314Z'; echo \"$v\"; set +x"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rubash");
+        child.wait_with_output().expect("wait rubash").stderr
+    };
+    assert_clean(&child_err, "xtrace stderr (PUA word)");
 }
 
 /// Reparse boundary: eval / alias / command-substitution bodies that
