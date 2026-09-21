@@ -124,7 +124,7 @@ impl Executor {
         // pipehi | cat` fails with "pipeline command could not execute".
         let mut stages = pipeline_command.stages.clone();
         for stage in &mut stages {
-            if self.aliases.is_empty() {
+            if self.shell_state.aliases.is_empty() {
                 break;
             }
             let raws: Vec<Option<&str>> = stage
@@ -186,7 +186,7 @@ impl Executor {
         };
         let inner = inner.trim().trim_end_matches(';').trim();
         if inner == "hash -t cat | grep cat >/dev/null" {
-            self.exit_code = if crate::builtins::hash::hashed_path(&self.env_vars, "cat").is_some()
+            self.exit_code = if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, "cat").is_some()
             {
                 0
             } else {
@@ -201,7 +201,7 @@ impl Executor {
         let start_line = command
             .line
             .or_else(|| {
-                self.env_vars
+                self.shell_state.env_vars
                     .get("__RUBASH_CURRENT_LINE")
                     .and_then(|value| value.parse::<usize>().ok())
             })
@@ -453,7 +453,7 @@ impl Executor {
                 // cursor — a non-reader (echo) leaves it untouched while a
                 // drainer (cat) pushes it to EOF (GNU redir.c shared fd).
                 let consumed = self.pipeline_stdin_consumed.take().unwrap_or(0);
-                self.env_vars.insert(
+                self.shell_state.env_vars.insert(
                     FUNCTION_STDIN_OFFSET.to_string(),
                     (base + consumed).to_string(),
                 );
@@ -466,7 +466,7 @@ impl Executor {
         self.write_pipeline_output(final_command, &input)?;
         if let Some(prefix) = &time_prefix {
             if let Some(started) = time_prefix_started {
-                print_time(&self.env_vars, prefix.posix_format, started);
+                print_time(&self.shell_state.env_vars, prefix.posix_format, started);
             }
         }
         let mut status = self.pipeline_exit_status(&statuses);
@@ -525,7 +525,7 @@ impl Executor {
         // (execute_cmd.c:4506); this fast path bypasses the stage loop, so
         // bail out and let it own the fires.
         if self.debug_trap_in_scope()
-            && crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG")
+            && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
                 .is_some_and(|action| !action.is_empty())
         {
             return Ok(None);
@@ -764,7 +764,7 @@ impl Executor {
             // members directly and would bypass those fires, so a live DEBUG
             // trap takes the sequential stage path which fires per element.
             || (self.debug_trap_in_scope()
-                && crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG")
+                && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
                     .is_some_and(|action| !action.is_empty()))
             // NOTE: stdout_capture (command substitution) is intentionally NOT a
             // bail-out here. External-only pipelines inside `$(...)` must still
@@ -810,7 +810,7 @@ impl Executor {
             // must take the sequential stage path, where
             // restricted_command_error reports it and the remaining stages
             // still run against the (empty) pipe input.
-            if crate::builtins::set::shell_option_enabled(&self.env_vars, "restricted")
+            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "restricted")
                 && self
                     .restricted_command_error(command, &expanded_name)
                     .is_some()
@@ -820,7 +820,7 @@ impl Executor {
             if crate::executor::builtin_names::is_shell_builtin_name(&expanded_name) {
                 return Ok(None);
             }
-            let Some(program) = find_user_command(&expanded_name, &self.env_vars).or_else(|| {
+            let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars).or_else(|| {
                 matches!(expanded_name.as_str(), "yes" | "head" | "wc")
                     .then(|| internal_pipeline_program(&expanded_name))
             }) else {
@@ -860,7 +860,7 @@ impl Executor {
                     args.push(value.replace('\x11', ""));
                     continue;
                 }
-                match glob::pathname_expand_word(&value, &self.env_vars) {
+                match glob::pathname_expand_word(&value, &self.shell_state.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => args.extend(matches),
                     glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
                         args.push(value.replace('\x11', ""))
@@ -891,7 +891,7 @@ impl Executor {
                     program,
                     Some(&self.expand_word(&commands[index].words[0])),
                     args,
-                    &self.env_vars,
+                    &self.shell_state.env_vars,
                 )
             };
             self.apply_child_environment(&mut process);
@@ -937,7 +937,7 @@ impl Executor {
             if let Some(base) = stdin_base {
                 // The spawned child was handed the whole unread tail; GNU's
                 // shared fd 0 models that as consumed.
-                self.env_vars.insert(
+                self.shell_state.env_vars.insert(
                     FUNCTION_STDIN_OFFSET.to_string(),
                     (base + input.len()).to_string(),
                 );
@@ -999,7 +999,7 @@ impl Executor {
             // members directly and would bypass those fires, so a live DEBUG
             // trap takes the sequential stage path which fires per element.
             || (self.debug_trap_in_scope()
-                && crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG")
+                && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
                     .is_some_and(|action| !action.is_empty()))
             // NOTE: stdout_capture (command substitution) is intentionally NOT a
             // bail-out here. External-only pipelines inside `$(...)` must still
@@ -1042,7 +1042,7 @@ impl Executor {
             // Same restricted-member bail-out as the first concurrent path:
             // refused members are reported (and the rest of the pipeline
             // keeps running) by the sequential stage executor.
-            if crate::builtins::set::shell_option_enabled(&self.env_vars, "restricted")
+            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "restricted")
                 && self
                     .restricted_command_error(command, &expanded_name)
                     .is_some()
@@ -1052,7 +1052,7 @@ impl Executor {
             if crate::executor::builtin_names::is_shell_builtin_name(&expanded_name) {
                 return Ok(None);
             }
-            let Some(program) = find_user_command(&expanded_name, &self.env_vars) else {
+            let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars) else {
                 return Ok(None);
             };
             // GNU execute_simple_command pathname-expands every argument
@@ -1079,7 +1079,7 @@ impl Executor {
                     args.push(value.replace('\x11', ""));
                     continue;
                 }
-                match glob::pathname_expand_word(&value, &self.env_vars) {
+                match glob::pathname_expand_word(&value, &self.shell_state.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => args.extend(matches),
                     glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
                         args.push(value.replace('\x11', ""))
@@ -1101,7 +1101,7 @@ impl Executor {
                 &program,
                 Some(&self.expand_word(&commands[index].words[0])),
                 &args,
-                &self.env_vars,
+                &self.shell_state.env_vars,
             );
             self.apply_child_environment(&mut process);
 
@@ -1142,7 +1142,7 @@ impl Executor {
         if let Some(mut stdin) = first_stdin {
             let (input, stdin_base) = self.initial_pipeline_input(commands[0]);
             if let Some(base) = stdin_base {
-                self.env_vars.insert(
+                self.shell_state.env_vars.insert(
                     FUNCTION_STDIN_OFFSET.to_string(),
                     (base + input.len()).to_string(),
                 );
@@ -1203,7 +1203,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn pipeline_exit_status(&self, statuses: &[i32]) -> i32 {
-        if crate::builtins::set::shell_option_enabled(&self.env_vars, "pipefail") {
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "pipefail") {
             return statuses
                 .iter()
                 .rev()
@@ -1299,7 +1299,7 @@ impl Executor {
                     out.push(expanded.replace('\x11', ""));
                     continue;
                 }
-                match glob::pathname_expand_word(&expanded, &self.env_vars) {
+                match glob::pathname_expand_word(&expanded, &self.shell_state.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => out.extend(matches),
                     glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
                         out.push(expanded.replace('\x11', ""))
@@ -1338,26 +1338,26 @@ impl Executor {
         // expose it the same way while the inline arms run so fd-alias
         // redirections like `cat < /dev/stdin` (niubash#118) resolve to the
         // stage input instead of the process's own stdin handle.
-        let old_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
-        let old_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-        self.env_vars
+        let old_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+        let old_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        self.shell_state.env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
-        self.env_vars
+        self.shell_state.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
         self.pipeline_stdin_consumed.set(None);
         let result = if command_has_pipeline_process_substitution(command) {
             // The substitution child inherits the stage's stdin — the
             // upstream pipe — so expose the captured input while the
             // substitution sources run.
-            let old_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
-            let old_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-            self.env_vars
+            let old_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+            let old_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+            self.shell_state.env_vars
                 .insert(FUNCTION_STDIN.to_string(), input.to_string());
-            self.env_vars
+            self.shell_state.env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
             let materialized = self.command_with_process_substitution_files(command);
-            restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
-            restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
+            restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
+            restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
             match materialized {
                 Ok((materialized, process_substitutions)) => {
                     let inner = self.execute_pipeline_stage_inner(&materialized, input);
@@ -1376,14 +1376,14 @@ impl Executor {
         // is missing falls back to the cursor visible here.
         if self.pipeline_stdin_consumed.get().is_none() {
             let measured = self
-                .env_vars
+                .shell_state.env_vars
                 .get(FUNCTION_STDIN_OFFSET)
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(0);
             self.pipeline_stdin_consumed.set(Some(measured));
         }
-        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
-        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
+        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
+        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
         let nounset_hit = self.restore_arithmetic_error_flags(&saved);
         match result {
             Ok(Some((output, stderr, _status))) if nounset_hit => {
@@ -1409,7 +1409,7 @@ impl Executor {
             else {
                 return Ok(None);
             };
-            print_time(&self.env_vars, time_command.posix_format, started);
+            print_time(&self.shell_state.env_vars, time_command.posix_format, started);
             let status = if time_command.inverted {
                 invert_exit_status(status)
             } else {
@@ -1497,7 +1497,7 @@ impl Executor {
             }
             "printf" => {
                 let args: Vec<String> = self.expand_pipeline_stage_arg_words(command, 1);
-                let mut env_vars = self.env_vars.clone();
+                let mut env_vars = self.shell_state.env_vars.clone();
                 let mut output = Vec::new();
                 let mut stderr = Vec::new();
                 let status = crate::builtins::printf::execute_with_io(
@@ -1517,7 +1517,7 @@ impl Executor {
                     .iter()
                     .map(|word| self.expand_word(word))
                     .collect::<Vec<_>>();
-                let mut env_vars = self.env_vars.clone();
+                let mut env_vars = self.shell_state.env_vars.clone();
                 let mut output = Vec::new();
                 let mut stderr = Vec::new();
                 let status = crate::builtins::trap::execute_with_io(
@@ -1605,7 +1605,7 @@ impl Executor {
                         file_operands.push(value.replace('\x11', ""));
                         continue;
                     }
-                    match glob::pathname_expand_word(&value, &self.env_vars) {
+                    match glob::pathname_expand_word(&value, &self.shell_state.env_vars) {
                         glob::PathnameExpansion::Matches(matches) => file_operands.extend(matches),
                         glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
                             file_operands.push(value.replace('\x11', ""))
@@ -1643,7 +1643,7 @@ impl Executor {
                             );
                             continue;
                         }
-                        match fs::read(shell_path_to_windows(&path, &self.env_vars)) {
+                        match fs::read(shell_path_to_windows(&path, &self.shell_state.env_vars)) {
                             Ok(bytes) => {
                                 let bytes = if show_nonprinting {
                                     crate::executor::external_file_builtins::cat_v_filter(&bytes)
@@ -1820,7 +1820,7 @@ impl Executor {
         command: &CommandNode,
         name: &str,
     ) -> Option<String> {
-        if !crate::builtins::set::shell_option_enabled(&self.env_vars, "restricted") {
+        if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "restricted") {
             return None;
         }
         let slash = |value: &str| value.contains('/') || value.contains('\\');
@@ -1916,7 +1916,7 @@ impl Executor {
     }
 
     fn lastpipe_enabled(&self) -> bool {
-        crate::builtins::shopt::option_enabled(&self.env_vars, "lastpipe")
+        crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "lastpipe")
     }
 
     /// Computes the first pipeline element's fd-0 payload. GNU gives every
@@ -1932,7 +1932,7 @@ impl Executor {
     fn initial_pipeline_input(&mut self, command: &CommandNode) -> (String, Option<usize>) {
         self.apply_comsub_stdin_writeback();
         let base = self
-            .env_vars
+            .shell_state.env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -1946,7 +1946,7 @@ impl Executor {
             })
             .unwrap_or_default();
         if from_function_stdin {
-            self.env_vars
+            self.shell_state.env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), base.to_string());
             (input, Some(base))
         } else {

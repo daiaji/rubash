@@ -17,22 +17,22 @@ impl Executor {
             names.push(name.to_string());
         }
 
-        let Some(scope) = self.local_var_scopes.last_mut() else {
+        let Some(scope) = self.shell_state.local_var_scopes.last_mut() else {
             return;
         };
-        let Some(attr_scope_index) = self.local_attr_scopes.len().checked_sub(1) else {
+        let Some(attr_scope_index) = self.shell_state.local_attr_scopes.len().checked_sub(1) else {
             return;
         };
-        let Some(typed_scope) = self.local_typed_scopes.last_mut() else {
+        let Some(typed_scope) = self.shell_state.local_typed_scopes.last_mut() else {
             return;
         };
         for name in names {
             if scope.contains_key(&name) {
                 continue;
             }
-            scope.insert(name.clone(), self.env_vars.get(&name).cloned());
-            let attrs = capture_var_attrs(&self.env_vars, &name);
-            self.local_attr_scopes[attr_scope_index].insert(name.clone(), attrs);
+            scope.insert(name.clone(), self.shell_state.env_vars.get(&name).cloned());
+            let attrs = capture_var_attrs(&self.shell_state.env_vars, &name);
+            self.shell_state.local_attr_scopes[attr_scope_index].insert(name.clone(), attrs);
             typed_scope.insert(name.clone(), self.shell_state.variables.get(&name).cloned());
             // getopts' intra-word scan position is frame state in GNU Bash:
             // declaring OPTIND local resets the scan for this frame, and the
@@ -41,9 +41,9 @@ impl Executor {
             if name == "OPTIND" && !scope.contains_key("__RUBASH_GETOPTS_OFFSET") {
                 scope.insert(
                     "__RUBASH_GETOPTS_OFFSET".to_string(),
-                    self.env_vars.get("__RUBASH_GETOPTS_OFFSET").cloned(),
+                    self.shell_state.env_vars.get("__RUBASH_GETOPTS_OFFSET").cloned(),
                 );
-                self.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
+                self.shell_state.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
             }
         }
     }
@@ -54,32 +54,32 @@ impl Executor {
     /// when the name is already local at this frame.
     pub(in crate::executor) fn save_frame_local_name(&mut self, name: &str) {
         if self
-            .local_var_scopes
+            .shell_state.local_var_scopes
             .last()
             .is_none_or(|scope| scope.contains_key(name))
         {
             return;
         }
-        let env_value = self.env_vars.get(name).cloned();
-        let attrs = capture_var_attrs(&self.env_vars, name);
+        let env_value = self.shell_state.env_vars.get(name).cloned();
+        let attrs = capture_var_attrs(&self.shell_state.env_vars, name);
         let typed = self.shell_state.variables.get(name).cloned();
-        if let Some(scope) = self.local_var_scopes.last_mut() {
+        if let Some(scope) = self.shell_state.local_var_scopes.last_mut() {
             scope.insert(name.to_string(), env_value);
         }
-        if let Some(attr_scope) = self.local_attr_scopes.last_mut() {
+        if let Some(attr_scope) = self.shell_state.local_attr_scopes.last_mut() {
             attr_scope.insert(name.to_string(), attrs);
         }
-        if let Some(typed_scope) = self.local_typed_scopes.last_mut() {
+        if let Some(typed_scope) = self.shell_state.local_typed_scopes.last_mut() {
             typed_scope.insert(name.to_string(), typed);
         }
         if name == "OPTIND" {
-            if let Some(scope) = self.local_var_scopes.last_mut() {
+            if let Some(scope) = self.shell_state.local_var_scopes.last_mut() {
                 if !scope.contains_key("__RUBASH_GETOPTS_OFFSET") {
-                    let saved = self.env_vars.get("__RUBASH_GETOPTS_OFFSET").cloned();
+                    let saved = self.shell_state.env_vars.get("__RUBASH_GETOPTS_OFFSET").cloned();
                     scope.insert("__RUBASH_GETOPTS_OFFSET".to_string(), saved);
                 }
             }
-            self.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
+            self.shell_state.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
         }
     }
 
@@ -92,22 +92,22 @@ impl Executor {
             .map(|(name, _)| assignment_name_and_append(name).0.to_string())
             .collect::<Vec<_>>();
 
-        let Some(scope) = self.local_var_scopes.last_mut() else {
+        let Some(scope) = self.shell_state.local_var_scopes.last_mut() else {
             return;
         };
-        let Some(attr_scope_index) = self.local_attr_scopes.len().checked_sub(1) else {
+        let Some(attr_scope_index) = self.shell_state.local_attr_scopes.len().checked_sub(1) else {
             return;
         };
-        let Some(typed_scope) = self.local_typed_scopes.last_mut() else {
+        let Some(typed_scope) = self.shell_state.local_typed_scopes.last_mut() else {
             return;
         };
         for name in names {
             if scope.contains_key(&name) {
                 continue;
             }
-            scope.insert(name.clone(), self.env_vars.get(&name).cloned());
-            let attrs = capture_var_attrs(&self.env_vars, &name);
-            self.local_attr_scopes[attr_scope_index].insert(name.clone(), attrs);
+            scope.insert(name.clone(), self.shell_state.env_vars.get(&name).cloned());
+            let attrs = capture_var_attrs(&self.shell_state.env_vars, &name);
+            self.shell_state.local_attr_scopes[attr_scope_index].insert(name.clone(), attrs);
             typed_scope.insert(name.clone(), self.shell_state.variables.get(&name).cloned());
             // getopts' intra-word scan position is frame state in GNU Bash:
             // declaring OPTIND local resets the scan for this frame, and the
@@ -116,9 +116,9 @@ impl Executor {
             if name == "OPTIND" && !scope.contains_key("__RUBASH_GETOPTS_OFFSET") {
                 scope.insert(
                     "__RUBASH_GETOPTS_OFFSET".to_string(),
-                    self.env_vars.get("__RUBASH_GETOPTS_OFFSET").cloned(),
+                    self.shell_state.env_vars.get("__RUBASH_GETOPTS_OFFSET").cloned(),
                 );
-                self.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
+                self.shell_state.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
             }
         }
     }
@@ -127,7 +127,7 @@ impl Executor {
         &self,
         cmd: &CommandNode,
     ) -> bool {
-        self.function_depth > 0
+        self.shell_state.function_depth > 0
             && self.posix_mode_enabled()
             && !cmd.assignments.is_empty()
             && cmd
@@ -142,7 +142,7 @@ impl Executor {
         &self,
         args: &[String],
     ) -> Vec<(String, Option<String>, bool)> {
-        if self.function_depth == 0
+        if self.shell_state.function_depth == 0
             || !self.posix_mode_enabled()
             || declare_args_force_global(args)
             || declare_args_request_print(args)
@@ -161,8 +161,8 @@ impl Executor {
             .map(|name| {
                 (
                     name.to_string(),
-                    self.env_vars.get(name).cloned(),
-                    is_marked_var(&self.env_vars, EXPORTED_VARS, name),
+                    self.shell_state.env_vars.get(name).cloned(),
+                    is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name),
                 )
             })
             .collect()
@@ -175,12 +175,12 @@ impl Executor {
         for (name, old_value, was_exported) in names {
             if was_exported {
                 if let Some(value) = old_value {
-                    set_local_export_env_value(&mut self.env_vars, &name, value);
+                    set_local_export_env_value(&mut self.shell_state.env_vars, &name, value);
                 }
             }
-            self.env_vars.remove(&name);
+            self.shell_state.env_vars.remove(&name);
             env::remove_var(&name);
-            mark_env_name(&mut self.env_vars, DECLARED_UNSET_VARS, &name);
+            mark_env_name(&mut self.shell_state.env_vars, DECLARED_UNSET_VARS, &name);
         }
     }
 
@@ -192,7 +192,7 @@ impl Executor {
             .map(|name| {
                 format!(
                     "{name}={}",
-                    crate::builtins::set::shell_option_enabled(&self.env_vars, name) as u8
+                    crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, name) as u8
                 )
             })
             .collect::<Vec<_>>()
@@ -209,10 +209,10 @@ impl Executor {
                 continue;
             };
             let enabled = state == "1";
-            if crate::builtins::set::shell_option_enabled(&self.env_vars, name) == enabled {
+            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, name) == enabled {
                 continue;
             }
-            crate::builtins::set::set_shell_option(&mut self.env_vars, name, enabled);
+            crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, name, enabled);
             if name == "ignoreeof" {
                 // Same typed-owner mirror as the `set -o ignoreeof` path —
                 // set.def:388-399 binds IGNOREEOF=10 or unbinds it.
@@ -226,7 +226,7 @@ impl Executor {
                 }
             }
             if name == "posix" {
-                self.env_vars.insert(
+                self.shell_state.env_vars.insert(
                     "__RUBASH_POSIX_MODE".to_string(),
                     if enabled { "1" } else { "0" }.to_string(),
                 );
@@ -235,25 +235,25 @@ impl Executor {
     }
 
     pub(in crate::executor) fn restore_function_locals(&mut self) -> HashSet<String> {
-        let Some(scope) = self.local_var_scopes.pop() else {
+        let Some(scope) = self.shell_state.local_var_scopes.pop() else {
             return HashSet::new();
         };
         // GNU variables.c:5271-5275 (push_posix_tempvar_internal, reached via
         // pop_var_context -> hash_flush -> push_func_var): a local `-`
         // restores the saved `set -o` options when its frame pops.
         if scope.contains_key("-") {
-            if let Some(bitmap) = self.env_vars.get("-").cloned() {
+            if let Some(bitmap) = self.shell_state.env_vars.get("-").cloned() {
                 self.apply_options_bitmap(&bitmap);
             }
         }
-        let attr_scope = self.local_attr_scopes.pop().unwrap_or_default();
-        let typed_scope = self.local_typed_scopes.pop().unwrap_or_default();
+        let attr_scope = self.shell_state.local_attr_scopes.pop().unwrap_or_default();
+        let typed_scope = self.shell_state.local_typed_scopes.pop().unwrap_or_default();
         let mut names = HashSet::new();
         for (name, value) in scope {
             names.insert(name.clone());
             match value {
                 Some(value) => {
-                    self.env_vars.insert(name.clone(), value.clone());
+                    self.shell_state.env_vars.insert(name.clone(), value.clone());
                     // Internal pseudo-variables (e.g. the getopts scan
                     // offset saved alongside a local OPTIND) must not
                     // leak into the child process environment.
@@ -262,16 +262,16 @@ impl Executor {
                     }
                 }
                 None => {
-                    self.env_vars.remove(&name);
+                    self.shell_state.env_vars.remove(&name);
                     env::remove_var(&name);
                 }
             }
             set_var_attrs(
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &name,
                 attr_scope.get(&name).copied().unwrap_or_default(),
             );
-            remove_local_export_env_value(&mut self.env_vars, &name);
+            remove_local_export_env_value(&mut self.shell_state.env_vars, &name);
         }
         for (name, variable) in typed_scope {
             self.shell_state.variables.remove(&name);
@@ -286,7 +286,7 @@ impl Executor {
         &mut self,
         args: &[String],
     ) -> Vec<SavedGlobalDeclareLocal> {
-        if self.function_depth == 0 || !declare_args_force_global(args) {
+        if self.shell_state.function_depth == 0 || !declare_args_force_global(args) {
             return Vec::new();
         }
 
@@ -311,26 +311,26 @@ impl Executor {
             saved_locals.push(SavedGlobalDeclareLocal {
                 name: name.to_string(),
                 scope_index,
-                local_value: self.env_vars.get(name).cloned(),
-                local_attrs: capture_var_attrs(&self.env_vars, name),
+                local_value: self.shell_state.env_vars.get(name).cloned(),
+                local_attrs: capture_var_attrs(&self.shell_state.env_vars, name),
                 local_typed: self.shell_state.variables.get(name).cloned(),
             });
         }
 
         for saved in &saved_locals {
-            let scope = &self.local_var_scopes[saved.scope_index];
-            let attr_scope = &self.local_attr_scopes[saved.scope_index];
+            let scope = &self.shell_state.local_var_scopes[saved.scope_index];
+            let attr_scope = &self.shell_state.local_attr_scopes[saved.scope_index];
             restore_optional_shell_var(
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &saved.name,
                 scope.get(&saved.name).cloned().flatten(),
             );
             set_var_attrs(
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &saved.name,
                 attr_scope.get(&saved.name).copied().unwrap_or_default(),
             );
-            let global_typed = self.local_typed_scopes[saved.scope_index]
+            let global_typed = self.shell_state.local_typed_scopes[saved.scope_index]
                 .get(&saved.name)
                 .cloned()
                 .flatten();
@@ -344,7 +344,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn visible_local_scope_index(&self, name: &str) -> Option<usize> {
-        self.local_var_scopes
+        self.shell_state.local_var_scopes
             .iter()
             .rposition(|scope| scope.contains_key(name))
     }
@@ -358,18 +358,18 @@ impl Executor {
         }
 
         for saved in saved_locals {
-            let Some(scope) = self.local_var_scopes.get_mut(saved.scope_index) else {
+            let Some(scope) = self.shell_state.local_var_scopes.get_mut(saved.scope_index) else {
                 continue;
             };
-            scope.insert(saved.name.clone(), self.env_vars.get(&saved.name).cloned());
-            let Some(attr_scope) = self.local_attr_scopes.get_mut(saved.scope_index) else {
+            scope.insert(saved.name.clone(), self.shell_state.env_vars.get(&saved.name).cloned());
+            let Some(attr_scope) = self.shell_state.local_attr_scopes.get_mut(saved.scope_index) else {
                 continue;
             };
             attr_scope.insert(
                 saved.name.clone(),
-                capture_var_attrs(&self.env_vars, &saved.name),
+                capture_var_attrs(&self.shell_state.env_vars, &saved.name),
             );
-            let typed_scope = self.local_typed_scopes.get_mut(saved.scope_index);
+            let typed_scope = self.shell_state.local_typed_scopes.get_mut(saved.scope_index);
             if let Some(typed_scope) = typed_scope {
                 typed_scope.insert(
                     saved.name.clone(),
@@ -380,8 +380,8 @@ impl Executor {
             if let Some(variable) = saved.local_typed {
                 let _ = self.shell_state.variables.set(&saved.name, variable);
             }
-            restore_optional_shell_var(&mut self.env_vars, &saved.name, saved.local_value);
-            set_var_attrs(&mut self.env_vars, &saved.name, saved.local_attrs);
+            restore_optional_shell_var(&mut self.shell_state.env_vars, &saved.name, saved.local_value);
+            set_var_attrs(&mut self.shell_state.env_vars, &saved.name, saved.local_attrs);
         }
     }
 }

@@ -3,7 +3,7 @@ use crate::executor::assignment_expansion::{hoist_data_double_quotes, hoist_data
 
 impl Executor {
     pub(in crate::executor) fn is_brace_expand_enabled(&self) -> bool {
-        crate::builtins::set::shell_option_enabled(&self.env_vars, "braceexpand")
+        crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "braceexpand")
     }
     pub(in crate::executor) fn expand_word_mut(&mut self, word: &str) -> String {
         self.expand_word_mut_with_context(word, SubstitutionQuoteContext::Unquoted)
@@ -183,7 +183,7 @@ impl Executor {
             if !compound_assignment
                 && !expanded.contains('=')
                 && tilde_expand::assignment_value_needs_tilde_expansion(raw_value, true)
-                && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
+                && (self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
                     || expanded.starts_with("~/"))
             {
                 return format!("{name}={}", self.expand_assignment_tilde(&expanded));
@@ -223,7 +223,7 @@ impl Executor {
                     let message = crate::executor::arithmetic::arithmetic_error_message(
                         display,
                         true,
-                        &self.env_vars,
+                        &self.shell_state.env_vars,
                     )
                     .unwrap_or_else(|| {
                         format!(
@@ -316,11 +316,11 @@ impl Executor {
 
     pub(in crate::executor) fn expand_parameter_named_value(&self, name: &str) -> String {
         match name {
-            "#" => return self.positional_params.len().to_string(),
+            "#" => return self.shell_state.positional_params.len().to_string(),
             // GNU string_list_dollar_star (subst.c): `*` joins with IFS[0]
             // in scalar contexts (assignments, quoted joins); the same rule
             // the unbraced `$*` walker path applies. `@` stays space-joined.
-            "@" => return self.positional_params.join(" "),
+            "@" => return self.shell_state.positional_params.join(" "),
             "*" => return self.positional_params_star_joined(),
             "?" => return self.exit_code.to_string(),
             "$" => return self.shell_pid_value().to_string(),
@@ -332,7 +332,7 @@ impl Executor {
 
         if let Ok(index) = name.parse::<usize>() {
             return self
-                .positional_params
+                .shell_state.positional_params
                 .get(index.saturating_sub(1))
                 .cloned()
                 .unwrap_or_default();
@@ -470,7 +470,7 @@ impl Executor {
         // an arithmetic expression after parameter expansion).
         let expression = self.expand_embedded_parameters(&expression);
         let (evaluated, category) =
-            eval_conditional_arith_value_categorized(&expression, &self.env_vars);
+            eval_conditional_arith_value_categorized(&expression, &self.shell_state.env_vars);
         if evaluated.is_none() {
             self.arithmetic_last_error_category.set(category);
             // Save the expanded expression so report_substring_arithmetic_error
@@ -512,7 +512,7 @@ impl Executor {
             let name = &expression[start..index];
             if index < bytes.len()
                 && bytes[index] == b'['
-                && is_marked_var(&self.env_vars, ASSOC_VARS, name)
+                && is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
             {
                 if let Some(close) = expression[index..].find(']').map(|p| index + p) {
                     let raw = &expression[index + 1..close];
@@ -667,7 +667,7 @@ impl Executor {
             let mut message = crate::executor::arithmetic::arithmetic_error_message(
                 expression,
                 true,
-                &self.env_vars,
+                &self.shell_state.env_vars,
             )
             .unwrap_or_else(|| {
                 format!(
@@ -689,7 +689,7 @@ impl Executor {
                 {
                     if token.trim() == expression.trim() {
                         let command_context =
-                            self.env_vars.get("__RUBASH_IS_C").map(String::as_str) != Some("1");
+                            self.shell_state.env_vars.get("__RUBASH_IS_C").map(String::as_str) != Some("1");
                         let operand_expected = if command_context {
                             "arithmetic syntax error: operand expected"
                         } else {

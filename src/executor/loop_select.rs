@@ -28,10 +28,10 @@ impl Executor {
         }
 
         let values = if for_command.default_positional {
-            if self.positional_params.is_empty() {
+            if self.shell_state.positional_params.is_empty() {
                 Vec::new()
             } else {
-                self.positional_params.clone()
+                self.shell_state.positional_params.clone()
             }
         } else {
             let mut values = Vec::new();
@@ -76,7 +76,7 @@ impl Executor {
         // each per-iteration debug fire; without the reset the fire inherits
         // the last body command's line (dbg-support.tests:146-148 nested for
         // loops report the for head's line on every iteration).
-        let for_line = self.env_vars.get("__RUBASH_CURRENT_LINE").cloned();
+        let for_line = self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE").cloned();
         for value in values {
             // GNU execute_cmd.c:3062-3063 (eval_arith... execute_for_command
             // iteration loop): `set -x` traces the for head once per
@@ -91,7 +91,7 @@ impl Executor {
             // inherit it, execute_cmd.c:5270).
             if self.debug_trap_in_scope() {
                 if let Some(line) = &for_line {
-                    self.env_vars
+                    self.shell_state.env_vars
                         .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
                 }
                 let _ = self.run_debug_trap(&for_text)?;
@@ -107,7 +107,7 @@ impl Executor {
             // (nameref5.sub: `typeset -n v=v1; for v in v1 v2` prints
             // "v1: 1" "v2: 2"). A non-nameref loop variable uses plain
             // bind_variable semantics.
-            let bound_name = if is_marked_var(&self.env_vars, NAMEREF_VARS, &for_command.variable) {
+            let bound_name = if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &for_command.variable) {
                 let value_valid = is_shell_name(&value) || parse_array_subscript(&value).is_some();
                 if !value_valid {
                     eprintln!(
@@ -118,7 +118,7 @@ impl Executor {
                     self.exit_code = 1;
                     return Ok(());
                 }
-                if is_marked_var(&self.env_vars, READONLY_VARS, &for_command.variable) {
+                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &for_command.variable) {
                     eprintln!(
                         "{}{}: readonly variable",
                         self.diagnostic_prefix(),
@@ -127,7 +127,7 @@ impl Executor {
                     self.exit_code = 1;
                     return Ok(());
                 }
-                self.env_vars
+                self.shell_state.env_vars
                     .insert(for_command.variable.clone(), value.clone());
                 for_command.variable.clone()
             } else {
@@ -153,9 +153,9 @@ impl Executor {
             let body = Ast {
                 commands: for_command.body.clone(),
             };
-            self.loop_depth += 1;
+            self.shell_state.loop_depth += 1;
             let result = self.execute_ast(&body);
-            self.loop_depth -= 1;
+            self.shell_state.loop_depth -= 1;
             match result {
                 Ok(()) => {}
                 Err(ExecuteError::Break(level)) if level <= 1 => {
@@ -244,7 +244,7 @@ impl Executor {
                 _ => None,
             };
         }
-        let path = shell_path_to_windows(&target, &self.env_vars);
+        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
         if redirect.append {
             let _ = OpenOptions::new()
                 .create(true)

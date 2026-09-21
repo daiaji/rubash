@@ -429,7 +429,7 @@ impl Executor {
         // element values and odd-position assoc kvlist values take `:`-tilde.
         let base = name.strip_suffix('+').unwrap_or(name);
         let base = base.split('[').next().unwrap_or(base);
-        let assoc = is_marked_var(&self.env_vars, ASSOC_VARS, base);
+        let assoc = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base);
         let tokens: Vec<String> = split_compound_element_words(inner);
         // kvpair_assignment_p (arrayfunc.c:665): a list is kv-pair form when
         // its first element does not open a `[subscript]=` element.
@@ -510,7 +510,7 @@ impl Executor {
             .map(|i| i + 1)
             .unwrap_or(segment.len());
         let (tilde_word, rest) = segment.split_at(word_end);
-        let expanded = tilde_expand::expand_tilde_segment(tilde_word, &self.env_vars);
+        let expanded = tilde_expand::expand_tilde_segment(tilde_word, &self.shell_state.env_vars);
         let mut protected = String::with_capacity(expanded.len() * 2 + rest.len());
         for ch in expanded.chars() {
             if !(ch.is_ascii_alphanumeric()
@@ -1001,7 +1001,7 @@ impl Executor {
             b'0' => self.script_name_value(),
             b'1'..=b'9' => {
                 let index = usize::from(parameter.as_bytes()[0] - b'0' - 1);
-                self.positional_params
+                self.shell_state.positional_params
                     .get(index)
                     .cloned()
                     .unwrap_or_default()
@@ -1011,11 +1011,11 @@ impl Executor {
             // with space, IFS empty joins with nothing), while $@ always
             // joins with a space (subst.c:3006 string_list_dollar_at —
             // PF_ASSIGNRHS || ifs == 0 || *ifs == 0 selects ' ').
-            b'@' => self.positional_params.join(" "),
+            b'@' => self.shell_state.positional_params.join(" "),
             b'*' => self
-                .positional_params
+                .shell_state.positional_params
                 .join(&self.ifs_first_char_separator()),
-            b'#' => self.positional_params.len().to_string(),
+            b'#' => self.shell_state.positional_params.len().to_string(),
             b'?' => self.exit_code.to_string(),
             b'$' => self.shell_pid_value().to_string(),
             b'!' => self.last_background_pid_value(),
@@ -1028,7 +1028,7 @@ impl Executor {
     fn expand_assignment_tilde_if_needed(&self, value: String) -> String {
         if value.contains('=')
             || !tilde_expand::assignment_value_needs_tilde_expansion(&value, true)
-            || (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
+            || (self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
                 && !value.starts_with("~/"))
         {
             return value;
@@ -1148,7 +1148,7 @@ impl Executor {
             let token_stripped = token.trim_matches('\u{E102}');
             if token_stripped == "$@" || token.strip_prefix('\x1d') == Some("${@}") {
                 changed = true;
-                values.extend(self.positional_params.iter().map(|value| store!(value)));
+                values.extend(self.shell_state.positional_params.iter().map(|value| store!(value)));
             } else if let Some(array_name) = token
                 .strip_prefix('\x1d')
                 .and_then(|token| token.strip_prefix("${"))
@@ -1269,7 +1269,7 @@ impl Executor {
                     .unwrap_or(var_name);
                 let storage_opt = self.parameter_array_storage(storage_name);
                 let element_values: Vec<String> = if var_name == "@" || var_name == "*" {
-                    self.positional_params.clone()
+                    self.shell_state.positional_params.clone()
                 } else {
                     match storage_opt {
                         Some(storage) => array_values(&storage),
@@ -1304,7 +1304,7 @@ impl Executor {
                         } else {
                             let fields = field_split_values_with_ifs(
                                 &text,
-                                self.env_vars.get("IFS").map(String::as_str),
+                                self.shell_state.env_vars.get("IFS").map(String::as_str),
                             );
                             if fields.is_empty() {
                                 vec![text]
@@ -1372,7 +1372,7 @@ impl Executor {
                         changed = true;
                         values.extend(
                             positional_parameter_substring_with_zero(
-                                &self.positional_params,
+                                &self.shell_state.positional_params,
                                 &self.script_name_value(),
                                 offset,
                                 length,
@@ -1440,7 +1440,7 @@ impl Executor {
                         let expanded = if name == "0" {
                             Some(self.script_name_value())
                         } else if let Ok(index) = name.parse::<usize>() {
-                            self.positional_params.get(index.saturating_sub(1)).cloned()
+                            self.shell_state.positional_params.get(index.saturating_sub(1)).cloned()
                         } else {
                             None
                         };
@@ -1503,8 +1503,8 @@ impl Executor {
             if is_shell_name(array_name) {
                 let storage_name = self.resolved_variable_name(array_name)?;
                 let storage = self.parameter_array_storage(array_name)?;
-                let keys = if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
-                    assoc_keys(&storage, assoc_nbuckets(&self.env_vars, &storage_name))
+                let keys = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &storage_name) {
+                    assoc_keys(&storage, assoc_nbuckets(&self.shell_state.env_vars, &storage_name))
                 } else {
                     array_indices(&storage)
                 };
@@ -1523,14 +1523,14 @@ impl Executor {
 
         // A nameref indirection yields the referenced NAME itself, not the
         // target value (GNU parameter_brace_expand_indir subst.c:7896).
-        if is_marked_var(&self.env_vars, NAMEREF_VARS, indirect_name) {
+        if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, indirect_name) {
             return None;
         }
         let target_expr = self.resolve_indirect_target_expr(indirect_name)?;
         match target_expr.as_str() {
             "@" => {
                 return Some(
-                    self.positional_params
+                    self.shell_state.positional_params
                         .iter()
                         .map(|value| quote_array_value(value))
                         .collect(),
@@ -1539,7 +1539,7 @@ impl Executor {
             "*" => {
                 return Some(vec![quote_array_value(
                     &self
-                        .positional_params
+                        .shell_state.positional_params
                         .join(&self.ifs_first_char_separator()),
                 )])
             }
@@ -1557,7 +1557,7 @@ impl Executor {
                 return Some(
                     field_split_array_values_with_ifs(
                         values,
-                        self.env_vars.get("IFS").map(String::as_str),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     )
                     .into_iter()
                     .map(|value| quote_array_value(&value))
@@ -1587,7 +1587,7 @@ impl Executor {
             return Some(vec![quote_array_value(&scalar)]);
         }
         Some(
-            field_split_values_with_ifs(&scalar, self.env_vars.get("IFS").map(String::as_str))
+            field_split_values_with_ifs(&scalar, self.shell_state.env_vars.get("IFS").map(String::as_str))
                 .into_iter()
                 .map(|value| quote_array_value(&value))
                 .collect(),
@@ -1631,7 +1631,7 @@ impl Executor {
             ));
         }
         let values =
-            field_split_values_with_ifs(&value, self.env_vars.get("IFS").map(String::as_str))
+            field_split_values_with_ifs(&value, self.shell_state.env_vars.get("IFS").map(String::as_str))
                 .into_iter()
                 .map(|value| {
                     format!(

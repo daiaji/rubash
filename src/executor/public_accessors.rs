@@ -36,7 +36,6 @@ impl Executor {
 
     pub(crate) fn set_exit_code(&mut self, exit_code: i32) {
         self.exit_code = exit_code;
-        self.shell_state.set_exit_code(exit_code);
     }
 
     pub fn set_history_provider(&mut self, provider: crate::history::SharedHistoryProvider) {
@@ -60,7 +59,7 @@ impl Executor {
     /// follow-up; the static-action engine already covers file/path/command/
     /// wordlist completion.
     pub fn complete_line(&self, line: &str, cursor: usize) -> Vec<String> {
-        let function_names: Vec<String> = self.functions.keys().cloned().collect();
+        let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         let job_names: Vec<String> = self
             .job_table
             .jobs
@@ -71,9 +70,9 @@ impl Executor {
         crate::builtins::complete::complete_line_candidates(
             line,
             cursor,
-            &self.completion_specs,
-            &self.env_vars,
-            &self.aliases,
+            &self.shell_state.completion_specs,
+            &self.shell_state.env_vars,
+            &self.shell_state.aliases,
             &function_names,
             &job_names,
         )
@@ -91,7 +90,7 @@ impl Executor {
     /// [`Executor::complete_line`], so they only pay for GNU-engine candidate
     /// generation when a compspec actually applies.
     pub fn has_compspec(&self, command: &str) -> bool {
-        self.completion_specs.get(command).is_some()
+        self.shell_state.completion_specs.get(command).is_some()
     }
 
     pub fn set_external_file_builtins_enabled(&mut self, enabled: bool) {
@@ -105,9 +104,9 @@ impl Executor {
     /// directories used by the shell.
     pub fn set_shell_root(&mut self, root: impl AsRef<std::path::Path>) {
         let value = root.as_ref().to_string_lossy().into_owned();
-        self.env_vars
+        self.shell_state.env_vars
             .insert("__RUBASH_SHELL_ROOT".to_string(), value.clone());
-        self.env_vars.insert("WINUXSH_ROOT".to_string(), value);
+        self.shell_state.env_vars.insert("WINUXSH_ROOT".to_string(), value);
         self.mark_exported("WINUXSH_ROOT");
     }
 
@@ -115,13 +114,13 @@ impl Executor {
     /// are not backed by a file in the configured installation root.
     pub fn set_winuxcmd_path(&mut self, path: impl AsRef<std::path::Path>) {
         let path = path.as_ref();
-        self.env_vars.insert(
+        self.shell_state.env_vars.insert(
             "WINUXCMD_PATH".to_string(),
             path.to_string_lossy().into_owned(),
         );
         self.mark_exported("WINUXCMD_PATH");
         let installation_root = crate::executor::path::winuxcmd_installation_root_from_path(path);
-        self.env_vars.insert(
+        self.shell_state.env_vars.insert(
             "WINUXCMD_HOME".to_string(),
             installation_root.to_string_lossy().into_owned(),
         );
@@ -132,20 +131,20 @@ impl Executor {
     /// fallbacks. Rubash does not probe sh or bash on Windows by default;
     /// host layers must opt in deliberately when they want that compatibility.
     pub fn set_compatible_shell_path(&mut self, path: impl AsRef<std::path::Path>) {
-        self.env_vars.insert(
+        self.shell_state.env_vars.insert(
             crate::executor::path::COMPATIBLE_SHELL_PATH_ENV.to_string(),
             path.as_ref().to_string_lossy().into_owned(),
         );
     }
 
     pub fn clear_compatible_shell_path(&mut self) {
-        self.env_vars
+        self.shell_state.env_vars
             .remove(crate::executor::path::COMPATIBLE_SHELL_PATH_ENV);
     }
 
     /// Resolve a shell-visible path using the executor's current namespace.
     pub fn resolve_shell_path(&self, path: &str) -> std::path::PathBuf {
-        Self::resolve_shell_path_from_env(path, &self.env_vars)
+        Self::resolve_shell_path_from_env(path, &self.shell_state.env_vars)
     }
 
     /// Resolve a shell-visible path using an executor environment snapshot.
@@ -196,7 +195,7 @@ impl Executor {
         } else {
             value.to_string()
         };
-        self.env_vars.insert(name.to_string(), value.clone());
+        self.shell_state.env_vars.insert(name.to_string(), value.clone());
         if is_valid_process_env(name, &value) {
             set_process_env(name, &value);
         }
@@ -218,7 +217,7 @@ impl Executor {
         }
         if name == "__RUBASH_SCRIPT_NAME" {
             let source_value = if self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_TOP_LEVEL_NAME")
                 .is_some_and(|name| name.rsplit(['/', '\\']).next() == Some("bashdb-generated"))
                 && !value.starts_with('/')
@@ -236,16 +235,16 @@ impl Executor {
             // (dbg-support.sub traces "FUNCNAME[1]: source called from
             // ./dbg-support.tests"), so only a top-level script-name change
             // (startup, -c, bashdb launcher) rebinds BASH_SOURCE.
-            if self.env_vars.contains_key("__RUBASH_IN_SOURCE") {
+            if self.shell_state.env_vars.contains_key("__RUBASH_IN_SOURCE") {
                 store_indexed_array(
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     "BASH_SOURCE",
-                    self.bash_source_stack.clone(),
+                    self.shell_state.bash_source_stack.clone(),
                 );
                 return;
             }
-            self.bash_source_stack = vec![source_value.clone()];
-            store_indexed_array(&mut self.env_vars, "BASH_SOURCE", vec![source_value]);
+            self.shell_state.bash_source_stack = vec![source_value.clone()];
+            store_indexed_array(&mut self.shell_state.env_vars, "BASH_SOURCE", vec![source_value]);
         }
     }
 
@@ -261,16 +260,16 @@ impl Executor {
     /// Enable or disable a dispatch builtin without executing shell source.
     /// This allows embedding hosts to apply policy defaults before startup files.
     pub fn set_builtin_disabled(&mut self, name: &str, disabled: bool) {
-        crate::builtins::enable::set_disabled(&mut self.env_vars, name, disabled);
+        crate::builtins::enable::set_disabled(&mut self.shell_state.env_vars, name, disabled);
     }
 
     pub(crate) fn remove_env(&mut self, name: &str) {
-        self.env_vars.remove(name);
+        self.shell_state.env_vars.remove(name);
         env::remove_var(name);
     }
 
     pub fn get_env(&self, name: &str) -> Option<&str> {
-        self.env_vars.get(name).map(|s| s.as_str())
+        self.shell_state.env_vars.get(name).map(|s| s.as_str())
     }
 
     /// Attach the session history list used by scripts that enable history.
@@ -278,19 +277,19 @@ impl Executor {
         &mut self,
         session: Option<std::rc::Rc<std::cell::RefCell<crate::history::SessionHistory>>>,
     ) {
-        self.session_history = session;
+        self.shell_state.session_history = session;
     }
 
     /// Returns a clone of the session history handle, if any.
     pub fn get_session_history(
         &self,
     ) -> Option<std::rc::Rc<std::cell::RefCell<crate::history::SessionHistory>>> {
-        self.session_history.clone()
+        self.shell_state.session_history.clone()
     }
 
     pub(crate) fn push_bash_source(&mut self, source: String) {
         let source = if self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_TOP_LEVEL_NAME")
             .is_some_and(|name| name.rsplit(['/', '\\']).next() == Some("bashdb-generated"))
         {
@@ -305,11 +304,11 @@ impl Executor {
         } else {
             source
         };
-        self.bash_source_stack.insert(0, source);
+        self.shell_state.bash_source_stack.insert(0, source);
         store_indexed_array(
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             "BASH_SOURCE",
-            self.bash_source_stack.clone(),
+            self.shell_state.bash_source_stack.clone(),
         );
     }
 
@@ -325,13 +324,13 @@ impl Executor {
     }
 
     pub(crate) fn pop_bash_source(&mut self) {
-        if !self.bash_source_stack.is_empty() {
-            self.bash_source_stack.remove(0);
+        if !self.shell_state.bash_source_stack.is_empty() {
+            self.shell_state.bash_source_stack.remove(0);
         }
         store_indexed_array(
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             "BASH_SOURCE",
-            self.bash_source_stack.clone(),
+            self.shell_state.bash_source_stack.clone(),
         );
     }
 
@@ -342,26 +341,26 @@ impl Executor {
     /// dbg-support.sub's stack trace shows a "source" frame between
     /// sourced_fn and the sourcing function).
     pub(crate) fn push_source_call_frame(&mut self, call_line: String) {
-        self.function_name_stack.insert(0, "source".to_string());
-        self.bash_lineno_stack.insert(0, call_line);
+        self.shell_state.function_name_stack.insert(0, "source".to_string());
+        self.shell_state.bash_lineno_stack.insert(0, call_line);
         store_indexed_array(
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             "BASH_LINENO",
-            self.bash_lineno_stack.clone(),
+            self.shell_state.bash_lineno_stack.clone(),
         );
     }
 
     pub(crate) fn pop_source_call_frame(&mut self) {
-        if self.function_name_stack.first().map(String::as_str) == Some("source") {
-            self.function_name_stack.remove(0);
+        if self.shell_state.function_name_stack.first().map(String::as_str) == Some("source") {
+            self.shell_state.function_name_stack.remove(0);
         }
-        if !self.bash_lineno_stack.is_empty() {
-            self.bash_lineno_stack.remove(0);
+        if !self.shell_state.bash_lineno_stack.is_empty() {
+            self.shell_state.bash_lineno_stack.remove(0);
         }
         store_indexed_array(
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             "BASH_LINENO",
-            self.bash_lineno_stack.clone(),
+            self.shell_state.bash_lineno_stack.clone(),
         );
     }
 
@@ -444,7 +443,7 @@ impl Executor {
         };
         let saved_env = temporary_env
             .iter()
-            .map(|(name, _)| (name.clone(), self.env_vars.get(name).cloned()))
+            .map(|(name, _)| (name.clone(), self.shell_state.env_vars.get(name).cloned()))
             .collect::<Vec<_>>();
         for (name, value) in temporary_env {
             self.set_env(name, value);
@@ -465,14 +464,14 @@ impl Executor {
     }
 
     pub fn set_shell_option(&mut self, name: &str, enabled: bool) {
-        crate::builtins::set::set_shell_option(&mut self.env_vars, name, enabled);
+        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, name, enabled);
     }
 
     /// GNU shell.c:1587-1601 (open_shell_script): a script filename that is
     /// not found as given and carries no path separator is searched in
     /// $PATH (find_path_file, findcmd.c:258) before the shell gives up.
     pub fn find_script_on_path(&self, name: &str) -> Option<std::path::PathBuf> {
-        crate::executor::path::find_user_command(name, &self.env_vars)
+        crate::executor::path::find_user_command(name, &self.shell_state.env_vars)
     }
 
     pub fn is_shell_option(&self, name: &str) -> bool {
@@ -483,12 +482,12 @@ impl Executor {
         if !crate::builtins::shopt::is_supported_option(name) {
             return false;
         }
-        crate::builtins::shopt::set_option(&mut self.env_vars, name, enabled);
+        crate::builtins::shopt::set_option(&mut self.shell_state.env_vars, name, enabled);
         true
     }
 
     pub(in crate::executor) fn restore_shell_env(&mut self, saved_env: HashMap<String, String>) {
-        let old_names: Vec<String> = self.env_vars.keys().cloned().collect();
+        let old_names: Vec<String> = self.shell_state.env_vars.keys().cloned().collect();
         for name in old_names {
             if !saved_env.contains_key(&name) {
                 env::remove_var(&name);
@@ -503,41 +502,59 @@ impl Executor {
             }
         }
 
-        self.env_vars = saved_env;
+        self.shell_state.env_vars = saved_env;
+    }
+
+    /// GNU execute_cmd.c:1576 execute_in_subshell: a `( )` subshell's parent
+    /// state is the pre-entry ShellState clone — restore it wholesale so
+    /// every semantic field (aliases, functions, scopes, positional params,
+    /// env-carried traps, job bookkeeping) returns to the parent value.
+    /// Process env and cwd are shared in-place resources, so they resync
+    /// separately: restore_shell_env must run before the swap because it
+    /// diffs the child's env_vars against the saved map.
+    pub(in crate::executor) fn restore_flat_subshell(
+        &mut self,
+        saved_state: crate::shell::ShellState,
+        saved_cwd: Option<PathBuf>,
+    ) {
+        self.restore_shell_env(saved_state.env_vars.clone());
+        self.shell_state = saved_state;
+        if let Some(dir) = saved_cwd {
+            let _ = env::set_current_dir(dir);
+        }
     }
 
     pub fn aliases_snapshot(&self) -> HashMap<String, String> {
-        self.aliases
+        self.shell_state.aliases
             .iter()
             .map(|(name, alias)| (name.clone(), alias.value.clone()))
             .collect()
     }
 
     pub fn functions_snapshot(&self) -> Vec<String> {
-        let mut names = self.functions.keys().cloned().collect::<Vec<_>>();
+        let mut names = self.shell_state.functions.keys().cloned().collect::<Vec<_>>();
         names.sort();
         names
     }
 
     pub fn env_vars_snapshot(&self) -> HashMap<String, String> {
-        self.env_vars.clone()
+        self.shell_state.env_vars.clone()
     }
 
     pub(crate) fn env_vars(&self) -> &HashMap<String, String> {
-        &self.env_vars
+        &self.shell_state.env_vars
     }
 
     pub(crate) fn positional_params(&self) -> Vec<String> {
-        self.positional_params.clone()
+        self.shell_state.positional_params.clone()
     }
 
     pub fn set_positional_params(&mut self, positional_params: Vec<String>) {
-        self.shell_state.positional.set(positional_params.clone());
-        self.positional_params = positional_params;
+        self.shell_state.positional_params = positional_params;
     }
 
     pub fn inherit_process_stdin(&mut self) {
-        self.env_vars
+        self.shell_state.env_vars
             .insert(INHERIT_PROCESS_STDIN.to_string(), "1".to_string());
     }
 
@@ -574,7 +591,7 @@ impl Executor {
     pub(in crate::executor) fn set_current_line(&mut self, cmd: &CommandNode) {
         if let Some(line) = cmd.line {
             let line = line.to_string();
-            self.env_vars
+            self.shell_state.env_vars
                 .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
             if command_needs_process_line_env(cmd) {
                 set_process_env("__RUBASH_CURRENT_LINE", line);
@@ -598,13 +615,13 @@ impl Executor {
             return;
         }
         let command = bash_command_text(cmd);
-        self.env_vars
+        self.shell_state.env_vars
             .insert("__RUBASH_LAST_COMMAND".to_string(), command.clone());
         if !command_references_bash_command(cmd) {
-            self.env_vars.remove("__RUBASH_CURRENT_COMMAND");
+            self.shell_state.env_vars.remove("__RUBASH_CURRENT_COMMAND");
             return;
         }
-        self.env_vars
+        self.shell_state.env_vars
             .insert("__RUBASH_CURRENT_COMMAND".to_string(), command);
     }
 
@@ -612,16 +629,15 @@ impl Executor {
     where
         I: IntoIterator<Item = i32>,
     {
-        self.pipestatus.clear();
-        self.pipestatus.extend(statuses);
-        if self.pipestatus.is_empty() {
-            self.pipestatus.push(0);
+        self.shell_state.pipestatus.clear();
+        self.shell_state.pipestatus.extend(statuses);
+        if self.shell_state.pipestatus.is_empty() {
+            self.shell_state.pipestatus.push(0);
         }
-        self.shell_state.set_pipestatus(self.pipestatus.clone());
     }
 
     pub(in crate::executor) fn pipestatus_values(&self) -> Vec<String> {
-        self.pipestatus.iter().map(i32::to_string).collect()
+        self.shell_state.pipestatus.iter().map(i32::to_string).collect()
     }
 
     pub(crate) fn diagnostic_prefix(&self) -> String {
@@ -631,8 +647,8 @@ impl Executor {
         // input-stream segment. The "-c:" segment is exclusive to
         // parser_error (error.c:300-316) which appends yy_input_name().
         if let (Some(script), Some(line)) = (
-            self.env_vars.get("__RUBASH_SCRIPT_NAME"),
-            self.env_vars.get("__RUBASH_CURRENT_LINE"),
+            self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"),
+            self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"),
         ) {
             // GNU error.c report_prolog prints only get_name_for_error() —
             // the "eval:" input-name segment is exclusive to parser_error
@@ -656,12 +672,12 @@ impl Executor {
     /// "bash: -c: line N:". For script files the stream name equals the script
     /// name, so no extra segment appears.
     pub(crate) fn parser_diagnostic_prefix(&self) -> String {
-        let is_c = self.env_vars.contains_key("__RUBASH_IS_C");
+        let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         if let (Some(script), Some(line)) = (
-            self.env_vars.get("__RUBASH_SCRIPT_NAME"),
-            self.env_vars.get("__RUBASH_CURRENT_LINE"),
+            self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"),
+            self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"),
         ) {
-            if self.env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
+            if self.shell_state.env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
                 return format!("{script}: eval: line {line}: ");
             }
             if is_c {
@@ -670,7 +686,7 @@ impl Executor {
             return format!("{script}: line {line}: ");
         }
         if is_c {
-            if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
+            if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
                 return format!("{script}: -c: line 1: ");
             }
             return "bash: -c: line 1: ".to_string();
@@ -680,7 +696,7 @@ impl Executor {
     }
 
     pub fn diagnostic_prefix_for_line(&self, line: usize) -> String {
-        if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
+        if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             return format!("{script}: line {line}: ");
         }
 
@@ -690,16 +706,16 @@ impl Executor {
     /// Parser/syntax-error diagnostic prefix for a specific line. Like
     /// parser_diagnostic_prefix but for a caller-supplied line number.
     pub fn parser_diagnostic_prefix_for_line(&self, line: usize) -> String {
-        let is_c = self.env_vars.contains_key("__RUBASH_IS_C");
+        let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         // error.c yy_input_name: inside `eval` the input stream name is
         // "eval" and overrides the -c tag (`bash: eval: line N:`).
-        if self.env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
-            if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
+        if self.shell_state.env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
+            if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
                 return format!("{script}: eval: line {line}: ");
             }
             return format!("bash: eval: line {line}: ");
         }
-        if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
+        if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             if is_c {
                 return format!("{script}: -c: line {line}: ");
             }

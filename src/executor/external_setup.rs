@@ -205,7 +205,7 @@ impl Executor {
             // the pipe, not block on the console).
             if redirect.fd.unwrap_or(0) == 0
                 && redirect_target_fd(&target) == Some(0)
-                && (self.env_vars.contains_key(FUNCTION_STDIN)
+                && (self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
                     || self.virtual_fd_stdin_remaining(0).is_some())
             {
                 process.stdin(Stdio::piped());
@@ -219,14 +219,14 @@ impl Executor {
                     .create(true)
                     .read(true)
                     .write(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?
             } else {
                 self.open_input_redirect(&target)?
             };
             if redirect.fd.unwrap_or(0) == 0 {
                 process.stdin(Stdio::from(file));
             }
-        } else if self.env_vars.contains_key(FUNCTION_STDIN)
+        } else if self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
             || self.virtual_fd_stdin_remaining(0).is_some()
         {
             process.stdin(Stdio::piped());
@@ -354,7 +354,7 @@ impl Executor {
                             let path = self.write_process_substitution_temp_bytes(&input)?;
                             let input_len = self.virtual_fd_stdin_len(fd);
                             self.fd_table.consume_all_text(fd);
-                            self.env_vars.insert(fd_stdin_offset_key(fd), input_len);
+                            self.shell_state.env_vars.insert(fd_stdin_offset_key(fd), input_len);
                             redirect.target = shell_display_path(&path.to_string_lossy());
                             files.inputs.push(path);
                         } else if let Some(MaterializedRead::File(path)) = self
@@ -616,7 +616,7 @@ impl Executor {
         let path = self.write_process_substitution_temp_bytes(&input)?;
         let input_len = self.virtual_fd_stdin_len(0);
         self.fd_table.consume_all_text(0);
-        self.env_vars.insert(fd_stdin_offset_key(0), input_len);
+        self.shell_state.env_vars.insert(fd_stdin_offset_key(0), input_len);
         let target = shell_display_path(&path.to_string_lossy());
         rewritten.redirect_in = Some(Redirect {
             fd: Some(0),
@@ -707,7 +707,7 @@ impl Executor {
         let Some(source) = self.assignment_output_process_substitutions.remove(target) else {
             return Ok(());
         };
-        let path = shell_path_to_windows(target, &self.env_vars);
+        let path = shell_path_to_windows(target, &self.shell_state.env_vars);
         let input = fs::read_to_string(&path).unwrap_or_default();
         self.execute_persistent_output_process_substitution(&source, input)?;
         let _ = fs::remove_file(path);
@@ -733,27 +733,27 @@ impl Executor {
         let input = fs::read(&output.path).unwrap_or_default();
         let tokens = crate::lexer::tokenize(&output.source);
         let ast = crate::parser::parse(&tokens);
-        let old_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
-        let old_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        let old_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+        let old_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
         let old_fd0 = self.fd_table.entries.get(&0).cloned();
         let fd0_key = fd_stdin_key(0);
         let fd0_offset_key = fd_stdin_offset_key(0);
         let fd0_dynamic_key = fd_dynamic_input_key(0);
         let fd0_closed_key = fd_closed_key(0);
-        let old_fd0_stdin = self.env_vars.get(&fd0_key).cloned();
-        let old_fd0_offset = self.env_vars.get(&fd0_offset_key).cloned();
-        let old_fd0_dynamic = self.env_vars.get(&fd0_dynamic_key).cloned();
-        let old_fd0_closed = self.env_vars.get(&fd0_closed_key).cloned();
+        let old_fd0_stdin = self.shell_state.env_vars.get(&fd0_key).cloned();
+        let old_fd0_offset = self.shell_state.env_vars.get(&fd0_offset_key).cloned();
+        let old_fd0_dynamic = self.shell_state.env_vars.get(&fd0_dynamic_key).cloned();
+        let old_fd0_closed = self.shell_state.env_vars.get(&fd0_closed_key).cloned();
         self.set_fd_input_bytes(0, input.clone(), false);
         if std::str::from_utf8(&input).is_ok() {
-            self.env_vars.insert(
+            self.shell_state.env_vars.insert(
                 FUNCTION_STDIN.to_string(),
                 crate::executor::substitution_metadata::bytes_to_shell_text(&input),
             );
         } else {
-            self.env_vars.remove(FUNCTION_STDIN);
+            self.shell_state.env_vars.remove(FUNCTION_STDIN);
         }
-        self.env_vars
+        self.shell_state.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
         let result = self.execute_ast(&ast);
         // GNU process_substitute forks for `>(...)` as well (subst.c:6362),
@@ -776,12 +776,12 @@ impl Executor {
                 self.fd_table.entries.remove(&0);
             }
         }
-        restore_optional_env_var(&mut self.env_vars, &fd0_key, old_fd0_stdin);
-        restore_optional_env_var(&mut self.env_vars, &fd0_offset_key, old_fd0_offset);
-        restore_optional_env_var(&mut self.env_vars, &fd0_dynamic_key, old_fd0_dynamic);
-        restore_optional_env_var(&mut self.env_vars, &fd0_closed_key, old_fd0_closed);
-        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
-        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN_OFFSET, old_offset);
+        restore_optional_env_var(&mut self.shell_state.env_vars, &fd0_key, old_fd0_stdin);
+        restore_optional_env_var(&mut self.shell_state.env_vars, &fd0_offset_key, old_fd0_offset);
+        restore_optional_env_var(&mut self.shell_state.env_vars, &fd0_dynamic_key, old_fd0_dynamic);
+        restore_optional_env_var(&mut self.shell_state.env_vars, &fd0_closed_key, old_fd0_closed);
+        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
+        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN_OFFSET, old_offset);
         result
     }
 
@@ -795,11 +795,11 @@ impl Executor {
 
     fn process_substitution_temp_path(&self) -> Result<PathBuf, ExecuteError> {
         let dir_value = self
-            .env_vars
+            .shell_state.env_vars
             .get("TMPDIR")
             .cloned()
             .unwrap_or_else(safe_temp_dir_string);
-        let mut dir = shell_path_to_windows(&dir_value, &self.env_vars);
+        let mut dir = shell_path_to_windows(&dir_value, &self.shell_state.env_vars);
         if !dir.exists() {
             fs::create_dir_all(&dir)?;
         }
@@ -832,15 +832,15 @@ impl Executor {
     pub(in crate::executor) fn register_process_substitution_status(&mut self, status: i32) {
         const PROCSUB_SEQ_KEY: &str = "RUBASH_INTERNAL_PROCSUB_SEQ";
         let seq = self
-            .env_vars
+            .shell_state.env_vars
             .get(PROCSUB_SEQ_KEY)
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(0);
-        self.env_vars
+        self.shell_state.env_vars
             .insert(PROCSUB_SEQ_KEY.to_string(), seq.wrapping_add(1).to_string());
         let pid = self.shell_pid.wrapping_add(0x4000_0000).wrapping_add(seq);
         self.job_table.completed_statuses.insert(pid, status);
-        self.last_background_pid = Some(pid);
+        self.shell_state.last_background_pid = Some(pid);
     }
 
     pub(in crate::executor) fn write_process_substitution_temp_bytes(

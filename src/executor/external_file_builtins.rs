@@ -83,7 +83,7 @@ impl Executor {
                 mode_value_pending = false;
                 continue;
             }
-            fs::create_dir_all(shell_path_to_windows(&expanded, &self.env_vars))?;
+            fs::create_dir_all(shell_path_to_windows(&expanded, &self.shell_state.env_vars))?;
         }
         self.exit_code = 0;
         Ok(true)
@@ -96,7 +96,7 @@ impl Executor {
         let mut failed = false;
         for path in &cmd.words[1..] {
             let expanded = self.expand_word(path);
-            let target = shell_path_to_windows(&expanded, &self.env_vars);
+            let target = shell_path_to_windows(&expanded, &self.shell_state.env_vars);
             if let Err(error) = File::create(target) {
                 eprintln!(
                     "{}touch: cannot touch '{}': {}",
@@ -272,7 +272,7 @@ impl Executor {
         }
 
         let destination_word = &effective[effective.len() - 1];
-        let destination = shell_path_to_windows(destination_word, &self.env_vars);
+        let destination = shell_path_to_windows(destination_word, &self.shell_state.env_vars);
 
         // GNU null-device semantics: coreutils copy.c opens the destination
         // and the write goes nowhere, so `cp FILE /dev/null` succeeds without
@@ -324,7 +324,7 @@ impl Executor {
                 }
                 continue;
             }
-            let source = shell_path_to_windows(source_word, &self.env_vars);
+            let source = shell_path_to_windows(source_word, &self.shell_state.env_vars);
             let (target, target_display) = if destination.is_dir() {
                 let Some(name) = source.file_name() else {
                     let _ = writeln!(
@@ -430,7 +430,7 @@ impl Executor {
         let mut stderr = Vec::new();
         for path in cmd.words.iter().skip(1).filter(|arg| !arg.starts_with('-')) {
             let expanded = self.expand_word(path);
-            let target = shell_path_to_windows(&expanded, &self.env_vars);
+            let target = shell_path_to_windows(&expanded, &self.shell_state.env_vars);
             let result = if target.is_dir() {
                 fs::remove_dir_all(&target)
             } else {
@@ -464,7 +464,7 @@ impl Executor {
         for path in &cmd.words[1..] {
             let _ = fs::remove_dir(shell_path_to_windows(
                 &self.expand_word(path),
-                &self.env_vars,
+                &self.shell_state.env_vars,
             ));
         }
         self.exit_code = 0;
@@ -508,7 +508,7 @@ impl Executor {
                 let mut file = OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                 file.write_all(&output)?;
                 self.exit_code = 0;
                 return Ok(true);
@@ -532,7 +532,7 @@ impl Executor {
             let mut output = Vec::new();
             for word in cat_file_operands(cmd) {
                 let target = self.expand_word(word);
-                match fs::read(shell_path_to_windows(&target, &self.env_vars)) {
+                match fs::read(shell_path_to_windows(&target, &self.shell_state.env_vars)) {
                     Ok(bytes) => output.extend(bytes),
                     Err(_) => {
                         let mut stderr = Vec::new();
@@ -568,7 +568,7 @@ impl Executor {
             if cmd.redirect_in.is_none()
                 && cmd.heredoc.is_none()
                 && cmd.here_string.is_none()
-                && self.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) == Some("1")
+                && self.shell_state.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) == Some("1")
             {
                 return self.stream_inherited_cat(cmd);
             }
@@ -581,7 +581,7 @@ impl Executor {
         let mut output = Vec::new();
         for word in cat_file_operands(cmd) {
             let target = self.expand_word(word);
-            match fs::read(shell_path_to_windows(&target, &self.env_vars)) {
+            match fs::read(shell_path_to_windows(&target, &self.shell_state.env_vars)) {
                 Ok(bytes) => output.extend(bytes),
                 Err(_) => {
                     let mut stderr = Vec::new();
@@ -649,7 +649,7 @@ impl Executor {
 
     fn external_mkfifo(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
         for path in &cmd.words[1..] {
-            let target = shell_path_to_windows(&self.expand_word(path), &self.env_vars);
+            let target = shell_path_to_windows(&self.expand_word(path), &self.shell_state.env_vars);
             let _ = File::create(target)?;
         }
         self.exit_code = 0;
@@ -972,7 +972,7 @@ impl Executor {
         };
         let mut failures = 0usize;
         for file in &files {
-            let windows = crate::executor::path::shell_path_to_windows(file, &self.env_vars)
+            let windows = crate::executor::path::shell_path_to_windows(file, &self.shell_state.env_vars)
                 .to_string_lossy()
                 .to_string();
             // DrvFs (any Windows drive or \\wsl$ UNC) does not support POSIX
@@ -989,11 +989,11 @@ impl Executor {
             if is_drive || windows.starts_with("\\\\wsl$") || windows.starts_with("//wsl$") {
                 continue;
             }
-            let base = crate::builtins::test::emulated_file_mode(file, &self.env_vars)
+            let base = crate::builtins::test::emulated_file_mode(file, &self.shell_state.env_vars)
                 .unwrap_or_else(|| self.default_emulated_mode(&windows));
             match apply_chmod_mode(base, mode) {
                 Some(new_mode) => {
-                    store_emulated_file_mode(&mut self.env_vars, &windows, new_mode);
+                    store_emulated_file_mode(&mut self.shell_state.env_vars, &windows, new_mode);
                 }
                 None => {
                     failures += 1;

@@ -21,7 +21,7 @@ impl Executor {
         let name = assignment.name.as_str();
         let raw_subscript = assignment.subscript_metadata.raw.as_str();
         let associative =
-            is_marked_var(&self.env_vars, ASSOC_VARS, name) || self.is_assoc_parameter_array(name);
+            is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) || self.is_assoc_parameter_array(name);
         if !associative {
             return None;
         }
@@ -210,7 +210,7 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             }
-            self.aliases
+            self.shell_state.aliases
                 .insert(alias_name.to_string(), Alias::new(value));
             self.sync_dynamic_assoc_vars();
             self.exit_code = 0;
@@ -225,7 +225,7 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             };
-            crate::builtins::pushd::set_stack_value(&mut self.env_vars, index, value.to_string());
+            crate::builtins::pushd::set_stack_value(&mut self.shell_state.env_vars, index, value.to_string());
             self.exit_code = 0;
             return true;
         }
@@ -242,7 +242,7 @@ impl Executor {
                 .trim_end_matches(']')
                 .trim_matches('\'')
                 .trim_matches('"');
-            crate::builtins::hash::set_hashed_path(&mut self.env_vars, command_name, value);
+            crate::builtins::hash::set_hashed_path(&mut self.shell_state.env_vars, command_name, value);
             self.sync_dynamic_assoc_vars();
             self.exit_code = 0;
             return true;
@@ -263,12 +263,12 @@ impl Executor {
             self.exit_code = 1;
             return true;
         }
-        if is_marked_var(&self.env_vars, READONLY_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
             eprintln!("{}{}: readonly variable", self.diagnostic_prefix(), name);
             self.exit_code = 1;
             return true;
         }
-        if is_marked_var(&self.env_vars, ASSOC_VARS, name) || self.is_assoc_parameter_array(name) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) || self.is_assoc_parameter_array(name) {
             // GNU arrayfunc.c:392-408 assign_array_element_internal: the
             // subscript gets exactly one expand_subscript_string pass and
             // the result is the literal key — a `$(...)` produced by that
@@ -290,7 +290,7 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             }
-            let current = self.env_vars.get(name).cloned().unwrap_or_default();
+            let current = self.shell_state.env_vars.get(name).cloned().unwrap_or_default();
             let mut entries = assoc_entries(&current);
             let value = if append {
                 let current = entries
@@ -300,7 +300,7 @@ impl Executor {
                         (entry_key == &key).then_some(entry_value.as_str())
                     })
                     .unwrap_or_default();
-                if is_marked_var(&self.env_vars, INTEGER_VARS, name) {
+                if is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name) {
                     // GNU bind_array_variable att_integer append adds the two
                     // expressions arithmetically (wheat[foo bar]+=7 with
                     // wheat[foo bar]=9 stores 16, not the concat-eval 97).
@@ -317,7 +317,7 @@ impl Executor {
             // array carries the integer attribute, the value is evaluated as an
             // arithmetic expression before being stored (assoc.tests:
             // declare -Ai chaff; chaff[one]=3+7 stores 10, not 3+7).
-            let value = if is_marked_var(&self.env_vars, INTEGER_VARS, name) {
+            let value = if is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name) {
                 self.eval_integer_assignment_value(&value).to_string()
             } else {
                 value
@@ -345,7 +345,7 @@ impl Executor {
                     .collect::<Vec<_>>()
                     .join(" ")
             );
-            self.env_vars.insert(name.to_string(), new_value);
+            self.shell_state.env_vars.insert(name.to_string(), new_value);
             self.exit_code = 0;
             return true;
         }
@@ -436,7 +436,7 @@ impl Executor {
         };
         if computed_index < 0
             && resolve_indexed_array_subscript(
-                &self.env_vars.get(name).cloned().unwrap_or_default(),
+                &self.shell_state.env_vars.get(name).cloned().unwrap_or_default(),
                 computed_index,
             )
             .is_none()
@@ -450,7 +450,7 @@ impl Executor {
             return true;
         }
 
-        let current = self.env_vars.get(name).cloned().unwrap_or_default();
+        let current = self.shell_state.env_vars.get(name).cloned().unwrap_or_default();
         let index = if computed_index < 0 {
             let Some(index) = resolve_indexed_array_subscript(&current, computed_index) else {
                 eprintln!(
@@ -471,7 +471,7 @@ impl Executor {
         let mut entries = indexed_array_entries(&current);
         let current_element = entries.get(&index).cloned().unwrap_or_default();
         let element = if append {
-            if is_marked_var(&self.env_vars, INTEGER_VARS, name) {
+            if is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name) {
                 (eval_arith_value(&current_element) + eval_arith_value(value)).to_string()
             } else {
                 append_scalar_value(&current_element, value)
@@ -479,15 +479,15 @@ impl Executor {
         } else {
             value.to_string()
         };
-        let element = if is_marked_var(&self.env_vars, INTEGER_VARS, name) {
+        let element = if is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name) {
             eval_arith_value(&element).to_string()
         } else {
             element
         };
         entries.insert(index, element);
-        self.env_vars
+        self.shell_state.env_vars
             .insert(name.to_string(), format_indexed_array_storage(entries));
-        mark_env_name(&mut self.env_vars, ARRAY_VARS, name);
+        mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, name);
         self.exit_code = 0;
         true
     }

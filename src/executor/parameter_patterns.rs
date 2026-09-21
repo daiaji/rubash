@@ -36,7 +36,7 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| indirect_name.strip_suffix("[*]"));
         if ref_name.is_none() {
-            let target_name = self.env_vars.get(indirect_name)?;
+            let target_name = self.shell_state.env_vars.get(indirect_name)?;
             if transform == ParameterTransform::Assignment {
                 return Some(self.parameter_assignment_transform(target_name));
             }
@@ -52,9 +52,9 @@ impl Executor {
             let value = self
                 .array_element_parameter_value(target_name)
                 .or_else(|| {
-                    self.env_vars.get(target_name).and_then(|value| {
+                    self.shell_state.env_vars.get(target_name).and_then(|value| {
                         if is_array_storage(value)
-                            || is_marked_array_var(&self.env_vars, target_name)
+                            || is_marked_array_var(&self.shell_state.env_vars, target_name)
                         {
                             array_value_at(value, 0)
                         } else {
@@ -66,20 +66,20 @@ impl Executor {
             return Some(self.apply_parameter_transform_value(&value, transform));
         }
         let ref_name = ref_name?;
-        let target_name = self.env_vars.get(ref_name)?;
+        let target_name = self.shell_state.env_vars.get(ref_name)?;
         let value = if let Some(array_expr) = target_name
             .strip_suffix("[@]")
             .or_else(|| target_name.strip_suffix("[*]"))
         {
-            self.env_vars
+            self.shell_state.env_vars
                 .get(array_expr)
                 .and_then(|value| array_value_at(value, 0))
                 .unwrap_or_default()
         } else {
-            self.env_vars
+            self.shell_state.env_vars
                 .get(target_name)
                 .and_then(|value| {
-                    if is_array_storage(value) || is_marked_array_var(&self.env_vars, target_name) {
+                    if is_array_storage(value) || is_marked_array_var(&self.shell_state.env_vars, target_name) {
                         array_value_at(value, 0)
                     } else {
                         Some(value.clone())
@@ -99,7 +99,7 @@ impl Executor {
         let pattern = self.expand_parameter_pattern_word(pattern);
         if matches!(var_name, "@" | "*") {
             let result = self
-                .positional_params
+                .shell_state.positional_params
                 .iter()
                 .map(|value| {
                     remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
@@ -120,7 +120,7 @@ impl Executor {
 
         if let Ok(index) = var_name.parse::<usize>() {
             return Some(
-                self.positional_params
+                self.shell_state.positional_params
                     .get(index.saturating_sub(1))
                     .map(|value| {
                         remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
@@ -180,13 +180,13 @@ impl Executor {
     /// nocasematch shopt state for pattern substitution (GNU subst.c applies
     /// FNMATCH_IGNCASE in match_upattern when nocasematch is set).
     pub(in crate::executor) fn nocasematch_enabled(&self) -> bool {
-        crate::builtins::shopt::option_enabled(&self.env_vars, "nocasematch")
+        crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "nocasematch")
     }
 
     /// extglob shopt state for pattern removal (GNU subst.c match_upattern
     /// passes FNM_EXTMATCH when the extglob option is on).
     pub(in crate::executor) fn extglob_enabled(&self) -> bool {
-        crate::builtins::shopt::option_enabled(&self.env_vars, "extglob")
+        crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extglob")
     }
 
     pub(in crate::executor) fn parameter_pattern_scalar_value(&self, name: &str) -> Option<String> {
@@ -210,19 +210,19 @@ impl Executor {
                 .array_element_parameter_value(&resolved)
                 .map(|value| dequote_storage_marks(&value));
         }
-        let value = self.env_vars.get(&resolved)?;
+        let value = self.shell_state.env_vars.get(&resolved)?;
         // GNU subst.c resolves a bare array name to one element, not the whole
         // array (get_var_and_type -> VT_ARRAYVAR): associative arrays read key
         // "0" (assoc_cell), indexed arrays read element [0] (array_cell). Expanding
         // the raw storage marker here leaks ([FOO]=BAR) where GNU prints the
         // element value or empty when key "0" is absent.
-        if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved) {
             return Some(dequote_storage_marks(
                 &assoc_value_at(value, "0").unwrap_or_default(),
             ));
         }
 
-        if is_marked_var(&self.env_vars, ARRAY_VARS, &resolved) {
+        if is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, &resolved) {
             return Some(dequote_storage_marks(
                 &array_value_at(value, 0)
                     .or_else(|| assoc_value_at(value, "0"))
@@ -345,7 +345,7 @@ impl Executor {
         };
         let array_name = array_name.as_str();
         if !is_shell_name(array_name)
-            || is_marked_var(&self.env_vars, READONLY_VARS, array_name)
+            || is_marked_var(&self.shell_state.env_vars, READONLY_VARS, array_name)
             || is_noassign_bash_array(array_name)
         {
             return false;
@@ -354,7 +354,7 @@ impl Executor {
         // Integer/uppercase/lowercase attributes transform the stored value
         // exactly like the declare assignment path does (arrayfunc.c). This
         // applies to both indexed and associative arrays.
-        let value = if is_marked_var(&self.env_vars, INTEGER_VARS, array_name) {
+        let value = if is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, array_name) {
             match self.eval_arithmetic_expansion_value(&value) {
                 Some(evaluated) => evaluated.to_string(),
                 None => value,
@@ -362,17 +362,17 @@ impl Executor {
         } else {
             value
         };
-        let value = if is_marked_var(&self.env_vars, UPPERCASE_VARS, array_name) {
+        let value = if is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, array_name) {
             value.to_uppercase()
-        } else if is_marked_var(&self.env_vars, LOWERCASE_VARS, array_name) {
+        } else if is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, array_name) {
             value.to_lowercase()
         } else {
             value
         };
 
-        if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name) {
             let key = self.assoc_subscript_key(key);
-            let current = self.env_vars.get(array_name).cloned().unwrap_or_default();
+            let current = self.shell_state.env_vars.get(array_name).cloned().unwrap_or_default();
             let mut entries = assoc_entries(&current);
             if let Some((_, entry_value)) = entries
                 .iter_mut()
@@ -383,7 +383,7 @@ impl Executor {
             } else {
                 entries.push((key, value));
             }
-            self.env_vars
+            self.shell_state.env_vars
                 .insert(array_name.to_string(), format_assoc_storage(entries));
             return true;
         }
@@ -417,14 +417,14 @@ impl Executor {
             return false;
         };
 
-        let current = self.env_vars.get(array_name).cloned().unwrap_or_default();
+        let current = self.shell_state.env_vars.get(array_name).cloned().unwrap_or_default();
         let mut entries = indexed_array_entries(&current);
         entries.insert(index, value);
-        self.env_vars.insert(
+        self.shell_state.env_vars.insert(
             array_name.to_string(),
             format_indexed_array_storage(entries),
         );
-        mark_env_name(&mut self.env_vars, ARRAY_VARS, array_name);
+        mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, array_name);
         true
     }
 }

@@ -3,7 +3,7 @@ use super::*;
 impl Executor {
     pub(in crate::executor) fn update_underscore_parameter(&mut self, cmd: &CommandNode) {
         if let Some(value) = cmd.words.last() {
-            self.env_vars.insert("_".to_string(), value.clone());
+            self.shell_state.env_vars.insert("_".to_string(), value.clone());
         }
     }
 
@@ -165,7 +165,7 @@ impl Executor {
             if word_is_unquoted_array_list_expansion(word) {
                 return Ok(field_split_array_values_with_ifs(
                     values,
-                    self.env_vars.get("IFS").map(String::as_str),
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                 ));
             }
             return Ok(values);
@@ -213,7 +213,7 @@ impl Executor {
             return Ok(vec![expanded]);
         }
         // Apply glob expansion for for-loop words
-        match glob::pathname_expand_word(&expanded, &self.env_vars) {
+        match glob::pathname_expand_word(&expanded, &self.shell_state.env_vars) {
             glob::PathnameExpansion::Matches(matches) => Ok(matches),
             glob::PathnameExpansion::NoMatch => Ok(vec![expanded]),
             glob::PathnameExpansion::Fail(pattern) => Err(pattern),
@@ -221,7 +221,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn field_split_values(&self, value: &str) -> Vec<String> {
-        field_split_values_with_ifs(value, self.env_vars.get("IFS").map(String::as_str))
+        field_split_values_with_ifs(value, self.shell_state.env_vars.get("IFS").map(String::as_str))
     }
 
     pub(in crate::executor) fn expand_escaped_indirect_parameter_literal(

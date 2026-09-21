@@ -95,7 +95,7 @@ impl Executor {
                         if is_valid_read_name(
                             &cmd.words[index],
                             self.word_is_arrayref(cmd, index),
-                            &self.env_vars,
+                            &self.shell_state.env_vars,
                         ) {
                             scalar_names.push(crate::builtins::arrayref::take_arrayref_flag(&cmd.words[index]).1.to_string());
 
@@ -1844,7 +1844,7 @@ impl Executor {
                 }
                 word if !stop_scalar_names => {
 
-                    if is_valid_read_name(word, self.word_is_arrayref(cmd, index), &self.env_vars) {
+                    if is_valid_read_name(word, self.word_is_arrayref(cmd, index), &self.shell_state.env_vars) {
                         scalar_names.push(crate::builtins::arrayref::take_arrayref_flag(word).1.to_string());
 
                         scalar_field_count += 1;
@@ -1905,7 +1905,7 @@ impl Executor {
         // the target, and an element/invalid cell fails sh_invalidid
         // (nameref18.sub `read -a ref` where ref -> `XXX[0]`).
         if let Some(name) = array_name.clone() {
-            if is_marked_var(&self.env_vars, NAMEREF_VARS, &name) {
+            if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &name) {
                 match self.nameref_resolution(&name) {
                     NamerefResolution::Target(target) => {
                         if parse_array_subscript(&target).is_some() {
@@ -1919,14 +1919,14 @@ impl Executor {
                         array_name = Some(target);
                     }
                     NamerefResolution::Unresolved => {
-                        let cell = self.env_vars.get(&name).cloned().unwrap_or_default();
+                        let cell = self.shell_state.env_vars.get(&name).cloned().unwrap_or_default();
                         if cell.is_empty() {
                             let _ = writeln!(
                                 &mut stderr,
                                 "{}warning: {name}: removing nameref attribute",
                                 self.diagnostic_prefix()
                             );
-                            unmark_env_name(&mut self.env_vars, NAMEREF_VARS, &name);
+                            unmark_env_name(&mut self.shell_state.env_vars, NAMEREF_VARS, &name);
                             // The buffered stderr is only emitted on the
                             // error path; GNU writes the warning at once, so
                             // flush it before continuing to a successful read.
@@ -1957,8 +1957,8 @@ impl Executor {
                     .shell_state
                     .variables
                     .replace_indexed_array(&name, std::iter::empty::<String>());
-                self.env_vars.insert(name.clone(), read_array_storage(&[]));
-                mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+                self.shell_state.env_vars.insert(name.clone(), read_array_storage(&[]));
+                mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
                 return if invalid_name {
                     self.finish_read_error(cmd, &stderr, 1)
                 } else {
@@ -1997,7 +1997,7 @@ impl Executor {
             // is not an indexed array (e.g., an associative array) reports
             // `read: A: not an indexed array` and does not read into it
             // (array33.sub:52 `read -a A` on `declare -A A`).
-            if is_marked_var(&self.env_vars, ASSOC_VARS, &name) {
+            if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &name) {
                 let _ = writeln!(
                     &mut stderr,
                     "{}read: {name}: not an indexed array",
@@ -2010,8 +2010,8 @@ impl Executor {
                     .shell_state
                     .variables
                     .replace_indexed_array(&name, std::iter::empty::<String>());
-                self.env_vars.insert(name.clone(), read_array_storage(&[]));
-                mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+                self.shell_state.env_vars.insert(name.clone(), read_array_storage(&[]));
+                mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
                 return 0;
             }
 
@@ -2034,17 +2034,17 @@ impl Executor {
                         .shell_state
                         .variables
                         .replace_indexed_array(&name, std::iter::empty::<String>());
-                    self.env_vars.insert(name.clone(), read_array_storage(&[]));
-                    mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+                    self.shell_state.env_vars.insert(name.clone(), read_array_storage(&[]));
+                    mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
                     return 1;
                 }
             };
             let values = if raw {
-                split_read_array_words(&final_line, self.env_vars.get("IFS").map(String::as_str))
+                split_read_array_words(&final_line, self.shell_state.env_vars.get("IFS").map(String::as_str))
             } else {
                 split_read_array_words_with_backslashes(
                     &final_line,
-                    self.env_vars.get("IFS").map(String::as_str),
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                 )
             };
             let value = read_array_storage(&values);
@@ -2052,8 +2052,8 @@ impl Executor {
                 .shell_state
                 .variables
                 .replace_indexed_array(&name, values);
-            self.env_vars.insert(name.clone(), value);
-            mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+            self.shell_state.env_vars.insert(name.clone(), value);
+            mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
             return if invalid_name {
                 self.finish_read_error(cmd, &stderr, 1)
             } else {
@@ -2141,7 +2141,7 @@ impl Executor {
                 } else {
                     0
                 }
-            } else if self.env_vars.contains_key(FUNCTION_STDIN) {
+            } else if self.shell_state.env_vars.contains_key(FUNCTION_STDIN) {
                 let assign_status = self.assign_read_scalar_names(
                     &scalar_names,
                     initial_text.as_deref().unwrap_or(""),
@@ -2214,8 +2214,8 @@ impl Executor {
     }
 
     fn read_prompt_should_display(&self, cmd: &CommandNode, read_fd: Option<u32>) -> bool {
-        if self.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
-            || self.env_vars.contains_key(FUNCTION_STDIN)
+        if self.shell_state.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
+            || self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
             || command_redirects_stdin(cmd)
             || command_closes_stdin(cmd)
         {
@@ -2308,7 +2308,7 @@ impl Executor {
                         | FdReadEndpoint::CoprocStdout(_)
                 )
             )
-            || self.env_vars.contains_key(FUNCTION_STDIN)
+            || self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
         {
             return 0;
         }

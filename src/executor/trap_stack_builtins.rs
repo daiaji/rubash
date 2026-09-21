@@ -60,7 +60,7 @@ impl Executor {
                 let mut file = OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                 file.write_all(&stdout)?;
             }
         } else {
@@ -95,7 +95,7 @@ impl Executor {
                 let mut file = OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
                 file.write_all(&stderr)?;
             }
         } else {
@@ -114,7 +114,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::trap::execute_with_io(
             &cmd.words[1..],
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
         )?;
@@ -145,7 +145,7 @@ impl Executor {
         let status = crate::builtins::pushd::execute_with_io(
             builtin,
             cmd.words[1..].iter().map(String::as_str),
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             &diagnostic_prefix,
             &mut stdout,
             &mut stderr,

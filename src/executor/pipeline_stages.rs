@@ -6,11 +6,11 @@ impl Executor {
         command: &CommandNode,
         input: &str,
     ) -> Result<(String, String, i32), ExecuteError> {
-        let old_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
-        let old_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-        self.env_vars
+        let old_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+        let old_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        self.shell_state.env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
-        self.env_vars
+        self.shell_state.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
 
         let saved_stdout_capture = self.stdout_capture.take();
@@ -35,13 +35,13 @@ impl Executor {
         // In-shell stage: the cursor visible on self is the element's real
         // fd-0 consumption within `input` (execute_cmd.c:2758 lastpipe).
         let consumed = self
-            .env_vars
+            .shell_state.env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
         self.pipeline_stdin_consumed.set(Some(consumed));
-        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
-        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
+        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
+        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
         // GNU execute_cmd.c:2758: the lastpipe stage runs in the current
         // shell.  `exit N` must therefore exit the current shell, not just
         // set the pipeline's exit status.  Convert ExitCode to LastpipeExit
@@ -72,7 +72,7 @@ impl Executor {
         // A pipeline member runs in a subshell: caught signal traps reset to
         // the inherited disposition (execute_cmd.c subshell trap reset), so
         // only traps set inside the member run at its exit.
-        crate::builtins::trap::reset_for_subshell(&mut subshell.env_vars);
+        crate::builtins::trap::reset_for_subshell(&mut subshell.shell_state.env_vars);
         // GNU execute_cmd.c execute_pipeline (2702-2708 left elements,
         // 2722-2723 rightmost) propagates the pipeline command's
         // CMD_IGNORE_RETURN into EVERY element, and a group command pushes
@@ -82,16 +82,16 @@ impl Executor {
         // while under `!`/if/while/&&/||/comsub suppression the same group
         // runs to completion (set-e1.sub:40 prints `A 1`).
         subshell
-            .env_vars
+            .shell_state.env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
         subshell
-            .env_vars
+            .shell_state.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
         for (name, value) in &command.assignments {
             let (base_name, _) = assignment_name_and_append(name);
             let expanded_value = subshell.expand_assignment_value(name, value);
             subshell
-                .env_vars
+                .shell_state.env_vars
                 .insert(base_name.to_string(), expanded_value);
         }
 
@@ -135,7 +135,7 @@ impl Executor {
         // The subshell's FUNCTION_STDIN cursor is the element's fd-0
         // consumption within `input`; report it for the driver writeback.
         let consumed = subshell
-            .env_vars
+            .shell_state.env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -187,10 +187,10 @@ impl Executor {
         // CMD_IGNORE_RETURN), so the subshell keeps the parent's
         // suppress_errexit like the compound-stage path above.
         subshell
-            .env_vars
+            .shell_state.env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
         subshell
-            .env_vars
+            .shell_state.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
 
         subshell.stdout_capture = Some(Vec::new());
@@ -215,7 +215,7 @@ impl Executor {
             Err(error) => return Err(error),
         };
         let consumed = subshell
-            .env_vars
+            .shell_state.env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -286,10 +286,10 @@ impl Executor {
 
         let mut subshell = self.command_substitution_executor();
         subshell
-            .env_vars
+            .shell_state.env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
         subshell
-            .env_vars
+            .shell_state.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
 
         subshell.stderr_capture = Some(Vec::new());
@@ -305,7 +305,7 @@ impl Executor {
             Err(error) => return Err(error),
         };
         let consumed = subshell
-            .env_vars
+            .shell_state.env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -365,7 +365,7 @@ impl Executor {
             });
         let expanded_name = first_fields.next().unwrap_or_default();
         let leading_args: Vec<String> = first_fields.collect();
-        let Some(program) = find_user_command(&expanded_name, &self.env_vars) else {
+        let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars) else {
             let diagnostic = format!(
                 "{}{}: command not found\n",
                 self.diagnostic_prefix(),
@@ -393,7 +393,7 @@ impl Executor {
                     if let Ok(mut file) = OpenOptions::new()
                         .create(true)
                         .append(true)
-                        .open(shell_path_to_windows(&target, &self.env_vars))
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
                     {
                         let _ = file.write_all(diagnostic.as_bytes());
                     }
@@ -437,7 +437,7 @@ impl Executor {
                     args.push(value);
                     continue;
                 }
-                match glob::pathname_expand_word(&value, &self.env_vars) {
+                match glob::pathname_expand_word(&value, &self.shell_state.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => args.extend(matches),
                     glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
                         args.push(value)
@@ -461,7 +461,7 @@ impl Executor {
             &program,
             Some(&expanded_name),
             &args,
-            &self.env_vars,
+            &self.shell_state.env_vars,
         );
 
         self.apply_child_environment(&mut process);
@@ -496,7 +496,7 @@ impl Executor {
                 if let Ok(file) = OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
                 {
                     process.stderr(Stdio::from(file));
                 }
@@ -557,7 +557,7 @@ impl Executor {
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             file.write_all(&payload)?;
         } else if let Some(capture) = &mut self.stdout_capture {
             capture.write_all(&payload)?;
@@ -613,7 +613,7 @@ impl Executor {
             return Ok(None);
         }
 
-        let Some(alias) = self.aliases.get(&command.words[0]) else {
+        let Some(alias) = self.shell_state.aliases.get(&command.words[0]) else {
             return Ok(None);
         };
         if !alias.value.ends_with('\\') {

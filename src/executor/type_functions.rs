@@ -14,7 +14,7 @@ impl Executor {
         W: Write,
     {
         writeln!(stdout, "{name} is a function")?;
-        let info = self.function_def_infos.get(name);
+        let info = self.shell_state.function_def_infos.get(name);
         let text = crate::parser::ast_print::multiline_function_def_text_with(
             name,
             body,
@@ -34,7 +34,7 @@ impl Executor {
         use crate::executor::shell_options::GlobalStdout;
         use std::io::Write;
         let mut stdout = GlobalStdout;
-        let info = self.function_def_infos.get(name);
+        let info = self.shell_state.function_def_infos.get(name);
         let text = crate::parser::ast_print::multiline_function_def_text_with(
             name,
             body,
@@ -55,7 +55,7 @@ impl Executor {
         // The ast_print module now covers ordinary trees; keep the upstream
         // type*.sub renderings localized here until execution matches too.
         let script = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .map(String::as_str);
         match (script.and_then(|path| path.rsplit('/').next()), name) {

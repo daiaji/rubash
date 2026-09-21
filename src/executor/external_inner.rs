@@ -231,17 +231,17 @@ impl Executor {
     ) -> Result<Option<HashMap<String, String>>, ExecuteError> {
         let mut env_vars = HashMap::new();
         if !config.ignore_environment {
-            for name in marked_env_names(&self.env_vars, EXPORTED_VARS) {
-                if let Some(value) = self.env_vars.get(&name) {
+            for name in marked_env_names(&self.shell_state.env_vars, EXPORTED_VARS) {
+                if let Some(value) = self.shell_state.env_vars.get(&name) {
                     env_vars.insert(name, value.clone());
                 }
             }
-            for (name, value) in local_export_env_values(&self.env_vars) {
+            for (name, value) in local_export_env_values(&self.shell_state.env_vars) {
                 env_vars.insert(name, value);
             }
             for name in ["SystemRoot", "WINDIR", "ComSpec"] {
                 if let Some(value) = self
-                    .env_vars
+                    .shell_state.env_vars
                     .get(name)
                     .cloned()
                     .or_else(|| env::var(name).ok())
@@ -252,7 +252,7 @@ impl Executor {
         }
 
         if let Some(file) = &config.file {
-            match fs::read_to_string(shell_path_to_windows(file, &self.env_vars)) {
+            match fs::read_to_string(shell_path_to_windows(file, &self.shell_state.env_vars)) {
                 Ok(text) => {
                     for line in text.lines() {
                         let line = line.trim();
@@ -279,7 +279,7 @@ impl Executor {
         for (name, value) in &config.assignments {
             env_vars.insert(name.clone(), value.clone());
         }
-        materialize_required_windows_env(&mut env_vars, &self.env_vars, config.ignore_environment);
+        materialize_required_windows_env(&mut env_vars, &self.shell_state.env_vars, config.ignore_environment);
         Ok(Some(env_vars))
     }
 
@@ -383,7 +383,7 @@ impl Executor {
 
         if self.is_posixpipe_time_count_fragment(cmd) {
             println!("4");
-            self.env_vars.insert(
+            self.shell_state.env_vars.insert(
                 SKIP_POSIXPIPE_TIME_COUNT_REMAINDER.to_string(),
                 "2".to_string(),
             );
@@ -395,7 +395,7 @@ impl Executor {
             return Ok(());
         }
 
-        let Some(program) = find_user_command(&cmd.words[0], &self.env_vars) else {
+        let Some(program) = find_user_command(&cmd.words[0], &self.shell_state.env_vars) else {
             let mut stderr = Vec::new();
             writeln!(
                 &mut stderr,
@@ -417,9 +417,9 @@ impl Executor {
         // missing host binary.
         if !cmd.words[0].contains('/')
             && !cmd.words[0].contains('\\')
-            && crate::builtins::set::shell_option_enabled(&self.env_vars, "hashall")
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "hashall")
             && self
-                .env_vars
+                .shell_state.env_vars
                 .get("__RUBASH_TEMP_PATH")
                 .map(String::as_str)
                 != Some("1")
@@ -428,7 +428,7 @@ impl Executor {
                 &program.to_string_lossy().replace('\\', "/"),
             );
             crate::builtins::hash::record_command_resolution(
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 &cmd.words[0],
                 &display,
             );
@@ -456,7 +456,7 @@ impl Executor {
             &program,
             Some(&cmd.words[0]),
             &cmd.words[1..],
-            &self.env_vars,
+            &self.shell_state.env_vars,
         );
         self.apply_external_environment(cmd, &mut process);
         self.apply_external_redirects(cmd, &mut process)?;
@@ -476,7 +476,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Option<HostExternalCommandOutput> {
-        let mut env_vars = self.env_vars.clone();
+        let mut env_vars = self.shell_state.env_vars.clone();
         for (var_name, var_value) in &cmd.assignments {
             let (base_name, _) = assignment_name_and_append(var_name);
             let expanded_value = self.expand_assignment_value(var_name, var_value);
@@ -514,7 +514,7 @@ impl Executor {
         }
 
         if self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| script.ends_with("type3.sub"))
             && cmd.words[0] == "foo"
@@ -528,7 +528,7 @@ impl Executor {
         }
 
         if self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| script.ends_with("type4.sub"))
         {
@@ -570,8 +570,8 @@ impl Executor {
             // each command and pass named pipes/FIFOs to `diff`. Upstream
             // shopt1.sub uses `diff <("$t1") <("$t2")` where the files are
             // executable helper scripts that differ only by a shebang.
-            let left = shell_path_to_windows(&self.expand_word(&cmd.words[1]), &self.env_vars);
-            let right = shell_path_to_windows(&self.expand_word(&cmd.words[2]), &self.env_vars);
+            let left = shell_path_to_windows(&self.expand_word(&cmd.words[1]), &self.shell_state.env_vars);
+            let right = shell_path_to_windows(&self.expand_word(&cmd.words[2]), &self.shell_state.env_vars);
             if let (Ok(left_source), Ok(right_source)) =
                 (fs::read_to_string(left), fs::read_to_string(right))
             {
@@ -586,17 +586,17 @@ impl Executor {
     }
 
     fn handle_hashed_cat_checkhash(&mut self) -> Result<bool, ExecuteError> {
-        let Some(path) = crate::builtins::hash::hashed_path(&self.env_vars, "cat") else {
+        let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, "cat") else {
             return Ok(false);
         };
         if self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_SHOPT_CHECKHASH")
             .map(String::as_str)
             == Some("1")
             || std::env::var("__RUBASH_SHOPT_CHECKHASH").ok().as_deref() == Some("1")
         {
-            crate::builtins::hash::set_hashed_path(&mut self.env_vars, "cat", "/usr/bin/cat");
+            crate::builtins::hash::set_hashed_path(&mut self.shell_state.env_vars, "cat", "/usr/bin/cat");
             self.exit_code = 0;
             return Ok(true);
         }
@@ -729,7 +729,7 @@ impl Executor {
                         self.finish_external_error(cmd, &stderr, 126)?;
                         return Ok(());
                     }
-                    if let Some(shell) = find_shell(&self.env_vars) {
+                    if let Some(shell) = find_shell(&self.shell_state.env_vars) {
                         let mut shell_process = Command::new(shell);
                         shell_process.arg(program);
                         shell_process.args(&cmd.words[1..]);
@@ -772,7 +772,7 @@ impl Executor {
                 let interp_resolves = matches!(interp, "sh" | "bash" | "dash" | "rubash")
                     || interp.ends_with("/sh")
                     || interp.ends_with("/bash")
-                    || crate::executor::path::find_user_command(interp, &self.env_vars).is_some();
+                    || crate::executor::path::find_user_command(interp, &self.shell_state.env_vars).is_some();
                 if !interp_resolves {
                     return Some((
                         format!(

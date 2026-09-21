@@ -9,7 +9,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::alias::unalias_with_io(
             &cmd.words[1..],
-            &mut self.aliases,
+            &mut self.shell_state.aliases,
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
@@ -24,7 +24,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::alias::alias_with_io(
             &cmd.words[1..],
-            &mut self.aliases,
+            &mut self.shell_state.aliases,
             &mut stdout,
             &mut stderr,
         )?;
@@ -49,7 +49,7 @@ impl Executor {
             }
             if let Some((name, _)) = arg.split_once('=') {
                 if !name.is_empty() {
-                    self.env_vars
+                    self.shell_state.env_vars
                         .insert(format!("__RUBASH_ALIAS_LINE_{name}"), line.to_string());
                 }
             }
@@ -65,7 +65,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::set::set_with_io(
             cmd.words[1..].iter().map(String::as_str),
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
         )?;
@@ -86,10 +86,10 @@ impl Executor {
     /// reads HISTFILE into the list (only when no lines have been recorded
     /// yet and the file has not already been loaded).
     pub(in crate::executor) fn load_history_file_if_needed(&mut self) {
-        let Some(session) = self.session_history.clone() else {
+        let Some(session) = self.shell_state.session_history.clone() else {
             return;
         };
-        if !crate::builtins::set::shell_option_enabled(&self.env_vars, "history") {
+        if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history") {
             return;
         }
         let needs_load = {
@@ -115,7 +115,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
-        if crate::builtins::set::shell_option_enabled(&self.env_vars, "restricted")
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "restricted")
             && cmd.words[1..]
                 .iter()
                 .any(|word| word.starts_with('+') && word[1..].chars().any(|flag| flag == 'r'))

@@ -36,7 +36,7 @@ impl Executor {
         Ok(crate::builtins::test::execute(
             &args,
             bracket,
-            &self.env_vars,
+            &self.shell_state.env_vars,
         )?)
     }
 
@@ -51,7 +51,7 @@ impl Executor {
                 Ok(())
             }
             "umask" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "umask") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "umask") {
                     self.execute_external(cmd)
                 } else {
                     self.exit_code = self.execute_umask(cmd)?;
@@ -67,7 +67,7 @@ impl Executor {
                 Ok(())
             }
             "read" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "read") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "read") {
                     self.execute_external(cmd)
                 } else {
                     self.exit_code = self.execute_read(cmd);
@@ -75,7 +75,7 @@ impl Executor {
                 }
             }
             "mapfile" | "readarray" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, word) {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word) {
                     self.execute_external(cmd)
                 } else {
                     self.exit_code = self.execute_mapfile(cmd);
@@ -172,7 +172,7 @@ impl Executor {
                 Ok(())
             }
             "test" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "test") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "test") {
                     self.execute_external(cmd)
                 } else {
                     self.exit_code = self.execute_test_words(&cmd.words[1..], false)?;
@@ -180,7 +180,7 @@ impl Executor {
                 }
             }
             "[" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "[") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "[") {
                     self.execute_external(cmd)
                 } else {
                     self.exit_code = self.execute_test_words(&cmd.words[1..], true)?;
@@ -228,7 +228,7 @@ impl Executor {
                     self.execute_external(cmd)
                 }
             }
-            _ if self.functions.contains_key(word) => {
+            _ if self.shell_state.functions.contains_key(word) => {
                 self.execute_function(word, &cmd.words[1..], cmd)
             }
             _ => self.execute_external(cmd),

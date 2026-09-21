@@ -209,6 +209,35 @@ stdio 载体路径的接线，需定向探针护航。
   单线程 spawn 假设、解锁线程化）；④ 后台/coproc 记账迁 FdTable + `fork_table`；
   ⑤ 12 探针转正为引擎差分测试。
 
+**S6 实施记录（2026-09-21，`master-fix` 分支）**：
+
+- `src/shell/state.rs` 扩为完整隔离边界：约 30 个语义字段（env_vars、aliases、
+  functions、function_def_* 三表、positional、pipestatus、local_*_scopes、
+  expanding_aliases、loop/function_depth、random_state、subshell_depth、
+  background_jobs、coproc_names、completion_specs、session_history 等）全部
+  移入 `ShellState`；Executor 只留 fd/进程资源与单命令瞬态。
+- 三处子壳路径（flat subshell region、嵌套 `( list )` 节点、命令替换
+  fresh-Executor）全部改为 `shell_state.clone()` 整快照恢复；两份手工清单
+  （7 项 / ~55 项）已删除。GNU 锚点：`execute_cmd.c:1576 execute_in_subshell`
+  ——fork 进程拷贝天然隔离全部语义状态。
+- 探针验证（WSL GNU 5.3.0 逐字节）：alias/function 定义、覆写、嵌套子壳均不
+  再泄漏；回归测试 `tests/issue_s6_subshell_state_isolation.rs`（8 例）。
+- 顺手拆分 E10A 码点双占用：`FAILED_SUBSCRIPT_SENTINEL` 迁至 U+E200（E100–E1FF
+  段已被 conditional/pattern.rs 的 BYTE_CHAR_BASE 字节编码占用）。
+- 基线暴露并修复一个 ab811d04 引入的回归：`word_level_quote_syntax` 门控正确化
+  后暴露了 `${x-word}` 默认值词在非双引号上下文被 `decode_double_quotes_in_
+  quoted_parameter_word` 误作 dq 句子解码（`o=${x-' '}` 存字面 `' '`、
+  `${f-'$HOME'}` 内 `$HOME` 被展开）。修法按 `subst.c:7663
+  parameter_brace_expand_word`：词按自身引号上下文展开——仅 DoubleQuoted/
+  HereDocument（Q_HERE_DOCUMENT 对 `${}` 词呈 dq 语义）走 dq 解码，非引号
+  上下文交回 walker 引号剥离。`embedded_mutations.rs` 通用 `\` 臂补非双引号
+  `'` → ANSI_C_QUOTE_MARKER 数据载体（`o=${c='q'}` → `'q'`）。
+  precedence 套件 +24 → 0，posixexp +2 → 0，quote/nquote/dstack/rhs-exp/
+  braces/new-exp/more-exp/posixexp2/exp 全部持平。
+- 已知残差（预存，非本次回归）：heredoc 体内 `${x-'q'}` 非 mut 路径
+  丢 heredoc 上下文（GNU 出 `'q'`，RB 出 `'q'`）；`declare -A 'a[$q]=v'`
+  空键接收 vs GNU bad-subscript。
+
 ### 3.7 双层测试口径（引擎层 + 产品层）
 
 **真正的 shell 层是 niubash**（`D:/repo/niubash-*`，crate `niubash`，依赖

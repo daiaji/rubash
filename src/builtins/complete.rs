@@ -539,7 +539,7 @@ const HASH_REHASH_FACTOR: usize = 2;
 /// it (hashlib.c hash_insert). The created flag models progcomp_remove
 /// succeeding while prog_completes is still NULL (before the first insertion,
 /// surviving progcomp_flush).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct CompletionRegistry {
     buckets: Vec<Vec<(String, Compspec)>>,
     nentries: usize,

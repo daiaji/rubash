@@ -119,7 +119,7 @@ impl Executor {
                 }
             }
 
-            let path = shell_path_to_windows(&expanded_target, &self.env_vars);
+            let path = shell_path_to_windows(&expanded_target, &self.shell_state.env_vars);
             if redirect.append {
                 let _ = OpenOptions::new()
                     .create(true)
@@ -174,7 +174,7 @@ impl Executor {
 
         // If FUNCTION_STDIN is set (from heredoc or redirect), only read from it.
         // Do NOT fall through to process stdin - that would block on the terminal.
-        if self.env_vars.contains_key(FUNCTION_STDIN) {
+        if self.shell_state.env_vars.contains_key(FUNCTION_STDIN) {
             return self.read_function_stdin(delimiter, char_limit, exact_char_limit);
         }
 
@@ -285,7 +285,7 @@ impl Executor {
 
         let saved_dir = env::current_dir().ok();
         let mut subshell = self.command_substitution_executor();
-        crate::builtins::trap::reset_for_subshell(&mut subshell.env_vars);
+        crate::builtins::trap::reset_for_subshell(&mut subshell.shell_state.env_vars);
         subshell.stdout_capture = Some(Vec::new());
         // Direct-stdout builtins inside the substitution consult the
         // thread-local capture, which belongs to an enclosing pipeline
@@ -333,7 +333,7 @@ impl Executor {
                 .read_text(fd, delimiter, char_limit, exact_char_limit)
             {
                 if let Some((_, offset)) = self.fd_table.input_snapshot(fd) {
-                    self.env_vars
+                    self.shell_state.env_vars
                         .insert(fd_stdin_offset_key(fd), offset.to_string());
                 }
                 return Some(trim_read_input(
@@ -372,9 +372,9 @@ impl Executor {
         exact_char_limit: bool,
     ) -> Option<String> {
         self.apply_comsub_stdin_writeback();
-        let input = self.env_vars.get(FUNCTION_STDIN)?.clone();
+        let input = self.shell_state.env_vars.get(FUNCTION_STDIN)?.clone();
         let offset = self
-            .env_vars
+            .shell_state.env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -409,7 +409,7 @@ impl Executor {
             return None;
         }
 
-        self.env_vars.insert(
+        self.shell_state.env_vars.insert(
             FUNCTION_STDIN_OFFSET.to_string(),
             (offset + consumed).to_string(),
         );
@@ -427,7 +427,7 @@ impl Executor {
         char_limit: Option<usize>,
         exact_char_limit: bool,
     ) -> Option<String> {
-        if self.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) != Some("1") {
+        if self.shell_state.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) != Some("1") {
             return None;
         }
         if char_limit == Some(0) {
@@ -486,7 +486,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn read_inherited_process_stdin_to_string(&self) -> Option<String> {
-        if self.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) != Some("1") {
+        if self.shell_state.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) != Some("1") {
             return None;
         }
 

@@ -32,7 +32,7 @@ impl Executor {
         if is_closed_redirect_target(&target) {
             return None;
         }
-        let path = shell_path_to_windows(&target, &self.env_vars);
+        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
         if redirect.append {
             let _ = OpenOptions::new()
                 .create(true)

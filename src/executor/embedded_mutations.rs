@@ -149,7 +149,7 @@ impl Executor {
     ) -> String {
         self.apply_parameter_assignment_expansions_in_word(word);
         let saved_parameter_state = word_contains_current_shell_command_substitution(word)
-            .then(|| (self.env_vars.clone(), self.pipestatus.clone()));
+            .then(|| (self.shell_state.env_vars.clone(), self.shell_state.pipestatus.clone()));
         let expanded = self.expand_embedded_parameters_ordered_mut(
             word,
             saved_parameter_state.as_ref(),
@@ -491,6 +491,17 @@ impl Executor {
                             output.push(crate::lexer::ANSI_C_QUOTE_MARKER);
                             continue;
                         }
+                        // GNU parse.y:5368-5397 read_token_word: outside
+                        // quotes ' is a quoted literal ' - the backslash
+                        // is consumed and the quote is DATA (o=${c='q'}
+                        // stores 'q'). Emit the ANSI-C data-quote carrier
+                        // so downstream quote removal never re-reads it as
+                        // a delimiter.
+                        '\'' if !matches!(context, SubstitutionQuoteContext::HereDocument) => {
+                            chars.next();
+                            output.push(crate::lexer::ANSI_C_QUOTE_MARKER);
+                            continue;
+                        }
                         // Here-document bodies expand with Q_HERE_DOCUMENT,
                         // where the escape set is CBSHDOC and not CBSDQUOTE
                         // (subst.c:11628; syntax.h slashify_in_here_document
@@ -570,7 +581,7 @@ impl Executor {
                 }
                 Some('@') => {
                     chars.next();
-                    let value = self.positional_params.join(" ");
+                    let value = self.shell_state.positional_params.join(" ");
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                     } else {
@@ -589,7 +600,7 @@ impl Executor {
                 }
                 Some('#') => {
                     chars.next();
-                    output.push_str(&self.positional_params.len().to_string());
+                    output.push_str(&self.shell_state.positional_params.len().to_string());
                 }
                 Some('-') => {
                     chars.next();
@@ -727,7 +738,7 @@ impl Executor {
                                             crate::executor::arithmetic::arithmetic_error_message(
                                                 display,
                                                 true,
-                                                &self.env_vars,
+                                                &self.shell_state.env_vars,
                                             )
                                         {
                                             eprintln!("{}{}", self.diagnostic_prefix(), message);
@@ -758,7 +769,7 @@ impl Executor {
                     }
 
                     let (source, closed) =
-                        collect_command_substitution_source_ex(&mut chars, &self.aliases);
+                        collect_command_substitution_source_ex(&mut chars, &self.shell_state.aliases);
                     if !closed {
                         // GNU parse.y parse_comsub: an unclosed `$(` reports
                         // `unexpected EOF` and the expansion fails, aborting
@@ -812,7 +823,7 @@ impl Executor {
                         }
                     } else {
                         let value = self
-                            .positional_params
+                            .shell_state.positional_params
                             .get(index - 1)
                             .map(String::as_str)
                             .unwrap_or("");
@@ -1035,12 +1046,12 @@ impl Executor {
             return expand(self);
         };
 
-        let current_env = std::mem::replace(&mut self.env_vars, saved_parameter_env.clone());
+        let current_env = std::mem::replace(&mut self.shell_state.env_vars, saved_parameter_env.clone());
         let current_pipestatus =
-            std::mem::replace(&mut self.pipestatus, saved_parameter_pipestatus.clone());
+            std::mem::replace(&mut self.shell_state.pipestatus, saved_parameter_pipestatus.clone());
         let expanded = expand(self);
-        self.env_vars = current_env;
-        self.pipestatus = current_pipestatus;
+        self.shell_state.env_vars = current_env;
+        self.shell_state.pipestatus = current_pipestatus;
         expanded
     }
 
@@ -1122,7 +1133,7 @@ impl Executor {
         // command substitutions — diagnostics inside the body report the
         // original script line of the substitution (comsub2.tests: line 68).
         let body_start_line = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
@@ -1149,24 +1160,24 @@ impl Executor {
         // re-enables it. The flag lives in env_vars, so save/restore around
         // the body like uw_restore_errexit does.
         let inherit_errexit = self.posix_mode_enabled()
-            || crate::builtins::shopt::option_enabled(&self.env_vars, "inherit_errexit");
-        let saved_errexit_flag = self.env_vars.get("__RUBASH_ERREXIT").cloned();
+            || crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "inherit_errexit");
+        let saved_errexit_flag = self.shell_state.env_vars.get("__RUBASH_ERREXIT").cloned();
         let saved_errexit_opt =
-            crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit");
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit");
         if !inherit_errexit {
-            self.env_vars.remove("__RUBASH_ERREXIT");
-            crate::builtins::set::set_shell_option(&mut self.env_vars, "errexit", false);
+            self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
+            crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "errexit", false);
         }
 
         let (captured, body_reply, result);
         if pipe_output {
-            self.local_var_scopes.push(HashMap::new());
-            self.local_attr_scopes.push(HashMap::new());
-            self.local_typed_scopes.push(HashMap::new());
-            if let Some(scope) = self.local_var_scopes.last_mut() {
-                scope.insert("REPLY".to_string(), self.env_vars.get("REPLY").cloned());
+            self.shell_state.local_var_scopes.push(HashMap::new());
+            self.shell_state.local_attr_scopes.push(HashMap::new());
+            self.shell_state.local_typed_scopes.push(HashMap::new());
+            if let Some(scope) = self.shell_state.local_var_scopes.last_mut() {
+                scope.insert("REPLY".to_string(), self.shell_state.env_vars.get("REPLY").cloned());
             }
-            if let Some(typed) = self.local_typed_scopes.last_mut() {
+            if let Some(typed) = self.shell_state.local_typed_scopes.last_mut() {
                 typed.insert(
                     "REPLY".to_string(),
                     self.shell_state.variables.get("REPLY").cloned(),
@@ -1174,12 +1185,12 @@ impl Executor {
             }
             // Fresh local: the body sees REPLY unset; restore_function_locals
             // brings the caller's value (or unset) back afterwards.
-            self.env_vars.remove("REPLY");
+            self.shell_state.env_vars.remove("REPLY");
             self.shell_state.variables.remove("REPLY");
-            self.function_depth += 1;
+            self.shell_state.function_depth += 1;
             let r = self.execute_ast(&ast);
-            self.function_depth -= 1;
-            body_reply = self.env_vars.get("REPLY").cloned();
+            self.shell_state.function_depth -= 1;
+            body_reply = self.shell_state.env_vars.get("REPLY").cloned();
             self.restore_function_locals();
             captured = Vec::new();
             result = r;
@@ -1204,14 +1215,14 @@ impl Executor {
         if !inherit_errexit {
             match saved_errexit_flag {
                 Some(value) => {
-                    self.env_vars.insert("__RUBASH_ERREXIT".to_string(), value);
+                    self.shell_state.env_vars.insert("__RUBASH_ERREXIT".to_string(), value);
                 }
                 None => {
-                    self.env_vars.remove("__RUBASH_ERREXIT");
+                    self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
                 }
             }
             crate::builtins::set::set_shell_option(
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 "errexit",
                 saved_errexit_opt,
             );
@@ -1246,12 +1257,12 @@ impl Executor {
     /// ends only the body, while plain assignments still mutate the current
     /// environment (comsub2.tests: `outside: 42` vs `outside:` empty).
     fn execute_current_shell_body(&mut self, ast: &crate::parser::Ast) -> Result<(), ExecuteError> {
-        self.local_var_scopes.push(HashMap::new());
-        self.local_attr_scopes.push(HashMap::new());
-        self.local_typed_scopes.push(HashMap::new());
-        self.function_depth += 1;
+        self.shell_state.local_var_scopes.push(HashMap::new());
+        self.shell_state.local_attr_scopes.push(HashMap::new());
+        self.shell_state.local_typed_scopes.push(HashMap::new());
+        self.shell_state.function_depth += 1;
         let result = self.execute_ast(ast);
-        self.function_depth -= 1;
+        self.shell_state.function_depth -= 1;
         self.restore_function_locals();
         result
     }
@@ -1290,7 +1301,7 @@ impl Executor {
         if let Some(output) = self.command_substitution_heredoc_output_mut_typed(source, context) {
             return output;
         }
-        let saved_positional_params = self.positional_params.clone();
+        let saved_positional_params = self.shell_state.positional_params.clone();
         // GNU subst.c:7143 command_substitute feeds the body to
         // parse_and_execute, so the real parser owns each word's quoting:
         // `"$x"` stays one field, `""` stays one empty argument, and `"*"`
@@ -1379,7 +1390,7 @@ impl Executor {
         // current word, so body diagnostics must report the original script
         // line instead of restarting at 1.
         let body_start_line = self
-            .env_vars
+            .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
@@ -1396,17 +1407,17 @@ impl Executor {
             return None;
         }
 
-        let saved_env = self.env_vars.clone();
-        let saved_pipestatus = self.pipestatus.clone();
-        let saved_functions = self.functions.clone();
-        let saved_function_redirects = self.function_definition_redirects.clone();
-        let saved_function_def_infos = self.function_def_infos.clone();
-        let saved_aliases = self.aliases.clone();
+        let saved_env = self.shell_state.env_vars.clone();
+        let saved_pipestatus = self.shell_state.pipestatus.clone();
+        let saved_functions = self.shell_state.functions.clone();
+        let saved_function_redirects = self.shell_state.function_definition_redirects.clone();
+        let saved_function_def_infos = self.shell_state.function_def_infos.clone();
+        let saved_aliases = self.shell_state.aliases.clone();
         let saved_exit_code = self.exit_code;
-        let saved_positional_params = self.positional_params.clone();
+        let saved_positional_params = self.shell_state.positional_params.clone();
         let saved_dir = env::current_dir().ok();
-        let saved_depth = self.subshell_depth.get();
-        self.subshell_depth.set(saved_depth + 1);
+        let saved_depth = self.shell_state.subshell_depth.get();
+        self.shell_state.subshell_depth.set(saved_depth + 1);
 
         let saved_capture = self.stdout_capture.take();
         self.stdout_capture = Some(Vec::new());
@@ -1417,9 +1428,9 @@ impl Executor {
         // propagates to the outer assignment, which then checks -e.
         // POSIX mode is the exception: `set -o posix; z=$(false;echo posix)`
         // exits (set-e1.sub), so keep errexit active there.
-        let posix_mode = self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
+        let posix_mode = self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
         let inherit_errexit =
-            crate::builtins::shopt::option_enabled(&self.env_vars, "inherit_errexit");
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "inherit_errexit");
         // Direct-stdout builtins inside the body consult the thread-local
         // capture, which belongs to an enclosing pipeline stage when this
         // substitution runs inside one; give the body its own capture.
@@ -1444,15 +1455,15 @@ impl Executor {
         };
 
         self.restore_shell_env(saved_env);
-        self.pipestatus = saved_pipestatus;
-        self.functions = saved_functions;
-        self.function_definition_redirects = saved_function_redirects;
-        self.function_def_infos = saved_function_def_infos;
-        self.aliases = saved_aliases;
+        self.shell_state.pipestatus = saved_pipestatus;
+        self.shell_state.functions = saved_functions;
+        self.shell_state.function_definition_redirects = saved_function_redirects;
+        self.shell_state.function_def_infos = saved_function_def_infos;
+        self.shell_state.aliases = saved_aliases;
         if let Some(saved_dir) = saved_dir {
             let _ = env::set_current_dir(saved_dir);
         }
-        self.subshell_depth.set(saved_depth);
+        self.shell_state.subshell_depth.set(saved_depth);
         self.set_positional_params(saved_positional_params);
         self.exit_code = saved_exit_code;
         self.last_command_substitution_status.set(Some(status));
@@ -1465,7 +1476,7 @@ impl Executor {
         words: &[String],
     ) -> Option<String> {
         let name = words.first()?;
-        if !self.functions.contains_key(name) {
+        if !self.shell_state.functions.contains_key(name) {
             return None;
         }
         // A function call is only a shortcut when the substitution body is a
@@ -1483,8 +1494,8 @@ impl Executor {
         let mut call = CommandNode::new();
         call.words = words.to_vec();
 
-        let saved_env = self.env_vars.clone();
-        let saved_pipestatus = self.pipestatus.clone();
+        let saved_env = self.shell_state.env_vars.clone();
+        let saved_pipestatus = self.shell_state.pipestatus.clone();
         let saved_exit_code = self.exit_code;
         let saved_capture = self.stdout_capture.take();
         self.stdout_capture = Some(Vec::new());
@@ -1505,8 +1516,8 @@ impl Executor {
             }
             Err(_) => 1,
         };
-        self.env_vars = saved_env;
-        self.pipestatus = saved_pipestatus;
+        self.shell_state.env_vars = saved_env;
+        self.shell_state.pipestatus = saved_pipestatus;
         self.exit_code = saved_exit_code;
         self.last_command_substitution_status.set(Some(status));
 

@@ -643,8 +643,8 @@ fn protect_unmatched_double_quoted_backticks(source: &str) -> String {
 /// loop (variables.c:1428-1431, reset to 0 by sbrand on every `RANDOM=`
 /// assignment), and `rseed32` is SRANDOM's separate seed (random.c:132) so
 /// SRANDOM draws never perturb the RANDOM sequence.
-#[derive(Debug)]
-pub(in crate::executor) struct RandomGen {
+#[derive(Debug, Clone)]
+pub(crate) struct RandomGen {
     pub rseed: Cell<u32>,
     pub last_value: Cell<u32>,
     pub rseed32: Cell<u32>,
@@ -654,7 +654,7 @@ impl RandomGen {
     /// GNU variables.c:663-664 seeds both generators from genseed()
     /// (time/uid/pid mix) at startup; epoch microseconds is the rubash
     /// equivalent of that entropy.
-    pub(in crate::executor) fn seeded() -> Self {
+    pub(crate) fn seeded() -> Self {
         let seed = current_epoch_micros() as u32;
         Self {
             rseed: Cell::new(seed),
@@ -665,7 +665,7 @@ impl RandomGen {
 
     /// Command/process substitution clones carry the seeds over (GNU
     /// reseeds from genseed on pid change, which rubash cannot observe).
-    pub(in crate::executor) fn clone_state(&self) -> Self {
+    pub(crate) fn clone_state(&self) -> Self {
         Self {
             rseed: Cell::new(self.rseed.get()),
             last_value: Cell::new(self.last_value.get()),

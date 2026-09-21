@@ -252,12 +252,12 @@ mod unit_tests {
         let mut executor = Executor::new();
 
         executor
-            .env_vars
+            .shell_state.env_vars
             .insert("EUID".to_string(), "0".to_string());
         assert_eq!(executor.decode_prompt_string("\\$"), "#");
 
         executor
-            .env_vars
+            .shell_state.env_vars
             .insert("EUID".to_string(), "1000".to_string());
         assert_eq!(executor.decode_prompt_string("\\$"), "$");
     }

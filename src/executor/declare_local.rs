@@ -103,10 +103,10 @@ impl Executor {
         let print = args
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('p'));
-        let exported_functions = marked_env_names(&self.env_vars, EXPORTED_FUNCTIONS);
-        let readonly_functions = marked_env_names(&self.env_vars, READONLY_FUNCTIONS);
+        let exported_functions = marked_env_names(&self.shell_state.env_vars, EXPORTED_FUNCTIONS);
+        let readonly_functions = marked_env_names(&self.shell_state.env_vars, READONLY_FUNCTIONS);
         if names.is_empty() {
-            let mut functions: Vec<_> = self.functions.iter().collect();
+            let mut functions: Vec<_> = self.shell_state.functions.iter().collect();
             functions.sort_by(|(left, _), (right, _)| left.cmp(right));
             for (name, body) in functions {
                 if exported_only && !exported_functions.iter().any(|exported| *exported == *name) {
@@ -132,7 +132,7 @@ impl Executor {
         }
         let mut status = 0;
         for name in names {
-            let Some(body) = self.functions.get(name) else {
+            let Some(body) = self.shell_state.functions.get(name) else {
                 if print_not_found {
                     writeln!(
                         stderr,
@@ -160,30 +160,30 @@ impl Executor {
                 continue;
             }
             if clear_export_attribute {
-                unmark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
+                unmark_env_name(&mut self.shell_state.env_vars, EXPORTED_FUNCTIONS, name);
                 if !print {
                     continue;
                 }
             } else if set_export_attribute {
-                mark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
+                mark_env_name(&mut self.shell_state.env_vars, EXPORTED_FUNCTIONS, name);
                 if !print && !function_names_only {
                     continue;
                 }
             }
             if readonly {
-                mark_env_name(&mut self.env_vars, READONLY_FUNCTIONS, name);
+                mark_env_name(&mut self.shell_state.env_vars, READONLY_FUNCTIONS, name);
                 if !print {
                     continue;
                 }
             }
             if set_trace {
-                mark_env_name(&mut self.env_vars, FUNC_TRACE_FUNCTIONS, name);
+                mark_env_name(&mut self.shell_state.env_vars, FUNC_TRACE_FUNCTIONS, name);
                 if !print {
                     continue;
                 }
             }
             if clear_trace {
-                unmark_env_name(&mut self.env_vars, FUNC_TRACE_FUNCTIONS, name);
+                unmark_env_name(&mut self.shell_state.env_vars, FUNC_TRACE_FUNCTIONS, name);
                 if !print {
                     continue;
                 }
@@ -210,8 +210,8 @@ impl Executor {
     where
         W: Write,
     {
-        if crate::builtins::shopt::option_enabled(&self.env_vars, "extdebug") {
-            if let Some(location) = self.function_definition_locations.get(name) {
+        if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extdebug") {
+            if let Some(location) = self.shell_state.function_definition_locations.get(name) {
                 return writeln!(stdout, "{} {} {}", name, location.line, location.source);
             }
         }
@@ -337,8 +337,8 @@ impl Executor {
                 // so an existing array target alone does not make the
                 // operand compound there.
                 let w_compassign = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
-                let array_exists = is_marked_var(&self.env_vars, ASSOC_VARS, lhs)
-                    || is_marked_var(&self.env_vars, ARRAY_VARS, lhs);
+                let array_exists = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, lhs)
+                    || is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, lhs);
                 let declare_family = !matches!(command_name, "export" | "readonly");
                 let is_compound = paren_value
                     && (w_compassign
@@ -367,33 +367,33 @@ impl Executor {
                     // global's indexed attribute (varenv14.sub), or the
                     // local scope already carries the mark.
                     let local_context =
-                        self.function_depth > 0 && !declare_args_force_global(args);
+                        self.shell_state.function_depth > 0 && !declare_args_force_global(args);
                     let locally_scoped = local_context
                         && !self
-                            .local_var_scopes
+                            .shell_state.local_var_scopes
                             .last()
                             .is_some_and(|scope| scope.contains_key(lhs))
                         && !crate::builtins::shopt::option_enabled(
-                            &self.env_vars,
+                            &self.shell_state.env_vars,
                             "localvar_inherit",
                         );
                     let target_indexed = !locally_scoped
-                        && is_marked_var(&self.env_vars, ARRAY_VARS, lhs);
+                        && is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, lhs);
                     let target_assoc = !locally_scoped
-                        && is_marked_var(&self.env_vars, ASSOC_VARS, lhs);
+                        && is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, lhs);
                     let nested_assoc_convert =
                         assoc_hint && target_indexed && !target_assoc;
                     let nested_indexed_convert =
                         array_hint && target_assoc && !target_indexed;
                     let nested_readonly =
-                        is_marked_var(&self.env_vars, READONLY_VARS, lhs);
+                        is_marked_var(&self.shell_state.env_vars, READONLY_VARS, lhs);
                     if nested_assoc_convert || nested_indexed_convert {
                         let kind = if nested_assoc_convert {
                             "indexed to associative"
                         } else {
                             "associative to indexed"
                         };
-                        match self.function_name_stack.first() {
+                        match self.shell_state.function_name_stack.first() {
                             Some(func) => eprintln!(
                                 "{}{func}: {lhs}: cannot convert {kind} array",
                                 self.diagnostic_prefix()
@@ -403,7 +403,7 @@ impl Executor {
                                 self.diagnostic_prefix()
                             ),
                         }
-                        if self.function_depth == 0 {
+                        if self.shell_state.function_depth == 0 {
                             return Err(());
                         }
                     } else if nested_readonly {
@@ -411,7 +411,7 @@ impl Executor {
                             "{}{lhs}: readonly variable",
                             self.diagnostic_prefix()
                         );
-                        if self.function_depth == 0 {
+                        if self.shell_state.function_depth == 0 {
                             return Err(());
                         }
                     }
@@ -447,7 +447,7 @@ impl Executor {
                     // close at the end of the name.
                     let expand_once = w_assignment
                         && crate::builtins::shopt::option_enabled(
-                            &self.env_vars,
+                            &self.shell_state.env_vars,
                             "array_expand_once",
                         );
                     let subscript_ok = lhs.find('[').is_some_and(|open| {
@@ -475,14 +475,14 @@ impl Executor {
                     let base = lhs.split('[').next().unwrap_or(lhs);
                     let operand_assoc = if assoc_hint {
                         true
-                    } else if self.function_depth > 0 {
-                        is_marked_var(&self.env_vars, ASSOC_VARS, base)
+                    } else if self.shell_state.function_depth > 0 {
+                        is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base)
                             && self
-                                .local_var_scopes
+                                .shell_state.local_var_scopes
                                 .last()
                                 .is_some_and(|scope| scope.contains_key(base))
                     } else {
-                        is_marked_var(&self.env_vars, ASSOC_VARS, base)
+                        is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base)
                     };
                     let mode = if w_assignment {
                         OperandSubscriptMode::ExpandedOnce
@@ -494,7 +494,7 @@ impl Executor {
                         mode,
                         Some(operand_assoc),
                         crate::builtins::shopt::option_enabled(
-                            &self.env_vars,
+                            &self.shell_state.env_vars,
                             "array_expand_once",
                         ),
                         false,
@@ -531,7 +531,7 @@ impl Executor {
                 // declare argument text was not pre-expanded by assignment
                 // word expansion on this path, so the resolver runs its
                 // non-preexpanded (declare) model.
-                let assoc = assoc_hint || is_marked_var(&self.env_vars, ASSOC_VARS, lhs);
+                let assoc = assoc_hint || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, lhs);
                 // GNU arrayfunc.c:557-620 expand_compound_array_assignment ->
                 // expand_words_no_vars: a `(...)` operand value that reached
                 // declare through variable expansion is reparsed and each
@@ -568,9 +568,9 @@ impl Executor {
                 // literal text (array19.sub).
                 let target_is_array = assoc
                     || array_hint
-                    || is_marked_var(&self.env_vars, ARRAY_VARS, lhs)
+                    || is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, lhs)
                     || self
-                        .env_vars
+                        .shell_state.env_vars
                         .get(lhs)
                         .is_some_and(|v| v.starts_with('\x1d'));
                 if !marked && !target_is_array {
@@ -594,10 +594,10 @@ impl Executor {
                         for (name, value, append) in &pending {
                             saved
                                 .entry(name.clone())
-                                .or_insert_with(|| self.env_vars.get(name).cloned());
+                                .or_insert_with(|| self.shell_state.env_vars.get(name).cloned());
                             let current =
-                                self.env_vars.get(name).cloned().unwrap_or_default();
-                            self.env_vars.insert(
+                                self.shell_state.env_vars.get(name).cloned().unwrap_or_default();
+                            self.shell_state.env_vars.insert(
                                 name.clone(),
                                 if *append { current + value } else { value.clone() },
                             );
@@ -635,8 +635,8 @@ impl Executor {
                         };
                         for (name, previous) in saved {
                             match previous {
-                                Some(value) => self.env_vars.insert(name, value),
-                                None => self.env_vars.remove(&name),
+                                Some(value) => self.shell_state.env_vars.insert(name, value),
+                                None => self.shell_state.env_vars.remove(&name),
                             };
                         }
                         (expanded_compound.as_str(), true)
@@ -698,7 +698,7 @@ impl Executor {
         // readonly global variables ... Readonly copies of calling function
         // local variables are OK". declare.def:669-673 then drops the whole
         // operand (any_failed++ + NEXT_VARIABLE): no local and no assignment.
-        let local_blocked: Vec<String> = if self.function_depth > 0
+        let local_blocked: Vec<String> = if self.shell_state.function_depth > 0
             && !declare_args_force_global(&args)
             && !declare_args_request_print(&args)
         {
@@ -716,7 +716,7 @@ impl Executor {
         // save_local_names ran -- the `var->context == variable_context` test
         // in declare.def:655/850. Empty at global scope.
         let mut frame_locals: Vec<String> = Vec::new();
-        if self.function_depth > 0
+        if self.shell_state.function_depth > 0
             && !declare_args_force_global(&args)
             && !declare_args_request_print(&args)
         {
@@ -725,7 +725,7 @@ impl Executor {
                 .map(|name| assignment_name_and_append(name).0.to_string())
                 .collect::<Vec<_>>();
             let scope_keys_before_save: Vec<String> = self
-                .local_var_scopes
+                .shell_state.local_var_scopes
                 .last()
                 .map(|scope| scope.keys().cloned().collect())
                 .unwrap_or_default();
@@ -762,14 +762,14 @@ impl Executor {
             // plain declarations follow the chain to the referenced variable.
             Vec::new()
         } else {
-            crate::builtins::declare::nameref_assignment_targets(&args, &self.env_vars)
+            crate::builtins::declare::nameref_assignment_targets(&args, &self.shell_state.env_vars)
         };
         // GNU declare.def:623-660 declare_transform_name +
         // make_local_variable: at function scope an assignment operand that
         // resolves through a nameref binds a LOCAL variable at the current
         // context -- `declare r=/` on r->x creates local x and the global x
         // is restored when the frame returns (nameref20.sub f() cases).
-        if self.function_depth > 0 && !declare_args_force_global(&args) {
+        if self.shell_state.function_depth > 0 && !declare_args_force_global(&args) {
             for (_, target) in &nameref_assign_targets {
                 let local_name = target.split('[').next().unwrap_or(target);
                 if !local_name.is_empty() {
@@ -781,7 +781,7 @@ impl Executor {
             // the attribute pass marks it.
             if !nameref_flag {
                 for target in
-                    crate::builtins::declare::nameref_resolved_operand_names(&args, &self.env_vars)
+                    crate::builtins::declare::nameref_resolved_operand_names(&args, &self.shell_state.env_vars)
                 {
                     let local_name = target.split('[').next().unwrap_or(&target);
                     if !local_name.is_empty() {
@@ -809,10 +809,10 @@ impl Executor {
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
                     &args,
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     &mut stdout,
                     &mut stderr,
-                    self.function_depth > 0,
+                    self.shell_state.function_depth > 0,
                     &frame_locals,
                 )?;
                 if local_blocked.is_empty() {
@@ -842,7 +842,7 @@ impl Executor {
             // stale typed target would shadow the new value written to
             // env_vars (probe: typeset +n foo=other then echo $bar).
             for (_, target) in &nameref_assign_targets {
-                if let Some(value) = self.env_vars.get(target).cloned() {
+                if let Some(value) = self.shell_state.env_vars.get(target).cloned() {
                     match self.shell_state.variables.get_mut(target) {
                         Some(variable) => {
                             variable.value = crate::shell::ShellValue::Scalar(value);
@@ -855,16 +855,16 @@ impl Executor {
             }
             crate::builtins::declare::sync_typed_assignments(
                 &args,
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 &mut self.shell_state.variables,
             );
             crate::builtins::declare::sync_typed_attributes(
                 &args,
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 &mut self.shell_state.variables,
             );
             self.apply_posix_function_declare_unset_export(posix_function_export_unsets);
-            if crate::builtins::set::shell_option_enabled(&self.env_vars, "allexport") {
+            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport") {
                 // set -a (allexport): a typeset/declare assignment exports the
                 // variable (variables.c do_export / set -a semantics), even
                 // when the declare invocation itself carries no -x flag.
@@ -906,7 +906,7 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = if self.function_depth == 0 {
+        let status = if self.shell_state.function_depth == 0 {
             writeln!(
                 stderr,
                 "{}local: can only be used in a function",
@@ -946,13 +946,13 @@ impl Executor {
                 // "no duplicate instances" (declare.def:451): a second
                 // `local -` in the same frame keeps the first snapshot.
                 if self
-                    .local_var_scopes
+                    .shell_state.local_var_scopes
                     .last()
                     .is_none_or(|scope| !scope.contains_key("-"))
                 {
                     self.save_frame_local_name("-");
                     let bitmap = self.current_options_bitmap();
-                    self.env_vars.insert("-".to_string(), bitmap.clone());
+                    self.shell_state.env_vars.insert("-".to_string(), bitmap.clone());
                     let _ = self.shell_state.variables.set_scalar("-", bitmap);
                 }
                 args.retain(|arg| arg != "-");
@@ -964,7 +964,7 @@ impl Executor {
             // the args so the shared declare printer renders just those names.
             if !had_dash_operand && local_names(&args).is_empty() {
                 let local_names: Vec<String> = self
-                    .local_var_scopes
+                    .shell_state.local_var_scopes
                     .last()
                     .map(|scope| {
                         scope
@@ -1009,7 +1009,7 @@ impl Executor {
             // (varenv25.sub init_vars).
             let mut print_missing: Vec<String> = Vec::new();
             if declare_args_request_print(&args) && !local_names(&args).is_empty() {
-                let innermost = self.local_var_scopes.last();
+                let innermost = self.shell_state.local_var_scopes.last();
                 args.retain(|arg| {
                     // GNU setattr.def:564-568: a `-` operand to `local -p`
                     // prints `local -` when the frame holds the option-snapshot
@@ -1064,7 +1064,7 @@ impl Executor {
                     .map(|name| assignment_name_and_append(name).0.to_string())
                     .collect::<Vec<_>>();
                 let scope_keys_before_save: Vec<String> = self
-                    .local_var_scopes
+                    .shell_state.local_var_scopes
                     .last()
                     .map(|scope| scope.keys().cloned().collect())
                     .unwrap_or_default();
@@ -1117,7 +1117,7 @@ impl Executor {
                 let builtin_status = crate::builtins::declare::execute_with_io_named_in_context(
                     "local",
                     &args,
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     &mut stdout,
                     &mut stderr,
                     true,
@@ -1143,13 +1143,13 @@ impl Executor {
                     };
                     let name = raw_name.strip_suffix('+').unwrap_or(raw_name);
                     let (base, _) = assignment_name_and_append(name);
-                    if is_marked_var(&self.env_vars, ARRAY_VARS, base)
-                        || is_marked_var(&self.env_vars, ASSOC_VARS, base)
-                        || is_marked_var(&self.env_vars, NAMEREF_VARS, base)
+                    if is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, base)
+                        || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base)
+                        || is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base)
                     {
                         continue;
                     }
-                    match self.env_vars.get(base) {
+                    match self.shell_state.env_vars.get(base) {
                         Some(value) => match self.shell_state.variables.get_mut(base) {
                             Some(variable) => {
                                 variable.value = crate::shell::ShellValue::Scalar(value.clone());
@@ -1187,7 +1187,7 @@ impl Executor {
                 continue;
             }
             let (name, _) = assignment_name_and_append(name);
-            if is_marked_var(&self.env_vars, READONLY_VARS, name) {
+            if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
                 writeln!(
                     stderr,
                     "{}{}: readonly variable",
@@ -1217,7 +1217,7 @@ impl Executor {
         prefix_assignment_names: &[String],
         scope_keys_before_save: &[String],
     ) {
-        if self.function_depth == 0 || prefix_assignment_names.is_empty() {
+        if self.shell_state.function_depth == 0 || prefix_assignment_names.is_empty() {
             return;
         }
         for name in local_names(args) {
@@ -1227,7 +1227,7 @@ impl Executor {
             // The prefix binding may have been rejected (readonly target) or
             // routed through a nameref to a different cell; only a binding
             // that actually landed on this name is promoted.
-            if !self.env_vars.contains_key(&name) {
+            if !self.shell_state.env_vars.contains_key(&name) {
                 continue;
             }
             if !self
@@ -1245,13 +1245,13 @@ impl Executor {
             }
             if let Some((env_value, typed_value, attrs)) = self.tempenv_previous.get(&name).cloned()
             {
-                if let Some(scope) = self.local_var_scopes.last_mut() {
+                if let Some(scope) = self.shell_state.local_var_scopes.last_mut() {
                     scope.insert(name.clone(), env_value);
                 }
-                if let Some(typed_scope) = self.local_typed_scopes.last_mut() {
+                if let Some(typed_scope) = self.shell_state.local_typed_scopes.last_mut() {
                     typed_scope.insert(name.clone(), typed_value);
                 }
-                if let Some(attr_scope) = self.local_attr_scopes.last_mut() {
+                if let Some(attr_scope) = self.shell_state.local_attr_scopes.last_mut() {
                     attr_scope.insert(name.clone(), attrs);
                 }
             }
@@ -1264,7 +1264,7 @@ impl Executor {
         preserve_names: &[String],
         pre_existing: &[String],
     ) {
-        if crate::builtins::shopt::option_enabled(&self.env_vars, "localvar_inherit") {
+        if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "localvar_inherit") {
             return;
         }
         for name in local_names(args) {
@@ -1282,24 +1282,24 @@ impl Executor {
             if pre_existing.iter().any(|existing| existing == &name) {
                 continue;
             }
-            let was_exported = is_marked_var(&self.env_vars, EXPORTED_VARS, &name);
+            let was_exported = is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, &name);
             if was_exported {
-                if let Some(value) = self.env_vars.get(&name).cloned() {
-                    set_local_export_env_value(&mut self.env_vars, &name, value);
+                if let Some(value) = self.shell_state.env_vars.get(&name).cloned() {
+                    set_local_export_env_value(&mut self.shell_state.env_vars, &name, value);
                 }
             }
-            self.env_vars.remove(&name);
+            self.shell_state.env_vars.remove(&name);
             // A fresh local shadows the outer variable in the typed owner too:
             // parameter expansion reads shell_state.variables first, so a
             // stale global scalar would keep leaking through (bash: `local X`
             // makes ${X-unset} report unset until the frame returns).
             self.shell_state.variables.remove(&name);
-            set_var_attrs(&mut self.env_vars, &name, VarAttrs::default());
+            set_var_attrs(&mut self.shell_state.env_vars, &name, VarAttrs::default());
             // GNU variables.c:2729 (make_local_variable): a non-inheriting
             // local still inherits the export attribute — and only that
             // attribute — from the variable it shadows.
             if was_exported {
-                mark_env_name(&mut self.env_vars, EXPORTED_VARS, &name);
+                mark_env_name(&mut self.shell_state.env_vars, EXPORTED_VARS, &name);
             }
         }
     }
@@ -1316,7 +1316,7 @@ impl Executor {
             .into_iter()
             .filter(|name| {
                 let base = name.split('[').next().unwrap_or(name.as_str());
-                let readonly = is_marked_var(&self.env_vars, READONLY_VARS, base)
+                let readonly = is_marked_var(&self.shell_state.env_vars, READONLY_VARS, base)
                     || self
                         .shell_state
                         .variables
@@ -1325,7 +1325,7 @@ impl Executor {
                 readonly
                     && !self.tempenv_names.iter().any(|saved| saved == base)
                     && !self
-                        .local_var_scopes
+                        .shell_state.local_var_scopes
                         .iter()
                         .any(|scope| scope.contains_key(base))
             })

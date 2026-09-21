@@ -87,7 +87,7 @@ impl Executor {
                 return Ok(());
             }
             "test" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "test") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "test") {
                     return self.execute_external(cmd);
                 }
                 self.apply_no_output_builtin_redirects(cmd)?;
@@ -95,7 +95,7 @@ impl Executor {
                 Ok(())
             }
             "[" => {
-                if crate::builtins::enable::is_disabled(&self.env_vars, "[") {
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "[") {
                     return self.execute_external(cmd);
                 }
                 self.apply_no_output_builtin_redirects(cmd)?;

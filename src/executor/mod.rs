@@ -190,6 +190,7 @@ use command_text::*;
 pub(crate) use embedded_mutations::COMPOUND_EXPANSION_WS_TAG;
 use env_helpers::*;
 use execution_misc::*;
+pub(crate) use execution_misc::RandomGen;
 use external_setup::{
     command_needs_process_substitution_materialization, ProcessSubstitutionFiles,
 };
@@ -323,7 +324,7 @@ enum LoopControlKind {
     Continue,
 }
 
-type FunctionBody = Rc<Ast>;
+pub(crate) type FunctionBody = Rc<Ast>;
 
 /// Print/roundtrip metadata for a defined function that the body AST alone
 /// does not carry. GNU keeps the whole FUNCTION_DEF command for
@@ -333,13 +334,13 @@ type FunctionBody = Rc<Ast>;
 /// function definition itself (`f () { ... } 1>&2`) print after the closing
 /// brace and travel in the exportstr so subshell children re-import them.
 #[derive(Clone, Debug, Default)]
-pub(in crate::executor) struct FunctionDefInfo {
+pub(crate) struct FunctionDefInfo {
     pub body_kind: Option<crate::parser::FunctionBodyKind>,
     pub def_redirects: Vec<crate::parser::Redirect>,
 }
 
 #[derive(Clone, Debug)]
-struct FunctionDefinitionLocation {
+pub(crate) struct FunctionDefinitionLocation {
     line: usize,
     source: String,
     /// GNU reports the body group's line for DEBUG fires inside a traced
@@ -423,7 +424,7 @@ impl From<std::io::Error> for ExecuteError {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct VarAttrs {
+pub(crate) struct VarAttrs {
     exported: bool,
     readonly: bool,
     integer: bool,
@@ -448,7 +449,12 @@ struct SavedGlobalDeclareLocal {
 /// Command executor
 #[derive(Debug)]
 pub struct Executor {
-    shell_state: ShellState,
+    /// All mutable shell semantics live here — the fork-copy boundary
+    /// (execute_cmd.c:1576 execute_in_subshell / subst.c:7143
+    /// command_substitute). Flat subshells and command substitutions clone
+    /// it wholesale; fields below are process resources, host wiring, or
+    /// per-command/expansion transients that must never be cloned.
+    pub(crate) shell_state: ShellState,
     fd_table: FdTable,
     job_table: JobTable,
     exit_code: i32,
@@ -456,44 +462,10 @@ pub struct Executor {
     /// GNU exit.def:52 (sourced_logout): ~/.bash_logout runs at most once
     /// per shell process (bash_logout, exit.def:156-166).
     bash_logout_sourced: bool,
-    env_vars: HashMap<String, String>,
-    aliases: HashMap<String, Alias>,
-    functions: HashMap<String, FunctionBody>,
-    function_definition_redirects: HashMap<String, CommandNode>,
-    function_def_infos: HashMap<String, FunctionDefInfo>,
-    function_definition_locations: HashMap<String, FunctionDefinitionLocation>,
-    positional_params: Vec<String>,
-    pipestatus: Vec<i32>,
-    function_name_stack: Vec<String>,
-    bash_argc_stack: Vec<String>,
-    bash_argv_stack: Vec<String>,
-    bash_lineno_stack: Vec<String>,
-    bash_source_stack: Vec<String>,
-    local_var_scopes: Vec<HashMap<String, Option<String>>>,
-    local_attr_scopes: Vec<HashMap<String, VarAttrs>>,
-    local_typed_scopes: Vec<HashMap<String, Option<crate::shell::Variable>>>,
-    expanding_aliases: Vec<String>,
-    loop_depth: usize,
-    pub(crate) function_depth: usize,
-    /// GNU source.def: dollar vars changed by the set builtin during a
-    /// sourced script (ARGS_SETBLTIN); gates whether source restores them.
-    pub(crate) dollar_vars_changed_by_set: bool,
-    random_state: RandomGen,
     shell_pid: u32,
-    subshell_depth: Cell<usize>,
     owns_signal_mailbox: bool,
-    last_background_pid: Option<u32>,
     background_children: HashMap<u32, std::process::Child>,
-    background_jobs: HashMap<u32, String>,
-    background_job_order: Vec<u32>,
     coproc_stdin_writers: HashMap<u32, std::io::PipeWriter>,
-    /// GNU execute_cmd.c Coproc.c_name: the coproc name actually stored,
-    /// after find_variable_nameref_for_create may rewrite it to the nameref
-    /// cell. coproc_unsetvars (execute_cmd.c:2450) unbinds <c_name>_PID and
-    /// check_unbind_variable(c_name) at reap time — even when coproc_bind
-    /// failed (invalid identifier, readonly), so the name must be tracked
-    /// independently of whether the *_PID variable exists.
-    coproc_names: HashMap<u32, String>,
     coproc_stdout_readers: HashMap<u32, std::io::PipeReader>,
     coproc_stderr_forwarders: HashMap<u32, std::thread::JoinHandle<Result<(), std::io::Error>>>,
     assignment_output_process_substitutions: HashMap<String, String>,
@@ -694,11 +666,6 @@ pub struct Executor {
     external_file_builtins_enabled: bool,
     process_env_snapshot: HashMap<String, String>,
     history_provider: Option<crate::history::SharedHistoryProvider>,
-    /// The shell's own session history (bashhist.c the_history) for scripts
-    /// that turn history on; None when history was never enabled.
-    pub(crate) session_history: Option<Rc<RefCell<crate::history::SessionHistory>>>,
-    last_notified_job_ids: HashSet<usize>,
-    completion_specs: crate::builtins::complete::CompletionRegistry,
 }
 
 #[cfg(test)]

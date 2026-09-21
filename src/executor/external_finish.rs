@@ -24,7 +24,7 @@ impl Executor {
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             file.write_all(output)?;
         } else {
             self.write_default_stdout(output)?;
@@ -57,13 +57,13 @@ impl Executor {
         };
         let command_uses_this_shell = command_name.contains("THIS_SH");
         let expanded_command_name = self.expand_word(command_name);
-        let expanded_is_this_shell = self.env_vars.get("THIS_SH").is_some_and(|this_sh| {
-            shell_path_to_windows(this_sh, &self.env_vars)
-                == shell_path_to_windows(&expanded_command_name, &self.env_vars)
+        let expanded_is_this_shell = self.shell_state.env_vars.get("THIS_SH").is_some_and(|this_sh| {
+            shell_path_to_windows(this_sh, &self.shell_state.env_vars)
+                == shell_path_to_windows(&expanded_command_name, &self.shell_state.env_vars)
         });
         if !command_uses_this_shell && !expanded_is_this_shell {
             if let Some(script_path) =
-                direct_windows_shell_script_path(&expanded_command_name, &self.env_vars)
+                direct_windows_shell_script_path(&expanded_command_name, &self.shell_state.env_vars)
             {
                 // GNU execute_cmd.c:6139-6233: a file the OS cannot exec
                 // directly is classified by its first bytes before the
@@ -86,8 +86,8 @@ impl Executor {
         // loses the unread portion of the parent's input stream.  Keep the
         // recursion guard for ordinary nested scripts, where no virtual
         // input needs to be transferred.
-        if self.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
-            && !self.env_vars.contains_key(FUNCTION_STDIN)
+        if self.shell_state.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
+            && !self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
             && self.fd_table.input_snapshot(0).is_none()
             && !command_name.contains("THIS_SH")
             && !expanded_is_this_shell
@@ -111,7 +111,7 @@ impl Executor {
             return Ok(false);
         };
         let script = self.expand_word(script);
-        let script_path = shell_path_to_windows(&script, &self.env_vars);
+        let script_path = shell_path_to_windows(&script, &self.shell_state.env_vars);
         if !script_path.is_file() {
             return Ok(false);
         }
@@ -143,19 +143,19 @@ impl Executor {
         let mut ast = crate::parser::parse(&tokens);
         self.apply_command_output_redirects(cmd, &mut ast)?;
 
-        let saved_env = self.env_vars.clone();
+        let saved_env = self.shell_state.env_vars.clone();
         let this_shell_invocation = cmd.words.first().is_some_and(|command| {
-            self.env_vars.get("THIS_SH").is_some_and(|this_sh| {
-                shell_path_to_windows(this_sh, &self.env_vars)
-                    == shell_path_to_windows(&self.expand_word(command), &self.env_vars)
+            self.shell_state.env_vars.get("THIS_SH").is_some_and(|this_sh| {
+                shell_path_to_windows(this_sh, &self.shell_state.env_vars)
+                    == shell_path_to_windows(&self.expand_word(command), &self.shell_state.env_vars)
             })
         });
         // Save parent state BEFORE the this_shell_invocation block clears it.
         let saved_shell_state = this_shell_invocation.then(|| self.shell_state.clone());
-        let saved_functions = self.functions.clone();
-        let saved_function_redirects = self.function_definition_redirects.clone();
-        let saved_function_def_infos = self.function_def_infos.clone();
-        let saved_aliases = self.aliases.clone();
+        let saved_functions = self.shell_state.functions.clone();
+        let saved_function_redirects = self.shell_state.function_definition_redirects.clone();
+        let saved_function_def_infos = self.shell_state.function_def_infos.clone();
+        let saved_aliases = self.shell_state.aliases.clone();
         // A child script is a process boundary: its tempenv stack (POSIX-mode
         // persistent `var=2 :` bindings included) is process-local in GNU and
         // must not leak back into the parent's variable context. Save the
@@ -184,9 +184,9 @@ impl Executor {
             // child's PPID is the parent shell's pid (a real child would see
             // getppid() == the parent shell's getpid()).
             child_env.insert("PPID".to_string(), self.shell_pid.to_string());
-            self.env_vars = child_env;
+            self.shell_state.env_vars = child_env;
             self.shell_state.variables =
-                crate::shell::VariableStore::from_environment(&self.env_vars);
+                crate::shell::VariableStore::from_environment(&self.shell_state.env_vars);
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh
             // shell invocation inherits only exported variables and exported
             // functions (via BASH_FUNC_<name>%% env vars). Non-exported
@@ -194,11 +194,11 @@ impl Executor {
             // Clear the parent's functions/aliases and import only the
             // exported ones from the child environment.
             let (imported_funcs, imported_def_infos) =
-                import_exported_functions_from_env(&self.env_vars);
-            self.functions = imported_funcs;
-            self.function_definition_redirects = HashMap::new();
-            self.function_def_infos = imported_def_infos;
-            self.aliases = HashMap::new();
+                import_exported_functions_from_env(&self.shell_state.env_vars);
+            self.shell_state.functions = imported_funcs;
+            self.shell_state.function_definition_redirects = HashMap::new();
+            self.shell_state.function_def_infos = imported_def_infos;
+            self.shell_state.aliases = HashMap::new();
             // A fresh shell invocation entering a script derives
             // SIG_HARD_IGNORE from the inherited dispositions (trap.c
             // ignore_signal: "A signal ignored on entry to the shell cannot
@@ -211,32 +211,32 @@ impl Executor {
             // added, so `trap` in the child lists it. The in-process child
             // takes the same fresh-shell boundary and must seed identically,
             // or varenv22's last `trap` loses the SIGRTMIN line.
-            crate::builtins::trap::seed_startup_traps(&mut self.env_vars);
-            crate::builtins::trap::mark_startup_ignores(&mut self.env_vars);
+            crate::builtins::trap::seed_startup_traps(&mut self.shell_state.env_vars);
+            crate::builtins::trap::mark_startup_ignores(&mut self.shell_state.env_vars);
         }
-        let saved_pipestatus = self.pipestatus.clone();
-        let saved_positional_params = self.positional_params.clone();
-        let saved_bash_source_stack = self.bash_source_stack.clone();
-        let saved_bash_lineno_stack = self.bash_lineno_stack.clone();
-        let saved_bash_argc_stack = self.bash_argc_stack.clone();
-        let saved_bash_argv_stack = self.bash_argv_stack.clone();
+        let saved_pipestatus = self.shell_state.pipestatus.clone();
+        let saved_positional_params = self.shell_state.positional_params.clone();
+        let saved_bash_source_stack = self.shell_state.bash_source_stack.clone();
+        let saved_bash_lineno_stack = self.shell_state.bash_lineno_stack.clone();
+        let saved_bash_argc_stack = self.shell_state.bash_argc_stack.clone();
+        let saved_bash_argv_stack = self.shell_state.bash_argv_stack.clone();
         let saved_cwd = env::current_dir().ok();
         // GNU execute_cmd.c:6139-6233: a ${THIS_SH} script invocation is a
         // fresh shell process, not a subshell. subshell_depth must NOT be
         // incremented, or run_sigchld_trap_for_reaped_child suppresses
         // SIGCHLD traps (trap8.sub: four CHLD firings for reaped children).
-        let saved_depth = self.subshell_depth.get();
+        let saved_depth = self.shell_state.subshell_depth.get();
         // The child is a fresh shell process (shell.c open_shell_script):
         // it must not inherit the parent's loop/function/compound-condition
         // depths, or a word-expansion failure inside the child unwinds past
         // its own top level (ast_exec ExpansionFailure requires
         // loop_depth==0 to be command-list-local) and kills the child's
         // remaining commands instead of just skipping the line.
-        let saved_loop_depth = self.loop_depth;
-        let saved_function_depth = self.function_depth;
+        let saved_loop_depth = self.shell_state.loop_depth;
+        let saved_function_depth = self.shell_state.function_depth;
         let saved_inside_compound_condition = self.inside_compound_condition.get();
-        self.loop_depth = 0;
-        self.function_depth = 0;
+        self.shell_state.loop_depth = 0;
+        self.shell_state.function_depth = 0;
         self.inside_compound_condition.set(false);
         // The child is a separate process in GNU: an evalerror/DISCARD
         // abort pending at child exit dies with it and must not leak back
@@ -263,12 +263,12 @@ impl Executor {
         let saved_assignment_command_name = self.assignment_command_name.take();
 
         if let (Some(input), _) = self.function_call_stdin(cmd)? {
-            self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-            self.env_vars
+            self.shell_state.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+            self.shell_state.env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
-            self.env_vars.remove(INHERIT_PROCESS_STDIN);
+            self.shell_state.env_vars.remove(INHERIT_PROCESS_STDIN);
         } else {
-            self.env_vars
+            self.shell_state.env_vars
                 .insert(INHERIT_PROCESS_STDIN.to_string(), "1".to_string());
         }
         self.set_env("__RUBASH_SCRIPT_NAME", script);
@@ -283,10 +283,10 @@ impl Executor {
             // every new shell invocation. OPTIND is not exported, so
             // child_shell_environment doesn't carry it over; set it here
             // so getopts in the child starts fresh.
-            self.env_vars.insert("OPTIND".to_string(), "1".to_string());
+            self.shell_state.env_vars.insert("OPTIND".to_string(), "1".to_string());
         }
         if !this_shell_invocation {
-            self.subshell_depth.set(saved_depth + 1);
+            self.shell_state.subshell_depth.set(saved_depth + 1);
         }
 
         // A ${THIS_SH} child is a process boundary, so the process
@@ -303,7 +303,7 @@ impl Executor {
             for (name, _) in env::vars() {
                 env::remove_var(&name);
             }
-            for (name, value) in &self.env_vars {
+            for (name, value) in &self.shell_state.env_vars {
                 if crate::executor::local_helpers::is_valid_process_env(name, value) {
                     env::set_var(name, value);
                 }
@@ -339,23 +339,23 @@ impl Executor {
         if let Some(saved_shell_state) = saved_shell_state {
             self.shell_state = saved_shell_state;
         }
-        self.pipestatus = saved_pipestatus;
+        self.shell_state.pipestatus = saved_pipestatus;
         self.set_positional_params(saved_positional_params);
-        self.functions = saved_functions;
-        self.function_definition_redirects = saved_function_redirects;
-        self.function_def_infos = saved_function_def_infos;
-        self.aliases = saved_aliases;
+        self.shell_state.functions = saved_functions;
+        self.shell_state.function_definition_redirects = saved_function_redirects;
+        self.shell_state.function_def_infos = saved_function_def_infos;
+        self.shell_state.aliases = saved_aliases;
         self.tempenv_names = saved_tempenv_names;
         self.tempenv_marks = saved_tempenv_marks;
         self.tempenv_promoted_names = saved_tempenv_promoted;
         self.tempenv_previous = saved_tempenv_previous;
-        self.bash_source_stack = saved_bash_source_stack;
-        self.bash_lineno_stack = saved_bash_lineno_stack;
-        self.bash_argc_stack = saved_bash_argc_stack;
-        self.bash_argv_stack = saved_bash_argv_stack;
-        self.subshell_depth.set(saved_depth);
-        self.loop_depth = saved_loop_depth;
-        self.function_depth = saved_function_depth;
+        self.shell_state.bash_source_stack = saved_bash_source_stack;
+        self.shell_state.bash_lineno_stack = saved_bash_lineno_stack;
+        self.shell_state.bash_argc_stack = saved_bash_argc_stack;
+        self.shell_state.bash_argv_stack = saved_bash_argv_stack;
+        self.shell_state.subshell_depth.set(saved_depth);
+        self.shell_state.loop_depth = saved_loop_depth;
+        self.shell_state.function_depth = saved_function_depth;
         self.inside_compound_condition
             .set(saved_inside_compound_condition);
         self.evalerror_pending.set(saved_evalerror_pending);
@@ -428,11 +428,11 @@ impl Executor {
     }
 
     pub(in crate::executor) fn child_shell_environment(&self) -> HashMap<String, String> {
-        let exported = marked_env_names(&self.env_vars, EXPORTED_VARS);
+        let exported = marked_env_names(&self.shell_state.env_vars, EXPORTED_VARS);
         let mut child = exported
             .iter()
             .filter_map(|name| {
-                self.env_vars
+                self.shell_state.env_vars
                     .get(name)
                     .map(|value| (name.clone(), value.clone()))
             })
@@ -453,7 +453,7 @@ impl Executor {
             );
         }
         for name in ["OLDPWD", "SHELL"] {
-            if let Some(value) = self.env_vars.get(name) {
+            if let Some(value) = self.shell_state.env_vars.get(name) {
                 child
                     .entry(name.to_string())
                     .or_insert_with(|| value.clone());
@@ -467,7 +467,7 @@ impl Executor {
         &self,
         cmd: &CommandNode,
     ) -> bool {
-        self.env_vars
+        self.shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| script.ends_with("posixpipe.tests"))
             && cmd
@@ -477,7 +477,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn is_posixpipe_time_count_fragment(&self, cmd: &CommandNode) -> bool {
-        self.env_vars
+        self.shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| script.ends_with("posixpipe.tests"))
             && cmd
@@ -487,7 +487,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn is_posixpipe_time_count_remainder(&self, cmd: &CommandNode) -> bool {
-        self.env_vars
+        self.shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| script.ends_with("posixpipe.tests"))
             && cmd

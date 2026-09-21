@@ -15,9 +15,9 @@ impl Executor {
         // own source line (dbg-support2.tests).
         {
             let _t = PhaseTimer::new(&super::exec_profile::P_LINECMD);
-            if self.debug_trap_running && self.function_depth > 0 {
+            if self.debug_trap_running && self.shell_state.function_depth > 0 {
                 if let Some(line) = self.debug_trap_function_line {
-                    self.env_vars
+                    self.shell_state.env_vars
                         .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
                 } else {
                     self.set_current_line(cmd);
@@ -199,7 +199,7 @@ impl Executor {
         // literal silently accepts malformed scripts.  Conditional RHS
         // patterns are handled separately and intentionally remain eligible
         // for Bash's conditional-pattern semantics.
-        if !crate::builtins::shopt::option_enabled(&self.env_vars, "extglob")
+        if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extglob")
             && !cmd.extglob_patterns.is_empty()
             && cmd.conditional_command.is_none()
             && cmd.case_command.is_none()
@@ -432,7 +432,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Option<CommandNode> {
-        if !crate::builtins::set::shell_option_enabled(&self.env_vars, "keyword") {
+        if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "keyword") {
             return None;
         }
 
@@ -579,10 +579,10 @@ impl Executor {
             // (reader_loop) sets EOF_Reached so a script-mode shell exits
             // with last_command_exit_value (EXECUTION_FAILURE=1).
             if self.posix_mode_enabled()
-                && self.env_vars.get("__RUBASH_INTERACTIVE").map(String::as_str)
+                && self.shell_state.env_vars.get("__RUBASH_INTERACTIVE").map(String::as_str)
                     != Some("1")
             {
-                let code = if self.env_vars.get("__RUBASH_IS_C").is_some() {
+                let code = if self.shell_state.env_vars.get("__RUBASH_IS_C").is_some() {
                     127
                 } else {
                     1
@@ -607,12 +607,12 @@ impl Executor {
         if self.parameter_bad_substitution.replace(false) {
             if self.posix_mode_enabled()
                 && self
-                    .env_vars
+                    .shell_state.env_vars
                     .get("__RUBASH_INTERACTIVE")
                     .map(String::as_str)
                     != Some("1")
             {
-                let code = if self.env_vars.get("__RUBASH_IS_C").is_some() {
+                let code = if self.shell_state.env_vars.get("__RUBASH_IS_C").is_some() {
                     127
                 } else {
                     1

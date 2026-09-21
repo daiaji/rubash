@@ -2,7 +2,7 @@ use super::*;
 
 impl Executor {
     pub(crate) fn alias_expansion_enabled(&self) -> bool {
-        self.env_vars
+        self.shell_state.env_vars
             .get("__RUBASH_SHOPT_STATE")
             .is_some_and(|value| value.split('\x1f').any(|name| name == "expand_aliases"))
     }
@@ -12,11 +12,11 @@ impl Executor {
         name: &str,
         value: String,
     ) -> String {
-        if is_marked_var(&self.env_vars, UPPERCASE_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, name) {
             value.to_uppercase()
-        } else if is_marked_var(&self.env_vars, LOWERCASE_VARS, name) {
+        } else if is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, name) {
             value.to_lowercase()
-        } else if is_marked_var(&self.env_vars, CAPCASE_VARS, name) {
+        } else if is_marked_var(&self.shell_state.env_vars, CAPCASE_VARS, name) {
             // GNU capitalize: first character uppercased, rest lowercased
             // (variables.c capcase assignment, casemod.tests:99-103).
             let mut chars = value.chars();
@@ -63,7 +63,7 @@ impl Executor {
         // until the depth limit fires.
         let mut current = name.to_string();
         for level in 1..=9 {
-            if !is_marked_var(&self.env_vars, NAMEREF_VARS, &current) {
+            if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &current) {
                 return if current == name {
                     NamerefResolution::NotNameref
                 } else {
@@ -73,7 +73,7 @@ impl Executor {
             if level > 8 {
                 return NamerefResolution::MaxDepth;
             }
-            let Some(target) = self.env_vars.get(&current) else {
+            let Some(target) = self.shell_state.env_vars.get(&current) else {
                 // Marked nameref with no cell entry at all.
                 return NamerefResolution::Unresolved;
             };
@@ -101,10 +101,10 @@ impl Executor {
     pub(in crate::executor) fn last_nameref_cell(&self, name: &str) -> Option<String> {
         let mut current = name.to_string();
         for _ in 0..9 {
-            if !is_marked_var(&self.env_vars, NAMEREF_VARS, &current) {
+            if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &current) {
                 return None;
             }
-            let cell = self.env_vars.get(&current).cloned().unwrap_or_default();
+            let cell = self.shell_state.env_vars.get(&current).cloned().unwrap_or_default();
             if cell.is_empty() || (!is_shell_name(&cell) && parse_array_subscript(&cell).is_none())
             {
                 return Some(cell);
@@ -125,7 +125,7 @@ impl Executor {
     /// applies inside a function context (`variable_context && v->context`);
     /// at the global scope the chain resolution returns nothing.
     pub(in crate::executor) fn nameref_circular_fallback_name(&self, name: &str) -> Option<String> {
-        if self.function_depth == 0 {
+        if self.shell_state.function_depth == 0 {
             return None;
         }
         let mut current = name;
@@ -133,10 +133,10 @@ impl Executor {
         // NAMEREF_MAX=8 hops, circular only when the chain returns to the
         // start name or the variable just traversed (variables.c:2033).
         for _ in 0..8 {
-            if !is_marked_var(&self.env_vars, NAMEREF_VARS, current) {
+            if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, current) {
                 return None;
             }
-            let target = self.env_vars.get(current)?;
+            let target = self.shell_state.env_vars.get(current)?;
             if !is_shell_name(target) && parse_array_subscript(target).is_none() {
                 return None;
             }
@@ -160,7 +160,7 @@ impl Executor {
         // snapshot holds an intervening local, and the live store slot is
         // the shadowing local itself (e.g. the `ref -> ref` cell, which is
         // why reading the live slot yields "ref" instead of the global).
-        for typed_scope in &self.local_typed_scopes {
+        for typed_scope in &self.shell_state.local_typed_scopes {
             if let Some(saved) = typed_scope.get(&fallback) {
                 return match saved {
                     Some(crate::shell::Variable {
@@ -206,11 +206,11 @@ impl Executor {
         // are the saved VarAttrs in the outermost frame that localized the
         // name — the same frame holding its saved value.
         let saved_attrs = self
-            .local_var_scopes
+            .shell_state.local_var_scopes
             .iter()
             .position(|scope| scope.contains_key(&fallback))
             .and_then(|index| {
-                self.local_attr_scopes
+                self.shell_state.local_attr_scopes
                     .get(index)
                     .and_then(|scope| scope.get(&fallback))
                     .copied()
@@ -219,7 +219,7 @@ impl Executor {
         if let Some((scope_index, attrs)) =
             saved_attrs.filter(|(_, attrs)| attrs.array || attrs.assoc)
         {
-            let saved = self.local_var_scopes[scope_index]
+            let saved = self.shell_state.local_var_scopes[scope_index]
                 .get(&fallback)
                 .cloned()
                 .flatten()
@@ -276,7 +276,7 @@ impl Executor {
                 entries.insert(0, element);
                 super::arrays::format_indexed_array_storage(entries)
             };
-            self.local_var_scopes[scope_index].insert(fallback.clone(), Some(updated));
+            self.shell_state.local_var_scopes[scope_index].insert(fallback.clone(), Some(updated));
             return;
         }
         let mut variable = match self.circular_fallback_value(name) {
@@ -291,14 +291,14 @@ impl Executor {
         };
         variable.value = crate::shell::ShellValue::Scalar(scalar.clone());
         let mut wrote_snapshot = false;
-        for typed_scope in &mut self.local_typed_scopes {
+        for typed_scope in &mut self.shell_state.local_typed_scopes {
             if typed_scope.contains_key(&fallback) {
                 typed_scope.insert(fallback.clone(), Some(variable.clone()));
                 wrote_snapshot = true;
                 break;
             }
         }
-        for scope in &mut self.local_var_scopes {
+        for scope in &mut self.shell_state.local_var_scopes {
             if scope.contains_key(&fallback) {
                 scope.insert(fallback.clone(), Some(scalar));
                 break;
@@ -347,8 +347,8 @@ impl Executor {
             .or_else(|| name.strip_suffix("[*]"))
         {
             if let Some(storage) = self.parameter_array_storage(array_name) {
-                let values = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
-                    assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, array_name))
+                let values = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name) {
+                    assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.shell_state.env_vars, array_name))
                 } else {
                     array_values(&storage)
                 };
@@ -363,9 +363,9 @@ impl Executor {
         // to `${a[0]}`.  The scalar value in `shell_state.variables` is stale
         // and must not short-circuit the array lookup.  `unset a[0]` removes
         // element 0 from the array storage, so `${a}` must return empty.
-        if is_marked_array_var(&self.env_vars, &name) {
+        if is_marked_array_var(&self.shell_state.env_vars, &name) {
             return self
-                .env_vars
+                .shell_state.env_vars
                 .get(&name)
                 .and_then(|value| self.scalar_parameter_value(&name, value));
         }
@@ -376,7 +376,7 @@ impl Executor {
         {
             return Some(value.clone());
         }
-        self.env_vars
+        self.shell_state.env_vars
             .get(&name)
             .and_then(|value| self.scalar_parameter_value(&name, value))
     }
@@ -386,22 +386,22 @@ impl Executor {
         name: &str,
         value: &str,
     ) -> Option<String> {
-        if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) {
             return assoc_value_at(value, "0");
         }
-        if is_marked_array_var(&self.env_vars, name) {
+        if is_marked_array_var(&self.shell_state.env_vars, name) {
             return array_value_at(value, 0);
         }
         Some(value.to_string())
     }
 
     pub(in crate::executor) fn eval_integer_assignment_value(&self, value: &str) -> i128 {
-        eval_conditional_arith_value(value, &self.env_vars).unwrap_or(0)
+        eval_conditional_arith_value(value, &self.shell_state.env_vars).unwrap_or(0)
     }
 
     pub(in crate::executor) fn mark_exported(&mut self, name: &str) {
         let mut exported: Vec<String> = self
-            .env_vars
+            .shell_state.env_vars
             .get(EXPORTED_VARS)
             .map(|value| {
                 value
@@ -415,7 +415,7 @@ impl Executor {
         if !exported.iter().any(|exported_name| exported_name == name) {
             exported.push(name.to_string());
         }
-        self.env_vars
+        self.shell_state.env_vars
             .insert(EXPORTED_VARS.to_string(), exported.join("\x1f"));
     }
 
@@ -431,7 +431,7 @@ impl Executor {
             || ((command == "declare" || command == "typeset")
                 && Self::declare_applies_persistent_attribute(cmd))
             || (command == "eval" && cmd.assignment_keys().any(|name| name.ends_with('+')))
-            || (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
+            || (self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
                 && (is_posix_special_builtin(command) || command == "source"))
     }
 
@@ -454,7 +454,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn posix_mode_enabled(&self) -> bool {
-        self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
+        self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
     }
 
     pub(in crate::executor) fn restore_temporary_assignments(
@@ -494,10 +494,10 @@ impl Executor {
                 continue;
             }
             if let Some(value) = value {
-                self.env_vars.insert(name.clone(), value.clone());
+                self.shell_state.env_vars.insert(name.clone(), value.clone());
                 set_process_env(&name, value);
             } else {
-                self.env_vars.remove(&name);
+                self.shell_state.env_vars.remove(&name);
                 env::remove_var(&name);
             }
             self.restore_typed_temporary_value(&name, typed_value);
@@ -513,13 +513,13 @@ impl Executor {
         // themselves whose whole-list restore ran above, so the per-name
         // attribute writes must go last or the list restore clobbers them.
         for (name, attrs) in deferred_attrs {
-            set_var_attrs(&mut self.env_vars, &name, attrs);
+            set_var_attrs(&mut self.shell_state.env_vars, &name, attrs);
             // Only resync an existing typed cell — creating one for an unset
             // name would materialize `var=<unset>` bindings as `var=`.
             if self.shell_state.variables.get(&name).is_some() {
                 crate::builtins::declare::sync_typed_attributes(
                     &[name],
-                    &self.env_vars,
+                    &self.shell_state.env_vars,
                     &mut self.shell_state.variables,
                 );
             }

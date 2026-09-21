@@ -296,7 +296,7 @@ impl Executor {
                 }
                 Some('@') => {
                     chars.next();
-                    let value = self.positional_params.join(" ");
+                    let value = self.shell_state.positional_params.join(" ");
                     if preserve_quotes && !in_double {
                         output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                     } else {
@@ -314,7 +314,7 @@ impl Executor {
                 }
                 Some('#') => {
                     chars.next();
-                    output.push_str(&self.positional_params.len().to_string());
+                    output.push_str(&self.shell_state.positional_params.len().to_string());
                 }
                 Some('-') => {
                     chars.next();
@@ -381,7 +381,7 @@ impl Executor {
                         // `&self` walk captures them into the deferred
                         // queue (overlaid so earlier queued writes are
                         // visible) for the mutable caller to apply.
-                        let overlaid = crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(&self.env_vars);
+                        let overlaid = crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(&self.shell_state.env_vars);
                         let (value, writes, actual_category) =
                             eval_conditional_arith_value_categorized_with_writes(
                                 &expression,
@@ -422,7 +422,7 @@ impl Executor {
                                 let message = crate::executor::arithmetic::arithmetic_error_message(
                                     &expression,
                                     true,
-                                    &self.env_vars,
+                                    &self.shell_state.env_vars,
                                 )
                                 .unwrap_or_else(|| {
                                     format!(
@@ -519,7 +519,7 @@ impl Executor {
                     if closed {
                         let expression = self.expand_arithmetic_special_parameters(&expression);
                         if let Some(value) =
-                            eval_conditional_arith_value(&expression, &self.env_vars)
+                            eval_conditional_arith_value(&expression, &self.shell_state.env_vars)
                         {
                             let value = value.to_string();
                             if preserve_quotes && !in_double {
@@ -541,7 +541,7 @@ impl Executor {
                         output.push_str(&self.script_name_value());
                     } else {
                         let value = self
-                            .positional_params
+                            .shell_state.positional_params
                             .get(index - 1)
                             .map(String::as_str)
                             .unwrap_or("");

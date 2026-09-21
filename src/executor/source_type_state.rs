@@ -117,7 +117,7 @@ impl Executor {
         if args.len() == 2
             && args[0] == "-t"
             && args[1] == "test"
-            && crate::builtins::enable::is_disabled(&self.env_vars, "test")
+            && crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "test")
         {
             if self.command_path("test", false).is_some() {
                 writeln!(stdout, "file")?;
@@ -129,7 +129,7 @@ impl Executor {
         if args.len() == 2
             && args[0] == "-t"
             && args[1] == "test"
-            && !crate::builtins::enable::is_disabled(&self.env_vars, "test")
+            && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "test")
         {
             writeln!(stdout, "builtin")?;
             return Ok(Some(0));

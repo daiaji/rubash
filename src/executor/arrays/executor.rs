@@ -12,19 +12,19 @@ impl Executor {
         match name {
             "PIPESTATUS" => return self.pipestatus_values(),
             "FUNCNAME" => {
-                let mut stack = self.function_name_stack.clone();
+                let mut stack = self.shell_state.function_name_stack.clone();
                 if !stack.is_empty() && stack.last().map(String::as_str) != Some("main") {
                     stack.push("main".to_string());
                 }
                 return stack;
             }
-            "BASH_ARGC" => return self.bash_argc_stack.clone(),
-            "BASH_ARGV" => return self.bash_argv_stack.clone(),
+            "BASH_ARGC" => return self.shell_state.bash_argc_stack.clone(),
+            "BASH_ARGV" => return self.shell_state.bash_argv_stack.clone(),
             "BASH_LINENO" => return self.bash_lineno_view(),
-            "BASH_SOURCE" => return self.bash_source_stack.clone(),
+            "BASH_SOURCE" => return self.shell_state.bash_source_stack.clone(),
             _ => {}
         }
-        self.env_vars
+        self.shell_state.env_vars
             .get(name)
             .map(|value| array_values(value))
             .unwrap_or_default()
@@ -42,7 +42,7 @@ impl Executor {
             return format!("declare -a {name}=({rendered})");
         }
 
-        let Some(value) = self.env_vars.get(name) else {
+        let Some(value) = self.shell_state.env_vars.get(name) else {
             // GNU array_var_assignment (subst.c:8680): a declared-unset array
             // (invisible cell or no value) renders `declare -<flags> name`
             // with no `=()` body, keeping the full attribute string.
@@ -55,11 +55,11 @@ impl Executor {
         // (invisible) array that still has a value cell drops the `=()` body
         // just like a missing cell. Rubash stores declared-unset arrays in
         // env_vars with a marker, so check the marker here.
-        if is_marked_var(&self.env_vars, DECLARED_UNSET_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, name) {
             return format!("declare -{flags} {name}");
         }
-        if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
-            let entries = assoc_hash_ordered_entries(value, assoc_nbuckets(&self.env_vars, name));
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) {
+            let entries = assoc_hash_ordered_entries(value, assoc_nbuckets(&self.shell_state.env_vars, name));
             if entries.is_empty() {
                 // GNU array_var_assignment (subst.c:8693-8697): a set-but-empty
                 // array gets `=()` (val == 0 but var_isset); only invisible/unset
@@ -80,7 +80,7 @@ impl Executor {
             return format!("declare -{flags} {name}=({rendered} )");
         }
 
-        if is_marked_array_var(&self.env_vars, name) || is_array_storage(value) {
+        if is_marked_array_var(&self.shell_state.env_vars, name) || is_array_storage(value) {
             let rendered = indexed_array_entries(value)
                 .into_iter()
                 .map(|(index, value)| format!("[{index}]={}", quote_array_value(&value)))
@@ -120,7 +120,7 @@ impl Executor {
 
         let storage_name = self.resolved_variable_name(array_name)?;
         let storage = self.parameter_array_storage(array_name).unwrap_or_default();
-        if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &storage_name) {
             // GNU parameters.c assoc_reference: a literal * subscript means
             // all elements, not the key "*"; a quoted * joins with IFS[0]
             // (string_list_pos_params). Expanded subscripts such as
@@ -129,7 +129,7 @@ impl Executor {
                 return Some(
                     assoc_hash_ordered_values(
                         &storage,
-                        assoc_nbuckets(&self.env_vars, &storage_name),
+                        assoc_nbuckets(&self.shell_state.env_vars, &storage_name),
                     )
                     .join(&self.ifs_first_char_separator()),
                 );
@@ -166,11 +166,11 @@ impl Executor {
                     .trim();
                 // Still expand special parameters ($#, $-) inside the expression.
                 let expr = expr
-                    .replace("$#", &self.positional_params.len().to_string())
+                    .replace("$#", &self.shell_state.positional_params.len().to_string())
                     .replace("$-", "0");
                 let overlaid =
                     crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
-                        &self.env_vars,
+                        &self.shell_state.env_vars,
                     );
                 let (result, writes) =
                     eval_conditional_arith_value_with_writes(&expr, &overlaid);
@@ -266,12 +266,12 @@ impl Executor {
         let resolved = self
             .resolved_variable_name(array_name)
             .unwrap_or_else(|| array_name.to_string());
-        if !is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
+        if !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved) {
             // GNU subst.c:9064 get_var_and_type resolves / on
             // a scalar to VT_VARIABLE, so parameter_brace_substring
             // (subst.c:9083-9099) applies the offset/length to the string
             // value itself rather than slicing an element list.
-            let is_array = is_marked_array_var(&self.env_vars, &resolved)
+            let is_array = is_marked_array_var(&self.shell_state.env_vars, &resolved)
                 || is_array_storage(&storage);
             if !is_array {
                 return Some(vec![crate::executor::parameter_substring(
@@ -282,7 +282,7 @@ impl Executor {
             }
             return Some(array_parameter_slice(&storage, offset, length));
         }
-        let values = assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.env_vars, &resolved));
+        let values = assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.shell_state.env_vars, &resolved));
         let count = values.len() as i128;
         let start = if offset < 0 {
             offset as i128 + count + 1
@@ -341,7 +341,7 @@ impl Executor {
                 .and_then(|name| self.parse_parameter_substring(name))
             {
                 if let Some(indirect_name) = name.strip_prefix('!') {
-                    let target_expr = self.env_vars.get(indirect_name)?;
+                    let target_expr = self.shell_state.env_vars.get(indirect_name)?;
                     let expands_as_array = target_expr.ends_with("[@]")
                         || (!quoted_array_word && target_expr.ends_with("[*]"));
                     if expands_as_array {
@@ -375,7 +375,7 @@ impl Executor {
                 .and_then(|word| word.strip_suffix("@}"))
             {
                 let mut names = self
-                    .env_vars
+                    .shell_state.env_vars
                     .keys()
                     .map(String::as_str)
                     // GNU param_expand lists shell_variables only; invalid-name
@@ -392,7 +392,7 @@ impl Executor {
                 .and_then(|word| word.strip_suffix("*}"))
             {
                 let mut names = self
-                    .env_vars
+                    .shell_state.env_vars
                     .keys()
                     .map(String::as_str)
                     // Same invalid_env exclusion as the @ form above (issue #102).
@@ -408,10 +408,10 @@ impl Executor {
             {
                 let storage_name = self.resolved_variable_name(name)?;
                 let storage = self.parameter_array_storage(name)?;
-                if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
+                if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &storage_name) {
                     return Some(assoc_keys(
                         &storage,
-                        assoc_nbuckets(&self.env_vars, &storage_name),
+                        assoc_nbuckets(&self.shell_state.env_vars, &storage_name),
                     ));
                 }
                 return Some(array_indices(&storage));
@@ -422,8 +422,8 @@ impl Executor {
             {
                 let storage_name = self.resolved_variable_name(name)?;
                 let storage = self.parameter_array_storage(name)?;
-                let keys = if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
-                    assoc_keys(&storage, assoc_nbuckets(&self.env_vars, &storage_name))
+                let keys = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &storage_name) {
+                    assoc_keys(&storage, assoc_nbuckets(&self.shell_state.env_vars, &storage_name))
                 } else {
                     array_indices(&storage)
                 };
@@ -458,20 +458,20 @@ impl Executor {
             if let NamerefResolution::Target(target) = self.nameref_resolution(name) {
                 if let Some(array_name) = target.strip_suffix("[@]") {
                     if let Some(storage) = self.parameter_array_storage(array_name) {
-                        if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name) {
                             return Some(assoc_hash_ordered_values(
                                 &storage,
-                                assoc_nbuckets(&self.env_vars, array_name),
+                                assoc_nbuckets(&self.shell_state.env_vars, array_name),
                             ));
                         }
                         return Some(array_values(&storage));
                     }
                 } else if let Some(array_name) = target.strip_suffix("[*]") {
                     if let Some(storage) = self.parameter_array_storage(array_name) {
-                        let values = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                        let values = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name) {
                             assoc_hash_ordered_values(
                                 &storage,
-                                assoc_nbuckets(&self.env_vars, array_name),
+                                assoc_nbuckets(&self.shell_state.env_vars, array_name),
                             )
                         } else {
                             array_values(&storage)
@@ -496,10 +496,10 @@ impl Executor {
             return Some(self.groups_words());
         }
         let storage = self.parameter_array_storage(name)?;
-        if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) {
             return Some(assoc_hash_ordered_values(
                 &storage,
-                assoc_nbuckets(&self.env_vars, name),
+                assoc_nbuckets(&self.shell_state.env_vars, name),
             ));
         }
         Some(array_values(&storage))
@@ -561,7 +561,7 @@ impl Executor {
             // matching GNU's array_cell(v) == NULL; `x=()` allocates a real
             // (empty) cell and clears the marker.
             let null_cell = storage.is_none()
-                || is_marked_var(&self.env_vars, DECLARED_UNSET_VARS, &resolved);
+                || is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, &resolved);
             if null_cell {
                 let attrs = self.parameter_attribute_transform(array_name);
                 if attrs.is_empty() {
@@ -572,11 +572,11 @@ impl Executor {
             } else {
                 let count = match storage.as_ref() {
                     Some(storage)
-                        if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) =>
+                        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved) =>
                     {
                         assoc_hash_ordered_values(
                             storage,
-                            assoc_nbuckets(&self.env_vars, &resolved),
+                            assoc_nbuckets(&self.shell_state.env_vars, &resolved),
                         )
                         .len()
                     }
@@ -590,14 +590,14 @@ impl Executor {
         } else {
             let storage = storage?;
             if is_marked_var(
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 ASSOC_VARS,
                 &self.resolved_variable_name(array_name).unwrap_or_default(),
             ) {
                 assoc_hash_ordered_values(
                     &storage,
                     assoc_nbuckets(
-                        &self.env_vars,
+                        &self.shell_state.env_vars,
                         &self.resolved_variable_name(array_name).unwrap_or_default(),
                     ),
                 )
@@ -685,14 +685,14 @@ impl Executor {
             .or_else(|| var_name.strip_suffix("[*]").map(|name| (name, true)))?;
         let storage = self.parameter_array_storage(array_name)?;
         let values = if is_marked_var(
-            &self.env_vars,
+            &self.shell_state.env_vars,
             ASSOC_VARS,
             &self.resolved_variable_name(array_name).unwrap_or_default(),
         ) {
             assoc_hash_ordered_values(
                 &storage,
                 assoc_nbuckets(
-                    &self.env_vars,
+                    &self.shell_state.env_vars,
                     &self.resolved_variable_name(array_name).unwrap_or_default(),
                 ),
             )
@@ -711,9 +711,9 @@ impl Executor {
     fn array_key_value_split_transform_values(&self, array_name: &str) -> Option<Vec<String>> {
         let storage_name = self.resolved_variable_name(array_name)?;
         let storage = self.parameter_array_storage(array_name)?;
-        if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &storage_name) {
             return Some(
-                assoc_hash_ordered_entries(&storage, assoc_nbuckets(&self.env_vars, &storage_name))
+                assoc_hash_ordered_entries(&storage, assoc_nbuckets(&self.shell_state.env_vars, &storage_name))
                     .into_iter()
                     .flat_map(|(key, value)| [key, value])
                     .collect(),
@@ -739,7 +739,7 @@ impl Executor {
         // target's value (GNU parameter_brace_expand_indir subst.c:7896
         // returns the nameref cell verbatim); leave those to the scalar
         // path.
-        if is_marked_var(&self.env_vars, NAMEREF_VARS, indirect_name) {
+        if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, indirect_name) {
             return None;
         }
         let target_expr = self.resolve_indirect_target_expr(indirect_name)?;
@@ -756,12 +756,12 @@ impl Executor {
         indirect_name: &str,
     ) -> Option<String> {
         if let Ok(index) = indirect_name.parse::<usize>() {
-            return self.positional_params.get(index.saturating_sub(1)).cloned();
+            return self.shell_state.positional_params.get(index.saturating_sub(1)).cloned();
         }
         if !is_shell_name(indirect_name) {
             return None;
         }
-        self.env_vars.get(indirect_name).cloned()
+        self.shell_state.env_vars.get(indirect_name).cloned()
     }
 
     /// GNU chk_atstar (subst.c:7922) plus the array-indirection branch of
@@ -784,23 +784,23 @@ impl Executor {
                 // `b c` parameter under the default IFS); quoted "$@" keeps
                 // one word per parameter verbatim.
                 return Some(if quoted_array_word {
-                    self.positional_params.clone()
+                    self.shell_state.positional_params.clone()
                 } else {
                     field_split_positional_values_with_ifs(
-                        self.positional_params.clone(),
-                        self.env_vars.get("IFS").map(String::as_str),
+                        self.shell_state.positional_params.clone(),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     )
                 });
             }
             "*" => {
                 return Some(if quoted_array_word {
                     vec![self
-                        .positional_params
+                        .shell_state.positional_params
                         .join(&self.ifs_first_char_separator())]
                 } else {
                     field_split_positional_values_with_ifs(
-                        self.positional_params.clone(),
-                        self.env_vars.get("IFS").map(String::as_str),
+                        self.shell_state.positional_params.clone(),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     )
                 });
             }
@@ -820,12 +820,12 @@ impl Executor {
         }
         Some(field_split_array_values_with_ifs(
             values,
-            self.env_vars.get("IFS").map(String::as_str),
+            self.shell_state.env_vars.get("IFS").map(String::as_str),
         ))
     }
 
     pub(in crate::executor) fn ifs_first_char_separator(&self) -> String {
-        match self.env_vars.get("IFS") {
+        match self.shell_state.env_vars.get("IFS") {
             Some(ifs) => ifs
                 .chars()
                 .next()

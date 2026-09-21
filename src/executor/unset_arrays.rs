@@ -21,7 +21,7 @@ impl Executor {
                         &metadata.raw,
                         false,
                         false,
-                        &self.env_vars,
+                        &self.shell_state.env_vars,
                     )
                 })
             })
@@ -36,7 +36,7 @@ impl Executor {
                     &mut std::io::sink(),
                 );
             }
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            let mut file = File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
         }
 
@@ -45,7 +45,7 @@ impl Executor {
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
         }
 
@@ -71,7 +71,7 @@ impl Executor {
         if unset_args_need_builtin_diagnostics(args) {
             let status = crate::builtins::set::unset_with_stderr(
                 args.iter().map(String::as_str),
-                &mut self.env_vars,
+                &mut self.shell_state.env_vars,
                 stderr,
             )?;
             // Convert error statuses > EX_SHERRBASE (256) and set
@@ -113,7 +113,7 @@ impl Executor {
         let mut function_status = 0;
         if !variable_only {
             for (_, name) in &names {
-                if marked_env_names(&self.env_vars, READONLY_FUNCTIONS)
+                if marked_env_names(&self.shell_state.env_vars, READONLY_FUNCTIONS)
                     .iter()
                     .any(|readonly| readonly == name)
                 {
@@ -125,10 +125,10 @@ impl Executor {
                     function_status = 1;
                     continue;
                 }
-                self.functions.remove(name);
-                self.function_definition_redirects.remove(name);
-                self.function_def_infos.remove(name);
-                unmark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
+                self.shell_state.functions.remove(name);
+                self.shell_state.function_definition_redirects.remove(name);
+                self.shell_state.function_def_infos.remove(name);
+                unmark_env_name(&mut self.shell_state.env_vars, EXPORTED_FUNCTIONS, name);
             }
         }
 
@@ -165,7 +165,7 @@ impl Executor {
                         nameref_status = 1;
                         continue;
                     }
-                    if is_marked_var(&self.env_vars, READONLY_VARS, &checked) {
+                    if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &checked) {
                         writeln!(
                             stderr,
                             "{}unset: {checked}: cannot unset: readonly variable",
@@ -175,10 +175,10 @@ impl Executor {
                         continue;
                     }
                 }
-                if is_marked_var(&self.env_vars, NAMEREF_VARS, &name)
+                if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &name)
                     && !self.unset_outer_local_variable(&name)
                 {
-                    self.env_vars.remove(&name);
+                    self.shell_state.env_vars.remove(&name);
                     std::env::remove_var(&name);
                     self.shell_state.variables.remove(&name);
                     for key in [
@@ -193,7 +193,7 @@ impl Executor {
                         NAMEREF_VARS,
                         DECLARED_UNSET_VARS,
                     ] {
-                        unmark_env_name(&mut self.env_vars, key, &name);
+                        unmark_env_name(&mut self.shell_state.env_vars, key, &name);
                     }
                 }
                 continue;
@@ -225,12 +225,12 @@ impl Executor {
                     }
                 }
                 let noexpand =
-                    crate::builtins::shopt::option_enabled(&self.env_vars, "array_expand_once");
+                    crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once");
                 if !crate::executor::subscript_expansion::valid_array_reference_env(
                     &name,
                     noexpand,
                     false,
-                    &self.env_vars,
+                    &self.shell_state.env_vars,
                 ) {
                     if variable_only {
                         writeln!(
@@ -257,7 +257,7 @@ impl Executor {
             // so its subscript unbinds verbatim; only VA_ONEWORD (the last
             // `]` tokenize) is exclusive to W_ARRAYREF.
             let verbatim = crate::builtins::shopt::option_enabled(
-                &self.env_vars,
+                &self.shell_state.env_vars,
                 "array_expand_once",
             );
             if let Some(status) = self.unset_array_element(&name, verbatim) {
@@ -272,7 +272,7 @@ impl Executor {
 
         let variable_status = crate::builtins::set::unset_with_stderr(
             variable_args.iter().map(String::as_str),
-            &mut self.env_vars,
+            &mut self.shell_state.env_vars,
             stderr,
         )
         .map_err(ExecuteError::from)?;
@@ -281,9 +281,9 @@ impl Executor {
         // variable from the typed owner too so parameter expansion does not
         // see a stale value (unset foo with foo->bar must clear bar).
         for name in variable_args.iter().filter(|a| !a.starts_with('-')) {
-            if is_marked_var(&self.env_vars, NAMEREF_VARS, name) {
+            if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
                 if let Some(cell) = self
-                    .env_vars
+                    .shell_state.env_vars
                     .get(name)
                     .filter(|cell| is_shell_name(cell))
                     .cloned()
@@ -305,7 +305,7 @@ impl Executor {
         for name in variable_args.iter().filter(|a| !a.starts_with('-')) {
             if matches!(name.as_str(), "IGNOREEOF" | "ignoreeof") {
                 crate::builtins::set::sync_shell_option_flag(
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     "ignoreeof",
                     false,
                 );
@@ -343,10 +343,10 @@ impl Executor {
     /// NULL with vflags=0), which is why GNU silently unbinds a readonly
     /// nameref whose cell is empty.
     fn last_nameref_for_unset(&self, name: &str) -> Option<String> {
-        if !self.env_vars.contains_key(name) && self.shell_state.variables.get(name).is_none() {
+        if !self.shell_state.env_vars.contains_key(name) && self.shell_state.variables.get(name).is_none() {
             return None;
         }
-        if !is_marked_var(&self.env_vars, NAMEREF_VARS, name) {
+        if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
             return Some(name.to_string());
         }
         let mut last = name.to_string();
@@ -356,13 +356,13 @@ impl Executor {
             // GNU variables.c:2064-2066: a missing or empty nameref cell
             // ends the search with NULL (vflags=0), so the caller skips the
             // nounset/readonly checks yet still unbinds NAME itself.
-            let Some(cell) = self.env_vars.get(&last) else {
+            let Some(cell) = self.shell_state.env_vars.get(&last) else {
                 return None;
             };
             if cell.is_empty() {
                 return None;
             }
-            if !is_marked_var(&self.env_vars, NAMEREF_VARS, cell) {
+            if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, cell) {
                 break;
             }
             if !seen.insert(cell.clone()) {
@@ -384,7 +384,7 @@ impl Executor {
         name: &str,
         stderr: &mut W,
     ) -> Option<u8> {
-        if is_marked_var(&self.env_vars, NAMEREF_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
             // GNU builtins/set.def:925/990-1014: `unset` of a nameref walks to
             // the LAST nameref in the chain (find_variable_last_nameref) and
             // unbinds its cell -- a plain-name cell unbinds that variable, an
@@ -393,16 +393,16 @@ impl Executor {
             let mut last = name.to_string();
             let mut seen = HashSet::from([name.to_string()]);
             for _ in 0..8 {
-                let Some(cell) = self.env_vars.get(&last).cloned() else {
+                let Some(cell) = self.shell_state.env_vars.get(&last).cloned() else {
                     break;
                 };
-                if !is_marked_var(&self.env_vars, NAMEREF_VARS, &cell) || !seen.insert(cell.clone())
+                if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &cell) || !seen.insert(cell.clone())
                 {
                     break;
                 }
                 last = cell;
             }
-            let cell = self.env_vars.get(&last).cloned().unwrap_or_default();
+            let cell = self.shell_state.env_vars.get(&last).cloned().unwrap_or_default();
             if parse_array_subscript(&cell).is_some() {
                 return self.unset_array_element(&cell, false).or(Some(0));
             }
@@ -410,7 +410,7 @@ impl Executor {
             // unbound by name; a readonly referent is an error on the
             // referent's name, and a missing referent is a silent no-op.
             if !cell.is_empty() && is_shell_name(&cell) {
-                if is_marked_var(&self.env_vars, READONLY_VARS, &cell) {
+                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &cell) {
                     let _ = writeln!(
                         stderr,
                         "{}unset: {cell}: cannot unset: readonly variable",
@@ -418,7 +418,7 @@ impl Executor {
                     );
                     return Some(1);
                 }
-                self.env_vars.remove(&cell);
+                self.shell_state.env_vars.remove(&cell);
                 std::env::remove_var(&cell);
                 self.shell_state.variables.remove(&cell);
                 for key in [
@@ -433,7 +433,7 @@ impl Executor {
                     NAMEREF_VARS,
                     DECLARED_UNSET_VARS,
                 ] {
-                    unmark_env_name(&mut self.env_vars, key, &cell);
+                    unmark_env_name(&mut self.shell_state.env_vars, key, &cell);
                 }
                 return Some(0);
             }
@@ -442,10 +442,10 @@ impl Executor {
         let Some((base, subscript)) = parse_array_subscript(name) else {
             return None;
         };
-        if !is_marked_var(&self.env_vars, NAMEREF_VARS, base) {
+        if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base) {
             return None;
         }
-        let Some(cell) = self.env_vars.get(base).filter(|cell| is_shell_name(cell)) else {
+        let Some(cell) = self.shell_state.env_vars.get(base).filter(|cell| is_shell_name(cell)) else {
             return None;
         };
         let cell = cell.clone();
@@ -454,10 +454,10 @@ impl Executor {
     }
 
     pub(in crate::executor) fn unset_outer_local_variable(&mut self, name: &str) -> bool {
-        if is_marked_var(&self.env_vars, READONLY_VARS, name) {
+        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
             return false;
         }
-        let Some(current_scope_index) = self.local_var_scopes.len().checked_sub(1) else {
+        let Some(current_scope_index) = self.shell_state.local_var_scopes.len().checked_sub(1) else {
             return false;
         };
         let Some(scope_index) = self.visible_local_scope_index(name) else {
@@ -473,7 +473,7 @@ impl Executor {
         // saved snapshot still restores the pre-local value at function
         // end. The frame snapshots stay untouched.
         if scope_index == current_scope_index
-            || crate::builtins::shopt::option_enabled(&self.env_vars, "localvar_unset")
+            || crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "localvar_unset")
         {
             // GNU resets the attributes wholesale — att_local +
             // att_invisible — preserving att_exported only when the local
@@ -481,9 +481,9 @@ impl Executor {
             // A live tempenv binding of the same name is the provenance
             // marker (`v=t f` where f runs `local v=x` keeps -x; an exported
             // outer variable's local copy does not).
-            let keep_exported = is_marked_var(&self.env_vars, EXPORTED_VARS, name)
+            let keep_exported = is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name)
                 && self.tempenv_names.iter().any(|tempenv| tempenv == name);
-            self.env_vars.remove(name);
+            self.shell_state.env_vars.remove(name);
             env::remove_var(name);
             self.shell_state.variables.remove(name);
             let mut attrs = VarAttrs {
@@ -491,20 +491,20 @@ impl Executor {
                 ..VarAttrs::default()
             };
             attrs.exported = keep_exported;
-            set_var_attrs(&mut self.env_vars, name, attrs);
+            set_var_attrs(&mut self.shell_state.env_vars, name, attrs);
             // GNU variables.c:6205-6217 sv_ignoreeof: unbinding the variable
             // drives the ignoreeof option off.
             if matches!(name, "IGNOREEOF" | "ignoreeof") {
                 crate::builtins::set::sync_shell_option_flag(
-                    &mut self.env_vars,
+                    &mut self.shell_state.env_vars,
                     "ignoreeof",
                     false,
                 );
             }
             return true;
         }
-        let previous = self.local_var_scopes[scope_index].remove(name);
-        let attrs = self.local_attr_scopes[scope_index]
+        let previous = self.shell_state.local_var_scopes[scope_index].remove(name);
+        let attrs = self.shell_state.local_attr_scopes[scope_index]
             .remove(name)
             .unwrap_or_default();
         // GNU variables.c:3959-3980 makunbound: the binding is removed at
@@ -513,18 +513,18 @@ impl Executor {
         // the local's stale cell makes `${res-word}` report the variable as
         // still set (varenv10.sub inner/outer).
         let typed_previous = self
-            .local_typed_scopes
+            .shell_state.local_typed_scopes
             .get_mut(scope_index)
             .and_then(|scope| scope.remove(name));
-        restore_optional_shell_var(&mut self.env_vars, name, previous.flatten());
+        restore_optional_shell_var(&mut self.shell_state.env_vars, name, previous.flatten());
         self.shell_state.variables.remove(name);
         if let Some(variable) = typed_previous.flatten() {
             let _ = self.shell_state.variables.set(name.to_string(), variable);
         }
-        set_var_attrs(&mut self.env_vars, name, attrs);
+        set_var_attrs(&mut self.shell_state.env_vars, name, attrs);
         // Same sv_ignoreeof hook as the invisible-local branch above.
         if matches!(name, "IGNOREEOF" | "ignoreeof") {
-            crate::builtins::set::sync_shell_option_flag(&mut self.env_vars, "ignoreeof", false);
+            crate::builtins::set::sync_shell_option_flag(&mut self.shell_state.env_vars, "ignoreeof", false);
         }
         true
     }
@@ -542,7 +542,7 @@ impl Executor {
     /// GNU variables.c shell_compatibility_level — see
     /// shell_compatibility_level_value for the BASH_COMPAT parse.
     fn shell_compatibility_level(&self) -> u32 {
-        shell_compatibility_level_value(&self.env_vars)
+        shell_compatibility_level_value(&self.shell_state.env_vars)
     }
 
     pub(in crate::executor) fn unset_array_element(
@@ -555,17 +555,17 @@ impl Executor {
         };
         if array_name == "BASH_ALIASES" {
             let key = subscript.trim_matches('\'').trim_matches('"');
-            self.aliases.remove(key);
+            self.shell_state.aliases.remove(key);
             self.sync_dynamic_assoc_vars();
             return Some(0);
         }
         if array_name == "BASH_CMDS" {
             let key = subscript.trim_matches('\'').trim_matches('"');
-            crate::builtins::hash::remove_hashed_path(&mut self.env_vars, key);
+            crate::builtins::hash::remove_hashed_path(&mut self.shell_state.env_vars, key);
             self.sync_dynamic_assoc_vars();
             return Some(0);
         }
-        let Some(current) = self.env_vars.get(array_name).cloned() else {
+        let Some(current) = self.shell_state.env_vars.get(array_name).cloned() else {
             return None;
         };
 
@@ -576,11 +576,11 @@ impl Executor {
         // flushing elements or treating @ as a literal assoc key.
         if (subscript == "@" || subscript == "*")
             && self.shell_compatibility_level() <= 51
-            && (is_marked_var(&self.env_vars, ASSOC_VARS, array_name)
-                || is_marked_array_var(&self.env_vars, array_name)
+            && (is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name)
+                || is_marked_array_var(&self.shell_state.env_vars, array_name)
                 || is_array_storage(&current))
         {
-            self.env_vars.remove(array_name);
+            self.shell_state.env_vars.remove(array_name);
             std::env::remove_var(array_name);
             self.shell_state.variables.remove(array_name);
             for key in [
@@ -595,12 +595,12 @@ impl Executor {
                 NAMEREF_VARS,
                 DECLARED_UNSET_VARS,
             ] {
-                unmark_env_name(&mut self.env_vars, key, array_name);
+                unmark_env_name(&mut self.shell_state.env_vars, key, array_name);
             }
             return Some(0);
         }
 
-        if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name) {
             // GNU arrayfunc.c:1241-1251 unbind_array_element assoc branch:
             // the operand's subscript already went through word expansion
             // once; with array_expand_once (ASS_NOEXPAND) that text is the
@@ -632,12 +632,12 @@ impl Executor {
             }
             let mut entries = assoc_entries(&current);
             entries.retain(|(entry_key, _)| *entry_key != key);
-            self.env_vars
+            self.shell_state.env_vars
                 .insert(array_name.to_string(), format_assoc_storage(entries));
             return Some(0);
         }
 
-        if is_marked_array_var(&self.env_vars, array_name) || is_array_storage(&current) {
+        if is_marked_array_var(&self.shell_state.env_vars, array_name) || is_array_storage(&current) {
             // GNU unbind_array_element (arrayfunc.c:1180-1200): with the
             // default compat level (> 51), `unset arr[*]` / `unset arr[@]`
             // FLUSHES every element (behavior 2) instead of unsetting the
@@ -645,7 +645,7 @@ impl Executor {
             // declared as an empty array (array.tests: `unset e[*]` then
             // `declare -a e=()`).
             if subscript == "*" || subscript == "@" {
-                self.env_vars.insert(
+                self.shell_state.env_vars.insert(
                     array_name.to_string(),
                     format_indexed_array_storage(Default::default()),
                 );
@@ -675,7 +675,7 @@ impl Executor {
             };
             let mut entries = indexed_array_entries(&current);
             entries.remove(&resolved);
-            self.env_vars.insert(
+            self.shell_state.env_vars.insert(
                 array_name.to_string(),
                 format_indexed_array_storage(entries),
             );
@@ -698,10 +698,10 @@ impl Executor {
             IndexedSubscript::Empty => return Some(0),
             IndexedSubscript::Error => return Some(1),
         }
-        if is_marked_var(&self.env_vars, READONLY_VARS, array_name) {
+        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, array_name) {
             return None;
         }
-        self.env_vars.remove(array_name);
+        self.shell_state.env_vars.remove(array_name);
         std::env::remove_var(array_name);
         self.shell_state.variables.remove(array_name);
         for key in [
@@ -716,7 +716,7 @@ impl Executor {
             NAMEREF_VARS,
             DECLARED_UNSET_VARS,
         ] {
-            unmark_env_name(&mut self.env_vars, key, array_name);
+            unmark_env_name(&mut self.shell_state.env_vars, key, array_name);
         }
         Some(0)
     }
