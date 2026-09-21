@@ -14,6 +14,8 @@
 
 pub mod builtins;
 pub mod executor;
+#[cfg(windows)]
+pub(crate) mod fd;
 pub mod expand;
 pub mod history;
 pub mod history_expand;
