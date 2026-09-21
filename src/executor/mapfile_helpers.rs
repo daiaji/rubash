@@ -1,5 +1,6 @@
 use super::types::INHERIT_PROCESS_STDIN;
 use super::*;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 impl Executor {
     pub(in crate::executor) fn parse_mapfile_usize(
@@ -281,7 +282,7 @@ impl Executor {
             .find(|redirect| redirect.fd == Some(fd))?
             .body
             .as_deref()?;
-        if let Some(word) = body.strip_prefix('\x1d') {
+        if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
             let mut input =
                 decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
             input.push('\n');

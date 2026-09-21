@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
+use crate::executor::markers::{DATA_DOLLAR};
 
 // The quoted-null carrier (GNU subst.c CTLNUL): an empty quoted span
 // ('', "", an unset "$e", a no-output "$( : )") in a ${var+word}
@@ -173,7 +174,7 @@ impl Executor {
             expanded
         };
         let restored = restore_protected_replacement_quotes(&expanded)
-            .replace('\x1f', "$")
+            .replace(DATA_DOLLAR, "$")
             .replace('\x1a', "`")
             .replace('\x14', "\\")
             .replace(crate::lexer::PARAM_NAME_END_MARKER, "");
@@ -227,7 +228,7 @@ impl Executor {
                 continue;
             }
 
-            if ch == '\x1f' {
+            if ch == DATA_DOLLAR {
                 output.push('$');
                 continue;
             }

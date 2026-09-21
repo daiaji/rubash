@@ -61,7 +61,7 @@ where
                 format_array_value(value)
             )
         }
-    } else if value.starts_with("\x1d(") {
+    } else if value.starts_with(concat!("\u{1d}", "(")) {
         let attrs = declaration_array_attrs(attrs);
         writeln!(
             stdout,

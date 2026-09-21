@@ -1,4 +1,6 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
+use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
 pub(in crate::executor) fn read_array_storage(values: &[String]) -> String {
     let rendered = values
@@ -7,7 +9,7 @@ pub(in crate::executor) fn read_array_storage(values: &[String]) -> String {
         .map(|(index, value)| format!("[{index}]={}", render_read_array_element(value)))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("\x1d({rendered})")
+    format!("{STORAGE_WORD_PREFIX_STR}({rendered})")
 }
 pub(in crate::executor) fn render_read_array_element(value: &str) -> String {
     if value.contains(['\n', '\r']) {
@@ -339,7 +341,7 @@ pub(crate) fn mark_env_name(env_vars: &mut HashMap<String, String>, key: &str, n
         .get(key)
         .map(|value| {
             value
-                .split('\x1f')
+                .split(DATA_DOLLAR)
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
                 .collect()
@@ -348,5 +350,5 @@ pub(crate) fn mark_env_name(env_vars: &mut HashMap<String, String>, key: &str, n
     if !names.iter().any(|current| current == name) {
         names.push(name.to_string());
     }
-    env_vars.insert(key.to_string(), names.join("\x1f"));
+    env_vars.insert(key.to_string(), names.join(DATA_DOLLAR_STR));
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 pub(in crate::executor) fn mark_initial_exported_vars(env_vars: &mut HashMap<String, String>) {
     let mut names: Vec<String> = env_vars
@@ -7,7 +8,7 @@ pub(in crate::executor) fn mark_initial_exported_vars(env_vars: &mut HashMap<Str
         .cloned()
         .collect();
     names.sort();
-    env_vars.insert(EXPORTED_VARS.to_string(), names.join("\x1f"));
+    env_vars.insert(EXPORTED_VARS.to_string(), names.join(DATA_DOLLAR_STR));
 }
 
 pub(in crate::executor) fn initialize_shell_level(env_vars: &mut HashMap<String, String>) {
@@ -78,7 +79,7 @@ pub(in crate::executor) fn unmark_env_name(
 ) {
     let mut names = marked_env_names(env_vars, key);
     names.retain(|current| current != name);
-    env_vars.insert(key.to_string(), names.join("\x1f"));
+    env_vars.insert(key.to_string(), names.join(DATA_DOLLAR_STR));
 }
 
 pub(in crate::executor) fn marked_env_names(
@@ -89,7 +90,7 @@ pub(in crate::executor) fn marked_env_names(
         .get(key)
         .map(|value| {
             value
-                .split('\x1f')
+                .split(DATA_DOLLAR)
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
                 .collect()
@@ -104,7 +105,7 @@ pub(in crate::executor) fn local_export_env_values(
         .get(LOCAL_EXPORT_ENV)
         .map(|value| {
             value
-                .split('\x1f')
+                .split(DATA_DOLLAR)
                 .filter_map(|entry| entry.split_once('='))
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect()
@@ -154,6 +155,6 @@ pub(in crate::executor) fn write_local_export_env_values(
             .into_iter()
             .map(|(name, value)| format!("{name}={value}"))
             .collect::<Vec<_>>()
-            .join("\x1f"),
+            .join(DATA_DOLLAR_STR),
     );
 }

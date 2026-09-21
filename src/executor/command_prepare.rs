@@ -1,5 +1,6 @@
 use super::glob::{pathname_expand_word, PathnameExpansion};
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 fn materialize_expanded_command_word(word: &str) -> String {
     // Strip CTLESC (\x11) markers — they protect glob metacharacters during
@@ -27,7 +28,7 @@ fn materialize_expanded_command_word(word: &str) -> String {
 fn whitespace_led_bad_substitution_word(word: &str) -> Option<String> {
     let word = word
         .strip_prefix('\x1b')
-        .or_else(|| word.strip_prefix('\x1d'))
+        .or_else(|| word.strip_prefix(STORAGE_WORD_PREFIX))
         .unwrap_or(word);
     if word.contains("${|") {
         return None;
@@ -282,7 +283,7 @@ impl Executor {
                 status = substitution_status;
             }
             self.pending_scalar_assignment =
-                expanded_value.starts_with('\x1d') && value.contains(['$', '`']);
+                expanded_value.starts_with(STORAGE_WORD_PREFIX) && value.contains(['$', '`']);
             if !self.apply_shell_assignment(name, expanded_value) {
                 // GNU subst.c:8153-8165 + 11169 bash_variable_assignment_error:
                 // a failed standalone assignment (readonly violation, invalid
@@ -552,7 +553,7 @@ impl Executor {
                 let raw = metadata.map(|metadata| metadata.raw.as_str());
                 let suppress_glob = assignment_builtin_receives_assignment_word(cmd, index, word)
                     || word.starts_with('\x1b')
-                    || word.starts_with('\x1d')
+                    || word.starts_with(STORAGE_WORD_PREFIX)
                     || raw_word_suppresses_pathname_expansion(raw, metadata)
                     || compound_assignment_operand_word(cmd, index, word);
                 let arrayref_marked = arrayref_marks.get(index).copied().unwrap_or(false);
@@ -850,9 +851,9 @@ impl Executor {
             } else {
                 word.to_string()
             };
-            return vec![word.replace('\x1f', "$")];
+            return vec![word.replace(DATA_DOLLAR, "$")];
         }
-        if !word.starts_with('\x1d') {
+        if !word.starts_with(STORAGE_WORD_PREFIX) {
             if let Some(values) = self.braced_alternate_word_values(word, raw) {
                 return values;
             }
@@ -921,7 +922,7 @@ impl Executor {
         // the quoted-$@ word-boundary semantics: affixes attach to the
         // first/last positional word, one word per parameter (subst.c
         // param_expand carries `quoted` into the alternate word).
-        if word.starts_with('\x1d') {
+        if word.starts_with(STORAGE_WORD_PREFIX) {
             if let Some(values) = self.quoted_braced_alternate_positional_at_values(word) {
                 return values;
             }
@@ -956,7 +957,7 @@ impl Executor {
         // split through the raw-based path, and skipping it here collapsed
         // "${1+  $@  }" to one word (exp suite).
         let quoted_whole_word =
-            word.starts_with('\x1d') && !word.contains("$@") && !word.contains("$*");
+            word.starts_with(STORAGE_WORD_PREFIX) && !word.contains("$@") && !word.contains("$*");
         // GNU brace expansion runs on the raw word text before quote removal.
         // A fully double-quoted word (marked with \x1d) normally has no
         // unquoted braces, but nested inner quotes can create unquoted
@@ -1010,7 +1011,7 @@ impl Executor {
         // inner quotes literal, which is what makes ${IFS+'$key'}
         // expanded inside double quotes, yield 'value' rather than
         // the literal $key (posixexp2 cases 24/38).
-        let context = if word.starts_with('\x1d') {
+        let context = if word.starts_with(STORAGE_WORD_PREFIX) {
             SubstitutionQuoteContext::DoubleQuoted
         } else {
             raw.map(scan_substitution_spans)
@@ -1025,7 +1026,7 @@ impl Executor {
         // scalar and stays on the String path below.
         if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
             if let Some(body) = word
-                .strip_prefix('\x1d')
+                .strip_prefix(STORAGE_WORD_PREFIX)
                 .filter(|w| {
                     w.starts_with("${!") && w.ends_with('}') && braced_parameter_spans_whole_word(w)
                 })
@@ -1061,7 +1062,7 @@ impl Executor {
             .map(|ifs| ifs.chars().any(|ch| !matches!(ch, ' ' | '\t' | '\n')))
             .unwrap_or(false);
         let needs_ifs_marking = ifs_has_non_whitespace
-            && !word.starts_with('\x1d')
+            && !word.starts_with(STORAGE_WORD_PREFIX)
             && !word.starts_with('\x1b')
             && raw.is_some_and(|raw| {
                 raw_word_has_unquoted_parameter_expansion(raw)
@@ -1267,8 +1268,8 @@ impl Executor {
         word: &str,
         raw: Option<&str>,
     ) -> Option<Vec<String>> {
-        let was_quoted = word.starts_with('\x1d');
-        let word = word.strip_prefix('\x1d').unwrap_or(word);
+        let was_quoted = word.starts_with(STORAGE_WORD_PREFIX);
+        let word = word.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(word);
         let Some(rest) = word.strip_prefix("${") else {
             return None;
         };
@@ -1602,7 +1603,7 @@ impl Executor {
     // text attaches to the first/last positional word, one word per
     // parameter. Returning None leaves every other form on its existing path.
     fn quoted_braced_alternate_positional_at_values(&mut self, word: &str) -> Option<Vec<String>> {
-        let braced = word.strip_prefix('\x1d')?;
+        let braced = word.strip_prefix(STORAGE_WORD_PREFIX)?;
         if !braced.starts_with("${") || !braced.ends_with('}') {
             return None;
         }
@@ -1752,7 +1753,7 @@ impl Executor {
     // unquoted). The quoted-null carrier keeps quoted-empty spans as empty
     // fields (quote2.sub).
     fn unquoted_outer_braced_alternate_values(&mut self, word: &str) -> Option<Vec<String>> {
-        let braced = word.strip_prefix('\x1d')?;
+        let braced = word.strip_prefix(STORAGE_WORD_PREFIX)?;
         if !braced.starts_with("${") || !braced.ends_with('}') {
             return None;
         }
@@ -2527,7 +2528,7 @@ fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
             continue;
         }
         // Protected markers from the lexer — copy through
-        if matches!(ch, '\x1f' | '\x1a' | '\x17' | '\x18' | '\x14' | '\x13') {
+        if matches!(ch, DATA_DOLLAR | '\x1a' | '\x17' | '\x18' | '\x14' | '\x13') {
             output.push(ch);
             index += 1;
             continue;

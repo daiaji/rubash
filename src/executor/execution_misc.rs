@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 /// GNU general.c:1019 printable_filename: if the string contains non-
 /// printable characters, return it as a $'...' ANSI-C quoted form; otherwise
@@ -165,11 +166,11 @@ pub(in crate::executor) fn redirect_target_fd(target: &str) -> Option<u32> {
 }
 
 pub(in crate::executor) fn redirect_target_fd_and_move(target: &str) -> Option<(u32, bool)> {
-    let target = target.trim_start_matches(['\x1b', '\x1d']);
+    let target = target.trim_start_matches(['\x1b', STORAGE_WORD_PREFIX]);
     let Some(fd) = target.strip_prefix('&') else {
         return dev_stdio_redirect_fd(target).map(|fd| (fd, false));
     };
-    let fd = fd.trim_matches(|ch| ch == '"' || ch == '\x1d');
+    let fd = fd.trim_matches(|ch| ch == '"' || ch == STORAGE_WORD_PREFIX);
     let (fd, move_fd) = fd
         .strip_suffix('-')
         .map(|fd| (fd, true))
@@ -244,7 +245,7 @@ pub(in crate::executor) fn stdio_output_target(fd: u32) -> Option<&'static str> 
 pub(in crate::executor) fn command_has_unterminated_heredoc(cmd: &CommandNode) -> bool {
     cmd.heredoc
         .as_deref()
-        .is_some_and(|body| strip_quoted_heredoc_marker(body).starts_with('\x1f'))
+        .is_some_and(|body| strip_quoted_heredoc_marker(body).starts_with(DATA_DOLLAR))
 }
 
 /// True when the here-document delimiter was found but not on a line by
@@ -260,7 +261,7 @@ pub(in crate::executor) fn command_has_warned_heredoc(cmd: &CommandNode) -> bool
 
 pub(in crate::executor) fn strip_unterminated_heredoc_marker(body: &str) -> &str {
     let stripped = body
-        .strip_prefix('\x1f')
+        .strip_prefix(DATA_DOLLAR)
         .or_else(|| body.strip_prefix('\x1e'));
     match stripped {
         Some(s) => s,
@@ -469,7 +470,7 @@ pub(in crate::executor) fn word_has_unquoted_command_substitution(word: &str) ->
 }
 
 pub(in crate::executor) fn for_word_has_unquoted_expansion(word: &str, raw: Option<&str>) -> bool {
-    if word.starts_with('\x1b') || word.starts_with('\x1d') {
+    if word.starts_with('\x1b') || word.starts_with(STORAGE_WORD_PREFIX) {
         return false;
     }
     let source = raw.unwrap_or(word);
@@ -584,7 +585,7 @@ pub(in crate::executor) fn eval_source_for_reparse(source: &str) -> String {
         .replace(crate::lexer::QUOTED_HEREDOC_MARKER, "")
         .replace(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER, "")
         .replace('\x1c', "")
-        .replace('\x1f', "$")
+        .replace(DATA_DOLLAR, "$")
         .replace('\x17', "'")
         // GNU expand_word_internal's single-quote arm (subst.c:11882) takes the
         // region body from string_extract_single_quoted (subst.c:1088), which
@@ -739,7 +740,7 @@ pub(in crate::executor) fn command_substitution_value_needs_payload_protection(
     source.contains('$')
         && !source.contains('`')
         && !value.contains(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX)
-        && value.chars().any(|ch| ('\x10'..='\x1f').contains(&ch))
+        && value.chars().any(|ch| ('\x10'..=DATA_DOLLAR).contains(&ch))
 }
 
 pub(in crate::executor) fn protect_command_substitution_output(value: &str) -> String {
@@ -750,12 +751,12 @@ pub(in crate::executor) fn protect_command_substitution_output(value: &str) -> S
     let mut output = String::with_capacity(escaped_value.len());
     for ch in escaped_value.chars() {
         match ch {
-            '\x10'..='\x1f' => output.push_str(&format!(
+            '\x10'..=DATA_DOLLAR => output.push_str(&format!(
                 "{COMMAND_SUBSTITUTION_PAYLOAD_PREFIX}{:02x};",
                 ch as u32
             )),
             '`' => output.push('\x1a'),
-            '$' => output.push('\x1f'),
+            '$' => output.push(DATA_DOLLAR),
             '\\' => output.push('\x15'),
             _ => output.push(ch),
         }
@@ -766,7 +767,7 @@ pub(in crate::executor) fn protect_command_substitution_output(value: &str) -> S
 pub(in crate::executor) fn restore_command_substitution_output(value: &str) -> String {
     value
         .replace('\x1a', "`")
-        .replace('\x1f', "$")
+        .replace(DATA_DOLLAR, "$")
         .replace('\x15', "\\")
         .replace('\x14', "\\")
 }

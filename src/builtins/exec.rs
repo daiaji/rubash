@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
+use crate::executor::markers::{DATA_DOLLAR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EX_BADUSAGE: i32 = 2;
@@ -369,7 +370,7 @@ fn marked_vars(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {
         .get(key)
         .map(|value| {
             value
-                .split('\x1f')
+                .split(DATA_DOLLAR)
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
                 .collect()

@@ -1,6 +1,7 @@
 use crate::lexer::{Token, TokenKind};
 
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR};
 
 #[derive(Default)]
 pub struct ParseLoopOptions {
@@ -945,9 +946,9 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
             .value
             .strip_prefix(crate::lexer::QUOTED_HEREDOC_MARKER)
             .unwrap_or(token.value.as_str());
-        let unterminated = body.starts_with('\x1f');
+        let unterminated = body.starts_with(DATA_DOLLAR);
         let body = body
-            .strip_prefix('\x1f')
+            .strip_prefix(DATA_DOLLAR)
             .or_else(|| body.strip_prefix('\x1e'))
             .unwrap_or(body);
         let body_lines = body.lines().count();
@@ -1163,9 +1164,9 @@ fn compound_eof_error_node(
             .value
             .strip_prefix(crate::lexer::QUOTED_HEREDOC_MARKER)
             .unwrap_or(token.value.as_str());
-        let unterminated = body.starts_with('\x1f');
+        let unterminated = body.starts_with(DATA_DOLLAR);
         let body = body
-            .strip_prefix('\x1f')
+            .strip_prefix(DATA_DOLLAR)
             .or_else(|| body.strip_prefix('\x1e'))
             .unwrap_or(body);
         let body_lines = body.lines().count();

@@ -15,6 +15,7 @@
 //! re-expanded.
 
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 /// GNU `array_expand_once` (arrayfunc.c:50) / `SET_VFLAGS`
 /// (builtins/common.h:277-289) provenance for a subscript reaching an
@@ -819,7 +820,7 @@ impl Executor {
         for token in &tokens {
             // Field-split products pre-marked by word-stage expansion
             // (\x10) and rendered-array words (\x1d) are already final.
-            if token.starts_with(ARRAY_FIELD_SPLIT_MARKER) || token.starts_with('\x1d') {
+            if token.starts_with(ARRAY_FIELD_SPLIT_MARKER) || token.starts_with(STORAGE_WORD_PREFIX) {
                 elements.push(token.clone());
                 continue;
             }
@@ -1223,7 +1224,7 @@ fn encode_compound_assoc_key(key: &str) -> String {
         && !key.chars().any(|ch| {
             matches!(
                 ch,
-                '[' | ']' | '=' | '+' | '\'' | '"' | '\\' | '\x1e' | '\x1f'
+                '[' | ']' | '=' | '+' | '\'' | '"' | '\\' | '\x1e' | DATA_DOLLAR
                     | '`' | '$'
             ) || ch.is_ascii_whitespace()
         });

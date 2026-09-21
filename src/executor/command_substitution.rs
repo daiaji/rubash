@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::path::shell_directory_entries;
+use crate::executor::markers::{DATA_DOLLAR};
 
 impl Executor {
     /// Expands a command-substitution argument word. When the word was
@@ -990,7 +991,7 @@ fn strip_command_substitution_comments(source: &str) -> String {
 
 fn restore_old_style_backtick_markers(value: &str) -> String {
     value
-        .replace('\x1f', "$")
+        .replace(DATA_DOLLAR, "$")
         .replace('\x1a', "`")
         .replace('\x15', "\\")
         .replace('\x14', "\\")

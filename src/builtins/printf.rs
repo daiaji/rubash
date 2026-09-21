@@ -21,6 +21,8 @@ use identifier::valid_identifier;
 use spec::{parse_format_spec, resolve_dynamic_format_args, valid_format_specifier};
 use time::format_time_value;
 use value::format_value;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -441,7 +443,7 @@ fn assign_printf_assoc_element(
 }
 
 fn indexed_entries(value: &str) -> BTreeMap<usize, String> {
-    let Some(rendered) = value.strip_prefix('\x1d') else {
+    let Some(rendered) = value.strip_prefix(STORAGE_WORD_PREFIX) else {
         return value
             .strip_prefix('(')
             .and_then(|value| value.strip_suffix(')'))
@@ -506,7 +508,7 @@ fn format_indexed_storage(entries: BTreeMap<usize, String>) -> String {
         .map(|(index, value)| format!("[{index}]={}", quote_storage_value(&value)))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("\x1d({rendered})")
+    format!("{STORAGE_WORD_PREFIX_STR}({rendered})")
 }
 
 fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
@@ -641,7 +643,7 @@ fn split_storage_words(value: &str) -> Vec<String> {
 fn is_marked(env_vars: &HashMap<String, String>, marker: &str, name: &str) -> bool {
     env_vars
         .get(marker)
-        .map(|value| value.split('\x1f').any(|marked| marked == name))
+        .map(|value| value.split(DATA_DOLLAR).any(|marked| marked == name))
         .unwrap_or(false)
 }
 
@@ -653,7 +655,7 @@ fn mark_printf_var(env_vars: &mut HashMap<String, String>, marker: &str, name: &
         .entry(marker.to_string())
         .and_modify(|value| {
             if !value.is_empty() {
-                value.push('\x1f');
+                value.push(DATA_DOLLAR);
             }
             value.push_str(name);
         })

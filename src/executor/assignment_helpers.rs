@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR};
 
 pub(in crate::executor) fn split_assignment_word(word: &str) -> Option<(&str, &str)> {
     let (name, value) = word.split_once('=')?;
@@ -733,7 +734,7 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
 
     fn restore_quote_markers(value: &str) -> String {
         value
-            .replace('\x1f', "$")
+            .replace(DATA_DOLLAR, "$")
             .replace('\x1a', "`")
             .replace('\x17', "'")
             .replace('\x14', "\\")

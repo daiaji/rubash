@@ -14,6 +14,7 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use super::support_names::split_shell_path;
+use crate::executor::markers::{DATA_DOLLAR};
 
 pub(crate) const COMPATIBLE_SHELL_PATH_ENV: &str = "__RUBASH_COMPATIBLE_SHELL_PATH";
 
@@ -112,7 +113,7 @@ fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
         if let Some(value) = env_vars.get(*key) {
             fingerprint.push_str(value);
         }
-        fingerprint.push('\x1f');
+        fingerprint.push(DATA_DOLLAR);
     }
     for key in PROCESS_FALLBACK_KEYS {
         if let Ok(value) = std::env::var(key) {
@@ -2048,12 +2049,15 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(!used_shell);
+        // push_external_args wraps wildcard-bearing argv in double quotes so
+        // MSYS2/WinuxCmd-hosted children do not re-glob them (niubash#119):
+        // `*` and `?` reach the child literally through CommandLineToArgvW.
         assert_eq!(
             args,
             vec![
                 "-Command".to_string(),
-                r"Copy-Item full\bin\* smoke -Force".to_string(),
-                "repos/nmap/nmap/contents/configure.ac?ref=v7.991".to_string(),
+                r#""Copy-Item full\bin\* smoke -Force""#.to_string(),
+                r#""repos/nmap/nmap/contents/configure.ac?ref=v7.991""#.to_string(),
                 "--send-only".to_string(),
                 "/CN=test".to_string(),
             ]

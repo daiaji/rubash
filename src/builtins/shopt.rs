@@ -12,6 +12,7 @@ use support::{default_state, print_all_shopts, print_shopt, print_shopts_by_stat
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -361,7 +362,7 @@ fn state(env_vars: &HashMap<String, String>) -> HashSet<String> {
         return default_state();
     };
     value
-        .split('\x1f')
+        .split(DATA_DOLLAR)
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .collect()
@@ -370,7 +371,7 @@ fn state(env_vars: &HashMap<String, String>) -> HashSet<String> {
 fn serialize_state(state: &HashSet<String>) -> String {
     let mut names: Vec<&str> = state.iter().map(String::as_str).collect();
     names.sort();
-    names.join("\x1f")
+    names.join(DATA_DOLLAR_STR)
 }
 
 fn diagnostic_prefix() -> String {

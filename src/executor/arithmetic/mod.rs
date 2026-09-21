@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use super::Executor;
 use crate::executor::execution_misc::RandomGen;
 use crate::executor::{is_marked_var, SubstitutionQuoteContext, ASSOC_VARS};
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 thread_local! {
     /// Variable writes performed by the arithmetic evaluator between the
@@ -184,10 +185,10 @@ impl Executor {
             .replace("\\\"", "\x18")
             .replace('"', "\x18")
             .replace('\'', "\x17")
-            .replace("\\$", "\x1f");
+            .replace("\\$", DATA_DOLLAR_STR);
         let expanded = self.expand_embedded_parameters(&protected);
         expanded
-            .replace('\x1f', "$")
+            .replace(DATA_DOLLAR, "$")
             .replace('\x1a', "`")
             .replace('\x14', "\\")
             .replace('\x17', "'")
@@ -423,7 +424,7 @@ impl Executor {
         let reexpanded =
             if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once") {
                 resolved
-                    .replace('\x1f', "$")
+                    .replace(DATA_DOLLAR, "$")
                     .replace('\x1a', "`")
                     .replace('\x14', "\\")
                     .replace('\x17', "'")
@@ -883,7 +884,7 @@ impl Executor {
                     index += 2;
                 }
                 b'\\' if bytes.get(index + 1) == Some(&b'$') => {
-                    protected.push('\x1f');
+                    protected.push(DATA_DOLLAR);
                     index += 2;
                 }
                 b'\'' => {
@@ -898,7 +899,7 @@ impl Executor {
             }
         }
         self.expand_embedded_parameters(&protected)
-            .replace("\x1f", "$")
+            .replace(DATA_DOLLAR_STR, "$")
     }
 }
 

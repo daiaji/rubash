@@ -1,5 +1,6 @@
 use super::*;
 use crate::lexer::{Token, TokenKind};
+use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
 pub(super) fn collect_trailing_redirections(
     tokens: &[Token],
@@ -280,7 +281,7 @@ pub(super) fn assign_here_string_redirect_raw(
             strip_tabs: false,
             quoted_delimiter: false,
             here_string: true,
-            body: Some(format!("\x1d{target}")),
+            body: Some(format!("{STORAGE_WORD_PREFIX_STR}{target}")),
             gather_line: None,
         });
     } else {

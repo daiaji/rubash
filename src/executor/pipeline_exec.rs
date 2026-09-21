@@ -76,6 +76,7 @@ fn wait_for_windows_pipeline_member(
     }
 }
 use crate::executor::external_setup::shared_combined_output_process_substitution;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 #[derive(Debug, Clone)]
 struct TimedPipelineInput {
@@ -839,7 +840,7 @@ impl Executor {
                 let value = self.expand_word(word);
                 // \x1d marks a fully quoted word and \x1b a quoted
                 // tilde; both stay literal.
-                if value.starts_with('\x1d') || value.starts_with('\x1b') {
+                if value.starts_with(STORAGE_WORD_PREFIX) || value.starts_with('\x1b') {
                     args.push(value.replace('\x11', ""));
                     continue;
                 }
@@ -1058,7 +1059,7 @@ impl Executor {
                 let value = self.expand_word(word);
                 // \x1d marks a fully quoted word and \x1b a quoted
                 // tilde; both stay literal.
-                if value.starts_with('\x1d') || value.starts_with('\x1b') {
+                if value.starts_with(STORAGE_WORD_PREFIX) || value.starts_with('\x1b') {
                     args.push(value.replace('\x11', ""));
                     continue;
                 }
@@ -1279,7 +1280,7 @@ impl Executor {
             for expanded in self.expand_command_word(command, index, word, raw) {
                 //  marks a fully quoted word and  a quoted tilde;
                 // both stay literal, exactly as command_prepare does.
-                if expanded.starts_with('\x1d') || expanded.starts_with('\x1b') {
+                if expanded.starts_with(STORAGE_WORD_PREFIX) || expanded.starts_with('\x1b') {
                     out.push(expanded.replace('\x11', ""));
                     continue;
                 }
@@ -1584,7 +1585,7 @@ impl Executor {
                     let value = self.expand_word(word);
                     // \x1d marks a fully quoted word and \x1b a quoted
                     // tilde; both stay literal.
-                    if value.starts_with('\x1d') || value.starts_with('\x1b') {
+                    if value.starts_with(STORAGE_WORD_PREFIX) || value.starts_with('\x1b') {
                         file_operands.push(value.replace('\x11', ""));
                         continue;
                     }

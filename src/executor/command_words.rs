@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 impl Executor {
     pub(in crate::executor) fn update_underscore_parameter(&mut self, cmd: &CommandNode) {
@@ -156,7 +157,7 @@ impl Executor {
             return Ok(vec![word.replace('\u{1f}', "$")]);
         }
         let suppress_glob = word.starts_with('\x1b')
-            || word.starts_with('\x1d')
+            || word.starts_with(STORAGE_WORD_PREFIX)
             || super::command_prepare::raw_word_suppresses_pathname_expansion(raw, metadata);
         if let Some(values) = self.quoted_positional_at_word_values_with_raw(word, raw, None) {
             return Ok(values);

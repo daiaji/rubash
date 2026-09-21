@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 impl Executor {
     /// Apply assignments from a command containing no command word. GNU Bash
@@ -319,7 +320,7 @@ impl Executor {
             // Same \x1d bookkeeping trim assoc_subscript_key applies.
             let key = self
                 .resolve_array_subscript(subscript_source)
-                .trim_matches('\x1d')
+                .trim_matches(STORAGE_WORD_PREFIX)
                 .to_string();
             let mut entries = assoc_entries(&current);
             let existing = entries
@@ -998,7 +999,7 @@ impl Executor {
         let value = self.apply_case_assignment_attributes(base_name, value);
         let protocol_scalar = self.pending_scalar_assignment;
         self.pending_scalar_assignment = false;
-        if value.starts_with('\x1d')
+        if value.starts_with(STORAGE_WORD_PREFIX)
             && !protocol_scalar
             && !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name)
         {
@@ -1017,7 +1018,7 @@ impl Executor {
             && !append
             && is_array
             && !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name)
-            && !value.starts_with('\x1d')
+            && !value.starts_with(STORAGE_WORD_PREFIX)
         {
             let current = self.shell_state.env_vars.get(base_name).cloned().unwrap_or_default();
             let mut entries = indexed_array_entries(&current);
@@ -1051,7 +1052,7 @@ impl Executor {
         if !compound_assignment
             && !append
             && is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name)
-            && !value.starts_with('\x1d')
+            && !value.starts_with(STORAGE_WORD_PREFIX)
         {
             let storage = format!("([\"0\"]={})", quote_assoc_storage_value(&value));
             self.shell_state.env_vars.insert(base_name.to_string(), storage);

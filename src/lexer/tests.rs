@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 #[test]
 fn test_parameter_pattern_quotes_stay_in_one_word() {
@@ -120,7 +121,7 @@ fn posix_interleaved_quotes_whole_line_balance() {
     let tokens = tokenize_with_initial_posix(line, true);
     assert!(
         tokens.iter().any(|token| {
-            token.value.starts_with('\x1d')
+            token.value.starts_with(STORAGE_WORD_PREFIX)
                 && token.value.contains("${IFS+")
                 && token.value.ends_with(" #")
         }),
@@ -141,7 +142,7 @@ fn posix_quoted_alternate_word_value_keeps_quote_structure() {
         .find(|token| token.value.contains("${IFS+"))
         .expect("braced word token");
     assert!(
-        word.value.starts_with('\x1d'),
+        word.value.starts_with(STORAGE_WORD_PREFIX),
         "fully-quoted mixed word must carry the quoted-word marker: {:?}",
         word.value
     );
@@ -186,7 +187,12 @@ fn test_escaped_quote_array_assignment_stays_one_word() {
         .filter(|token| matches!(token.kind, TokenKind::Word | TokenKind::Assignment))
         .collect::<Vec<_>>();
 
-    assert_eq!(words[0].value, "a[\" \"]=15");
+    // `value` is transport text: the escaped quotes inside the subscript are
+    // carried as DATA_DQUOTE markers (quotes.rs), so assert the decoded form.
+    assert_eq!(
+        crate::locale::decode_to_visible_text(&words[0].value),
+        "a[\" \"]=15"
+    );
     assert_eq!(words[0].raw, r#"a[\" \"]=15"#);
     assert_eq!(words[1].value, "echo");
     assert_eq!(words[2].value, "after");

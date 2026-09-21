@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -82,7 +83,7 @@ pub(crate) fn enabled_options(env_vars: &HashMap<String, String>) -> HashSet<Str
         .get(ZSH_OPTION_STATE)
         .map(|value| {
             value
-                .split('\x1f')
+                .split(DATA_DOLLAR)
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
                 .collect()
@@ -211,7 +212,7 @@ fn canonical_option(key: &str) -> Option<&'static str> {
 fn serialize_state(state: &HashSet<String>) -> String {
     let mut names: Vec<&str> = state.iter().map(String::as_str).collect();
     names.sort();
-    names.join("\x1f")
+    names.join(DATA_DOLLAR_STR)
 }
 
 fn diagnostic_prefix() -> String {

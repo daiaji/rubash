@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::fd_table::FdEntry;
+use crate::executor::markers::{DATA_DOLLAR};
 
 /// Saved descriptor state for a numbered fd opened by a compound command's
 /// input redirection (see open_compound_numbered_input_redirects).
@@ -330,7 +331,7 @@ fn prepare_unquoted_heredoc_expansion(body: &str) -> String {
         match chars.peek().copied() {
             Some('$') => {
                 chars.next();
-                output.push('\x1f');
+                output.push(DATA_DOLLAR);
             }
             Some('`') => {
                 chars.next();

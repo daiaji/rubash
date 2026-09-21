@@ -36,6 +36,7 @@ pub(crate) use quotes::{
     ANSI_C_QUOTE_MARKER, ANSI_C_QUOTE_MARKER_STR, PARAM_NAME_END_MARKER,
 };
 pub use token::{Token, TokenKind};
+use crate::executor::markers::{DATA_DOLLAR};
 
 pub(crate) const QUOTED_HEREDOC_MARKER: &str = crate::executor::markers::QUOTED_HEREDOC_MARKER;
 
@@ -477,7 +478,7 @@ fn tokenize_with_heredocs(
                 body.push('\n');
             }
             if !found_delimiter {
-                body.insert(0, '\x1f');
+                body.insert(0, DATA_DOLLAR);
             } else if found_with_warning {
                 body.insert(0, '\x1e');
             }

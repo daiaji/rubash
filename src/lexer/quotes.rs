@@ -1,5 +1,6 @@
 use super::ansi::decode_ansi_c_quoted;
 use super::dolbrace::{scan_braced_parameter, BraceContext, DolbraceState};
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 /// Emitted by quote removal right before a quote boundary that terminates
 /// an unbraced `$name` parameter. Quote removal deletes the quote, which
@@ -143,7 +144,7 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                     if quoted == '$' {
                         // Preserve the existing protected-dollar contract used by
                         // downstream expansion, but do not protect literal globs.
-                        out.push('\x1f');
+                        out.push(DATA_DOLLAR);
                     } else if protect_dquote && quoted == '"' {
                         out.push('\x18');
                     } else {
@@ -177,7 +178,7 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                     continue;
                 };
                 if escaped == '$' {
-                    out.push('\x1f');
+                    out.push(DATA_DOLLAR);
                 } else if escaped == '`' {
                     out.push('\x1a');
                 } else if escaped == '\'' {
@@ -370,7 +371,7 @@ fn remove_double_quoted_into(
                     chars.next();
                     if escaped != '\n' {
                         match escaped {
-                            '$' => out.push('\x1f'),
+                            '$' => out.push(DATA_DOLLAR),
                             '`' => out.push('\x1a'),
                             '\\' => out.push('\x14'),
                             // A de-escaped `"` must travel as the walker's
@@ -417,7 +418,7 @@ fn remove_double_quoted_into(
                         // does not re-interpret the following text as a
                         // variable reference.
                         pending_name = false;
-                        out.push('\x1f');
+                        out.push(DATA_DOLLAR);
                         continue;
                     }
                 } else if !(pending_name && is_lexer_shell_name_char(quoted)) {
@@ -480,7 +481,7 @@ pub(crate) fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
     decoded
         .replace('\'', &ANSI_C_QUOTE_MARKER.to_string())
         .replace('"', &ANSI_C_DQUOTE_MARKER.to_string())
-        .replace('$', "\x1f")
+        .replace('$', DATA_DOLLAR_STR)
 }
 
 fn copy_double_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {

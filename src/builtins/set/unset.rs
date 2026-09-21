@@ -6,6 +6,7 @@ use super::{
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 /// GNU shell.h:76 `EX_UTILERROR = 263` — a Posix special builtin utility error
 /// (> EX_SHERRBASE = 256). `unset_builtin` returns this when `posix_utility_error`
@@ -246,7 +247,7 @@ pub(super) fn is_marked_variable(
 ) -> bool {
     env_vars
         .get(key)
-        .map(|value| value.split('\x1f').any(|marked| marked == name))
+        .map(|value| value.split(DATA_DOLLAR).any(|marked| marked == name))
         .unwrap_or(false)
 }
 
@@ -255,10 +256,10 @@ fn unmark_variable(env_vars: &mut HashMap<String, String>, key: &str, name: &str
         return;
     };
     let marked = value
-        .split('\x1f')
+        .split(DATA_DOLLAR)
         .filter(|marked| !marked.is_empty() && *marked != name)
         .collect::<Vec<_>>()
-        .join("\x1f");
+        .join(DATA_DOLLAR_STR);
     if marked.is_empty() {
         env_vars.remove(key);
     } else {

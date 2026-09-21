@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 impl Executor {
     pub(in crate::executor) fn expand_parameter_word(&self, word: &str) -> String {
@@ -843,7 +844,7 @@ impl Executor {
         // command substitution span do NOT inherit the surrounding word's
         // quote context — they are applied later, when the inner command's
         // own words expand (`"x $(printf '%s ' ${v=a\ b})"` assigns `a b`).
-        let quoted_word = word.starts_with('\x1d');
+        let quoted_word = word.starts_with(STORAGE_WORD_PREFIX);
         // When this word IS the `${}` fragment currently being evaluated
         // (a `${name}` body re-entered through expand_word_mut), its single
         // `${` occurrence inherits the enclosing fragment's site rather
@@ -1166,7 +1167,7 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
                         // Protect `$` and `` ` `` from re-expansion: inside
                         // double quotes `\$` and `\`` are literal data that
                         // must not trigger parameter/command substitution.
-                        '$' => output.push('\x1f'),
+                        '$' => output.push(DATA_DOLLAR),
                         '`' => output.push('\x1a'),
                         _ => output.push(escaped),
                     }
@@ -1273,7 +1274,7 @@ mod scanner_tests {
 
     #[test]
     fn cs_span_in_quoted_word() {
-        let word = "\x1dA: $(printf '<%s> ' ${w=a\\ b}) | x";
+        let word = format!("{}{}", crate::executor::markers::STORAGE_WORD_PREFIX_STR, "A: $(printf '<%s> ' ${w=a\\ b}) | x");
         let start = word.find("${").unwrap();
         let (dq, cs) = scan_word_prefix_quote_state(&word[..start], true);
         assert!(cs);
@@ -1282,7 +1283,7 @@ mod scanner_tests {
 
     #[test]
     fn direct_dquote_body() {
-        let word = "\x1d${v=a\\ b}";
+        let word = format!("{}{}", crate::executor::markers::STORAGE_WORD_PREFIX_STR, "${v=a\\ b}");
         let start = word.find("${").unwrap();
         let (dq, cs) = scan_word_prefix_quote_state(&word[..start], true);
         assert!(dq);
@@ -1291,7 +1292,7 @@ mod scanner_tests {
 
     #[test]
     fn cs_closes_and_next_body_is_outer() {
-        let word = "\x1dA: $(f) ${v=a\\ b}";
+        let word = format!("{}{}", crate::executor::markers::STORAGE_WORD_PREFIX_STR, "A: $(f) ${v=a\\ b}");
         let start = word.find("${").unwrap();
         let (dq, cs) = scan_word_prefix_quote_state(&word[..start], true);
         assert!(!cs, "body after the CS span is outer");

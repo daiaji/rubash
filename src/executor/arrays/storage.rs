@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::executor::{mark_env_name, split_storage_words, unquote_storage_value, ARRAY_VARS};
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
 pub(in crate::executor) fn normalize_array_expanded_value(value: String) -> String {
     // GNU array.c: array element values are stored and retrieved verbatim.
@@ -14,7 +16,7 @@ pub(in crate::executor) fn normalize_array_expanded_value(value: String) -> Stri
 pub(in crate::executor) fn array_values(value: &str) -> Vec<String> {
     // TODO(array.c/assoc.c/subst.c): This is a lossy representation used while
     // arrays are still stored in the scalar variable table.
-    if let Some(rendered) = value.strip_prefix('\x1d') {
+    if let Some(rendered) = value.strip_prefix(STORAGE_WORD_PREFIX) {
         return rendered_array_values(rendered);
     }
 
@@ -46,7 +48,7 @@ pub(in crate::executor) fn array_values(value: &str) -> Vec<String> {
 }
 
 pub(in crate::executor) fn indexed_array_entries(value: &str) -> BTreeMap<usize, String> {
-    if let Some(rendered) = value.strip_prefix('\x1d') {
+    if let Some(rendered) = value.strip_prefix(STORAGE_WORD_PREFIX) {
         return rendered_array_entries(rendered);
     }
 
@@ -106,7 +108,7 @@ pub(in crate::executor) fn format_indexed_array_storage(
         .map(|(index, value)| format!("[{index}]={}", quote_array_value(&value)))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("\x1d({rendered})")
+    format!("{STORAGE_WORD_PREFIX_STR}({rendered})")
 }
 
 pub(in crate::executor) fn format_indexed_array_values(values: Vec<String>) -> String {
@@ -116,7 +118,7 @@ pub(in crate::executor) fn format_indexed_array_values(values: Vec<String>) -> S
         .map(|(index, value)| format!("[{index}]={}", quote_array_value(&value)))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("\x1d({rendered})")
+    format!("{STORAGE_WORD_PREFIX_STR}({rendered})")
 }
 
 pub(in crate::executor) fn store_indexed_array(
@@ -355,7 +357,7 @@ fn decode_utf8_char(bytes: &[u8]) -> Option<char> {
 }
 
 pub(in crate::executor) fn is_array_storage(value: &str) -> bool {
-    value.starts_with('(') && value.ends_with(')') || value.starts_with('\x1d')
+    value.starts_with('(') && value.ends_with(')') || value.starts_with(STORAGE_WORD_PREFIX)
 }
 
 pub(in crate::executor) fn is_marked_array_var(
@@ -367,7 +369,7 @@ pub(in crate::executor) fn is_marked_array_var(
     [ARRAY_VARS, ASSOC_VARS].iter().any(|key| {
         env_vars
             .get(*key)
-            .map(|value| value.split('\x1f').any(|marked| marked == name))
+            .map(|value| value.split(DATA_DOLLAR).any(|marked| marked == name))
             .unwrap_or(false)
     })
 }

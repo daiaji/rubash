@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR};
 
 // Private markers used by the patsub replacement pipeline. They survive
 // expand_embedded_parameters untouched and are resolved by
@@ -325,7 +326,7 @@ fn push_single_quoted_replacement_char(marked: &mut String, ch: char) {
     match ch {
         '&' => marked.push(PATSUB_QUOTED_AMP),
         '\\' | '\x14' => marked.push(PATSUB_QUOTED_BACKSLASH),
-        '$' => marked.push('\x1f'),
+        '$' => marked.push(DATA_DOLLAR),
         '`' => marked.push('\x1a'),
         // Decoded quote data must survive the expander, which drops a bare
         // quote as an unclosed span.
@@ -505,7 +506,7 @@ fn push_unquoted_escape(marked: &mut String, chars: &[char], index: usize) -> us
             index + 2
         }
         Some('$') => {
-            marked.push('\x1f');
+            marked.push(DATA_DOLLAR);
             index + 2
         }
         Some('`') => {

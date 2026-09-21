@@ -5,6 +5,7 @@ use super::classification::{
 use super::quotes::{remove_shell_quotes_outside_backticks, remove_shell_quotes_with_posix};
 use super::scanner::Lexer;
 use super::token::{Token, TokenKind};
+use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
 impl<'a> Lexer<'a> {
     pub(super) fn finish_word_token(&mut self, start: usize, allow_keyword: bool) -> Token {
@@ -106,7 +107,7 @@ impl<'a> Lexer<'a> {
             // `"${IFS+"'"x ~ x'}'x"}"x}" #'` (dq segment + sq segment):
             // GNU treats the whole word as quoted (no field splitting,
             // quoted alternate expansion, posixexp2 case 28).
-            format!("\x1d{value}")
+            format!("{STORAGE_WORD_PREFIX_STR}{value}")
         } else {
             value
         };

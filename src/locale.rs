@@ -356,7 +356,23 @@ pub fn decode_to_visible_text(text: &str) -> String {
             | COMPOUND_EXPANSION_WS_TAG
             | crate::executor::markers::QUOTED_WORD_PREFIX
             | crate::executor::markers::IFS_GLUE
-            | crate::executor::markers::STORAGE_WORD_PREFIX => {}
+            | crate::executor::markers::STORAGE_WORD_PREFIX
+            | crate::executor::markers::ARRAYREF_FLAG
+            | crate::executor::markers::PATSUB_QUOTED_VALUE_START
+            | crate::executor::markers::PATSUB_QUOTED_VALUE_END => {}
+            c if crate::executor::markers::FAILED_SUBSCRIPT_SENTINEL.contains(c) => {}
+            crate::executor::markers::PATSUB_QUOTED_AMP => out.push('&'),
+            crate::executor::markers::PATSUB_QUOTED_BACKSLASH => out.push('\\'),
+            // Guard sentinels are protect-prefixes: GUARD + c marks c as
+            // literal data (the original `\` was consumed at encode time).
+            crate::executor::markers::PARAM_WORD_BACKSLASH_GUARD
+            | crate::executor::markers::ESCAPED_IFS_GUARD
+            | crate::executor::markers::PROMPT_ESCAPE_GUARD
+            | crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD => {
+                if let Some(data) = chars.next() {
+                    out.push(data);
+                }
+            }
             crate::executor::markers::DATA_BACKSLASH
             | HOISTED_BACKSLASH
             | DATA_ESCAPED_BACKSLASH => out.push('\\'),

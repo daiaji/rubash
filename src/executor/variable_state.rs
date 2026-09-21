@@ -1,10 +1,11 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 impl Executor {
     pub(crate) fn alias_expansion_enabled(&self) -> bool {
         self.shell_state.env_vars
             .get("__RUBASH_SHOPT_STATE")
-            .is_some_and(|value| value.split('\x1f').any(|name| name == "expand_aliases"))
+            .is_some_and(|value| value.split(DATA_DOLLAR).any(|name| name == "expand_aliases"))
     }
 
     pub(in crate::executor) fn apply_case_assignment_attributes(
@@ -405,7 +406,7 @@ impl Executor {
             .get(EXPORTED_VARS)
             .map(|value| {
                 value
-                    .split('\x1f')
+                    .split(DATA_DOLLAR)
                     .filter(|name| !name.is_empty())
                     .map(str::to_string)
                     .collect()
@@ -416,7 +417,7 @@ impl Executor {
             exported.push(name.to_string());
         }
         self.shell_state.env_vars
-            .insert(EXPORTED_VARS.to_string(), exported.join("\x1f"));
+            .insert(EXPORTED_VARS.to_string(), exported.join(DATA_DOLLAR_STR));
     }
 
     pub(in crate::executor) fn keeps_temporary_assignments(&self, cmd: &CommandNode) -> bool {

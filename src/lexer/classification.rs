@@ -1,3 +1,4 @@
+use crate::executor::markers::{DATA_DOLLAR};
 pub(super) fn is_keyword(word: &str) -> bool {
     matches!(
         word,
@@ -167,7 +168,7 @@ pub(super) fn protect_fully_single_quoted_assignment(raw: &str) -> String {
     for ch in chars {
         match ch {
             '\'' => {}
-            '$' => out.push('\x1f'),
+            '$' => out.push(DATA_DOLLAR),
             '`' => out.push('\x1a'),
             _ => out.push(ch),
         }

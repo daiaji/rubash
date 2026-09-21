@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Write};
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -344,7 +345,7 @@ fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, (String, u3
         .get(HASH_TABLE)
         .map(|value| {
             value
-                .split('\x1f')
+                .split(DATA_DOLLAR)
                 .filter_map(|entry| {
                     let (name, rest) = entry.split_once('=')?;
                     let (path, tail) = rest.split_once(crate::executor::markers::HASH_ENV_FIELD_SEP).unwrap_or((rest, "0"));
@@ -370,7 +371,7 @@ fn store_hash_table(env_vars: &mut HashMap<String, String>, table: &HashMap<Stri
             .iter()
             .map(|(name, (path, hits, seq))| format!("{name}={path}{s}{hits}{s}{seq}", s = crate::executor::markers::HASH_ENV_FIELD_SEP))
             .collect::<Vec<_>>()
-            .join("\x1f"),
+            .join(DATA_DOLLAR_STR),
     );
 }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 impl Executor {
     pub(in crate::executor) fn execute_declare_functions(
@@ -572,7 +573,7 @@ impl Executor {
                     || self
                         .shell_state.env_vars
                         .get(lhs)
-                        .is_some_and(|v| v.starts_with('\x1d'));
+                        .is_some_and(|v| v.starts_with(STORAGE_WORD_PREFIX));
                 if !marked && !target_is_array {
                     // Scalar target + unmarked parenthesized text: GNU binds
                     // the literal string (bind_variable_value), never

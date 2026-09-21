@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::assignment_expansion::{hoist_data_double_quotes, hoist_data_single_quotes};
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 impl Executor {
     pub(in crate::executor) fn is_brace_expand_enabled(&self) -> bool {
@@ -45,7 +46,7 @@ impl Executor {
             return self.expand_embedded_parameters_mut(word);
         }
 
-        if let Some(word) = word.strip_prefix('\x1d') {
+        if let Some(word) = word.strip_prefix(STORAGE_WORD_PREFIX) {
             //  marks a quoted word; quoted defaults never tilde-expand.
             return self
                 .expand_quoted_parameter_word_mut(word, SubstitutionQuoteContext::DoubleQuoted);

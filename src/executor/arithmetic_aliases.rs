@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR};
 
 impl Executor {
     pub(in crate::executor) fn reparse_reserved_word_aliases(
@@ -624,7 +625,7 @@ impl Executor {
         if self.shell_state.expanding_aliases.iter().any(|seen| seen == first) {
             return source.to_string();
         }
-        let mut spliced = alias.value.replace('\x1f', "$");
+        let mut spliced = alias.value.replace(DATA_DOLLAR, "$");
         let rest = &trimmed[first_end..];
         if !rest.is_empty()
             && !spliced.ends_with(' ')
@@ -678,7 +679,7 @@ impl Executor {
             return Ok(false);
         }
 
-        let mut source = alias.value.replace('\x1f', "$");
+        let mut source = alias.value.replace(DATA_DOLLAR, "$");
         if !cmd.words[1..].is_empty()
             && (has_unclosed_quote(&alias.value)
                 || (!source.ends_with(' ') && !source.ends_with('\t')))
@@ -744,7 +745,7 @@ impl Executor {
         }
 
         seen.push(word.to_string());
-        let mut source = alias.value.replace('\x1f', "$");
+        let mut source = alias.value.replace(DATA_DOLLAR, "$");
         if !rest.is_empty()
             && (has_unclosed_quote(&alias.value)
                 || (!source.ends_with(' ') && !source.ends_with('\t')))
@@ -795,7 +796,7 @@ impl Executor {
         // (comsub6.sub: `alias foo='echo $(echo $DATE)'` → `foo` prints the
         // date, not `$(echo $DATE)`). Alias values store `$` as \x1f, so
         // restore it before splitting.
-        let alias_value = alias.value.replace('\x1f', "$");
+        let alias_value = alias.value.replace(DATA_DOLLAR, "$");
         let mut parts = super::alias_helpers::split_shell_words(&alias_value);
 
         if let Some(first) = parts.first().cloned() {

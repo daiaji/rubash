@@ -2,18 +2,19 @@ use std::collections::{HashMap, HashSet};
 
 use super::value::valid_identifier;
 use super::{ARRAY_VARS, ASSOC_VARS, EXPORTED_VARS, NAMEREF_VARS, READONLY_VARS};
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 pub(super) fn mark_exported(env_vars: &mut HashMap<String, String>, name: &str) {
     let mut exported = marked_vars(env_vars, EXPORTED_VARS);
     exported.insert(name.to_string());
-    let value = exported.into_iter().collect::<Vec<_>>().join("\x1f");
+    let value = exported.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR);
     env_vars.insert(EXPORTED_VARS.to_string(), value);
 }
 
 pub(super) fn unmark_exported(env_vars: &mut HashMap<String, String>, name: &str) {
     let mut exported = marked_vars(env_vars, EXPORTED_VARS);
     exported.remove(name);
-    let value = exported.into_iter().collect::<Vec<_>>().join("\x1f");
+    let value = exported.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR);
     env_vars.insert(EXPORTED_VARS.to_string(), value);
 }
 
@@ -24,7 +25,7 @@ pub(super) fn mark_readonly(env_vars: &mut HashMap<String, String>, name: &str) 
     readonly.insert(name.to_string());
     env_vars.insert(
         READONLY_VARS.to_string(),
-        readonly.into_iter().collect::<Vec<_>>().join("\x1f"),
+        readonly.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR),
     );
 }
 
@@ -33,7 +34,7 @@ pub(super) fn mark_array(env_vars: &mut HashMap<String, String>, name: &str) {
     arrays.insert(name.to_string());
     env_vars.insert(
         ARRAY_VARS.to_string(),
-        arrays.into_iter().collect::<Vec<_>>().join("\x1f"),
+        arrays.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR),
     );
 }
 
@@ -48,13 +49,13 @@ pub(super) fn mark_assoc(env_vars: &mut HashMap<String, String>, name: &str, con
     assoc.insert(name.to_string());
     env_vars.insert(
         ASSOC_VARS.to_string(),
-        assoc.into_iter().collect::<Vec<_>>().join("\x1f"),
+        assoc.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR),
     );
     let mut arrays = marked_vars(env_vars, ARRAY_VARS);
     arrays.remove(name);
     env_vars.insert(
         ARRAY_VARS.to_string(),
-        arrays.into_iter().collect::<Vec<_>>().join("\x1f"),
+        arrays.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR),
     );
     let mut assoc128 = marked_vars(env_vars, crate::executor::types::ASSOC_128_VARS);
     if converted {
@@ -64,7 +65,7 @@ pub(super) fn mark_assoc(env_vars: &mut HashMap<String, String>, name: &str, con
     }
     env_vars.insert(
         crate::executor::types::ASSOC_128_VARS.to_string(),
-        assoc128.into_iter().collect::<Vec<_>>().join("\x1f"),
+        assoc128.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR),
     );
 }
 
@@ -73,7 +74,7 @@ pub(super) fn marked_vars(env_vars: &HashMap<String, String>, key: &str) -> Hash
         .get(key)
         .map(|value| {
             value
-                .split('\x1f')
+                .split(DATA_DOLLAR)
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
                 .collect()

@@ -1,6 +1,7 @@
 use super::*;
 use crate::executor::embedded_mutations::collect_command_substitution_source;
 use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 /// Hoisted data-quote sentinels: expand_assignment_value_inner lifts the
 /// lexer's \x17/\x18 escaped-quote carriers out of the embedded-parameter
@@ -604,7 +605,7 @@ impl Executor {
             // U+001F and render as $'\037', while '$$' stores 24 24 and
             // renders as "\$\$", both matching GNU).
             let restored = value
-                .replace('\x1f', "$")
+                .replace(DATA_DOLLAR, "$")
                 .replace('\x1a', "`")
                 .replace('\x14', "\\")
                 // `\"` and `'` inside double quotes travel as the walker's
@@ -1146,11 +1147,11 @@ impl Executor {
             // delivers "$@" either as a bare `$@` (split-form path) or as
             // \u{E302}$@\u{E302} (atomic lexer path, DQ_DATA markers).
             let token_stripped = token.trim_matches('\u{E302}');
-            if token_stripped == "$@" || token.strip_prefix('\x1d') == Some("${@}") {
+            if token_stripped == "$@" || token.strip_prefix(STORAGE_WORD_PREFIX) == Some("${@}") {
                 changed = true;
                 values.extend(self.shell_state.positional_params.iter().map(|value| store!(value)));
             } else if let Some(array_name) = token
-                .strip_prefix('\x1d')
+                .strip_prefix(STORAGE_WORD_PREFIX)
                 .and_then(|token| token.strip_prefix("${"))
                 .and_then(|token| token.strip_suffix("[@]}"))
                 .or_else(|| {
@@ -1174,7 +1175,7 @@ impl Executor {
                     values.push(store!(""));
                 }
             } else if let Some(indirect_name) = token
-                .strip_prefix('\x1d')
+                .strip_prefix(STORAGE_WORD_PREFIX)
                 .and_then(|token| token.strip_prefix("${"))
                 .and_then(|token| token.strip_suffix('}'))
                 .and_then(|name| name.strip_prefix('!'))
@@ -1341,7 +1342,7 @@ impl Executor {
                     }
                 }
             } else if let Some(name) = token
-                .strip_prefix('\x1d')
+                .strip_prefix(STORAGE_WORD_PREFIX)
                 .and_then(|token| token.strip_prefix("${"))
                 .and_then(|token| token.strip_suffix('}'))
                 .or_else(|| {
@@ -1647,7 +1648,7 @@ impl Executor {
         &self,
         value: &str,
     ) -> Option<String> {
-        let value = value.strip_prefix('\x1d').unwrap_or(value);
+        let value = value.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(value);
         let name = value.strip_prefix("${")?.strip_suffix('}')?;
         let array_name = name
             .strip_suffix("[@]")

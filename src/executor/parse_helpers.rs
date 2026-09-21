@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR};
 
 pub(in crate::executor) fn command_node_source_line(command: &CommandNode) -> String {
     command.words.join(" ")
@@ -305,6 +306,6 @@ pub(in crate::executor) fn is_marked_var(
 ) -> bool {
     env_vars
         .get(key)
-        .map(|value| value.split('\x1f').any(|marked| marked == name))
+        .map(|value| value.split(DATA_DOLLAR).any(|marked| marked == name))
         .unwrap_or(false)
 }

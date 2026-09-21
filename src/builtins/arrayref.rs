@@ -11,6 +11,7 @@
 //! single quote — is not a valid reference (assoc9.sub `read a[$b]`).
 
 use std::collections::HashMap;
+use crate::executor::markers::{DATA_DOLLAR};
 
 /// In-band W_ARRAYREF carrier (GNU execute_cmd.c:4366 fix_arrayref_words):
 /// an operand word of an ARRAYREF_BUILTIN whose pre-expansion text passed
@@ -259,6 +260,6 @@ fn valid_identifier(name: &str) -> bool {
 fn is_marked_assoc(env_vars: &HashMap<String, String>, base: &str) -> bool {
     env_vars
         .get(crate::executor::types::ASSOC_VARS)
-        .map(|marked| marked.split('\x1f').any(|entry| entry == base))
+        .map(|marked| marked.split(DATA_DOLLAR).any(|entry| entry == base))
         .unwrap_or(false)
 }

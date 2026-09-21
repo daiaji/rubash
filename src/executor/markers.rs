@@ -127,8 +127,10 @@ pub(crate) const PREEXPANDED_STDIN_BODY: char = '\u{5}';
 /// keeps them as separate elements (declare/storage/array.rs).
 pub(crate) const ARRAY_FIELD_SPLIT_MARKER: char = '\u{10}';
 
-/// Marks an `a[@]`/`a[*]` reference token for the arrayref builtin.
-pub(crate) const ARRAYREF_FLAG: char = '\u{2}';
+/// Marks an `a[@]`/`a[*]` reference token for the arrayref builtin
+/// (in-band W_ARRAYREF port, command_prepare.rs). Moved from \x02: that
+/// byte collided with PROMPT_IGNORE_END and is user-reachable.
+pub(crate) const ARRAYREF_FLAG: char = '\u{E318}';
 
 // ==========================================================================
 // PATSUB family — `${var/pat/rep}` replacement quoted-region markers.
@@ -256,6 +258,29 @@ pub(crate) const ASSIGN_SQ_BACKSLASH_STR: &str = "\u{E30C}";
 pub(crate) const ANSI_C_QUOTE_MARKER_STR: &str = "\u{E010}";
 pub(crate) const ANSI_C_DQUOTE_MARKER_STR: &str = "\u{E011}";
 pub(crate) const QUOTED_NULL_MARKER_STR: &str = "\u{E002}";
+
+// C0 carrier &str spellings for `str::replace` targets / format strings.
+pub(crate) const CTLESC_STR: &str = "\u{11}";
+pub(crate) const PARAM_NAME_END_MARKER_STR: &str = "\u{13}";
+pub(crate) const DATA_BACKSLASH_STR: &str = "\u{14}";
+pub(crate) const PROTECTED_BACKSLASH_STR: &str = "\u{15}";
+pub(crate) const PROTECTED_ESCAPED_SQUOTE_STR: &str = "\u{16}";
+pub(crate) const DATA_SQUOTE_STR: &str = "\u{17}";
+pub(crate) const DATA_DQUOTE_STR: &str = "\u{18}";
+pub(crate) const PROTECTED_LITERAL_BACKSLASH_STR: &str = "\u{19}";
+pub(crate) const DATA_BACKTICK_STR: &str = "\u{1a}";
+pub(crate) const QUOTED_WORD_PREFIX_STR: &str = "\u{1b}";
+pub(crate) const IFS_GLUE_STR: &str = "\u{1c}";
+pub(crate) const STORAGE_WORD_PREFIX_STR: &str = "\u{1d}";
+pub(crate) const SUBSCRIPT_CARRIER_STR: &str = "\u{1e}";
+pub(crate) const DATA_DOLLAR_STR: &str = "\u{1f}";
+pub(crate) const PROTECTED_LITERAL_DOLLAR_STR: &str = "\u{12}";
+pub(crate) const PROMPT_IGNORE_START_STR: &str = "\u{01}";
+pub(crate) const PROMPT_IGNORE_END_STR: &str = "\u{02}";
+pub(crate) const DEFERRED_COMPOUND_BODY_STR: &str = "\u{3}";
+pub(crate) const PREEXPANDED_STDIN_BODY_STR: &str = "\u{5}";
+pub(crate) const ARRAY_FIELD_SPLIT_MARKER_STR: &str = "\u{10}";
+pub(crate) const ARRAYREF_FLAG_STR: &str = "\u{E318}";
 
 // ==========================================================================
 // Named string markers — multi-char protocol prefixes (not byte carriers).
@@ -597,6 +622,8 @@ pub(crate) fn push_ctlesc_escaped(output: &mut String, data: char) {
     output.push(data);
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,7 +667,31 @@ mod tests {
     /// Every `_STR` companion must spell the same codepoint as its `char`.
     #[test]
     fn str_companions_match_char_consts() {
-        let pairs: [(char, &str); 12] = [
+        let pairs: [(char, &str); 36] = [
+            (CTLESC, CTLESC_STR),
+            (PARAM_NAME_END_MARKER, PARAM_NAME_END_MARKER_STR),
+            (DATA_BACKSLASH, DATA_BACKSLASH_STR),
+            (PROTECTED_BACKSLASH, PROTECTED_BACKSLASH_STR),
+            (PROTECTED_ESCAPED_SQUOTE, PROTECTED_ESCAPED_SQUOTE_STR),
+            (DATA_SQUOTE, DATA_SQUOTE_STR),
+            (DATA_DQUOTE, DATA_DQUOTE_STR),
+            (PROTECTED_LITERAL_BACKSLASH, PROTECTED_LITERAL_BACKSLASH_STR),
+            (DATA_BACKTICK, DATA_BACKTICK_STR),
+            (QUOTED_WORD_PREFIX, QUOTED_WORD_PREFIX_STR),
+            (IFS_GLUE, IFS_GLUE_STR),
+            (STORAGE_WORD_PREFIX, STORAGE_WORD_PREFIX_STR),
+            (SUBSCRIPT_CARRIER, SUBSCRIPT_CARRIER_STR),
+            (DATA_DOLLAR, DATA_DOLLAR_STR),
+            (PROTECTED_LITERAL_DOLLAR, PROTECTED_LITERAL_DOLLAR_STR),
+            (PROMPT_IGNORE_START, PROMPT_IGNORE_START_STR),
+            (PROMPT_IGNORE_END, PROMPT_IGNORE_END_STR),
+            (DEFERRED_COMPOUND_BODY, DEFERRED_COMPOUND_BODY_STR),
+            (PREEXPANDED_STDIN_BODY, PREEXPANDED_STDIN_BODY_STR),
+            (ARRAY_FIELD_SPLIT_MARKER, ARRAY_FIELD_SPLIT_MARKER_STR),
+            (ARRAYREF_FLAG, ARRAYREF_FLAG_STR),
+            (ANSI_C_QUOTE_MARKER, ANSI_C_QUOTE_MARKER_STR),
+            (ANSI_C_DQUOTE_MARKER, ANSI_C_DQUOTE_MARKER_STR),
+            (QUOTED_NULL_MARKER, QUOTED_NULL_MARKER_STR),
             (ASSIGN_DATA_SQUOTE, ASSIGN_DATA_SQUOTE_STR),
             (ASSIGN_DATA_DQUOTE, ASSIGN_DATA_DQUOTE_STR),
             (ASSIGN_DATA_BACKTICK, ASSIGN_DATA_BACKTICK_STR),

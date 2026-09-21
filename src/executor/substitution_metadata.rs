@@ -131,7 +131,23 @@ fn push_escaped_text_with_carriers(output: &mut String, text: &str) {
 }
 
 fn is_carrier_byte(byte: u32) -> bool {
-    matches!(byte, 0x0c | 0x11 | 0x13 | 0x14 | 0x16 | 0x17 | 0x1a | 0x1f)
+    use crate::executor::markers::{
+        CTLESC, DATA_BACKSLASH, DATA_BACKTICK, DATA_DOLLAR, DATA_SQUOTE, PARAM_NAME_END_MARKER,
+        PROTECTED_ESCAPED_SQUOTE,
+    };
+    // 0x0c: former PATSUB_QUOTED_VALUE_END carrier byte (now U+E311);
+    // still entry-encoded so a user \f can never alias a transport marker.
+    [
+        0x0c,
+        CTLESC as u32,
+        PARAM_NAME_END_MARKER as u32,
+        DATA_BACKSLASH as u32,
+        PROTECTED_ESCAPED_SQUOTE as u32,
+        DATA_SQUOTE as u32,
+        DATA_BACKTICK as u32,
+        DATA_DOLLAR as u32,
+    ]
+    .contains(&byte)
 }
 
 pub(in crate::executor) struct SubstitutionOutput {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 /// subst.c::dequote_string (4807-4841): strip quote-protection marks and
 /// return the plain value. The pattern-matching code cannot interpret
@@ -16,7 +17,7 @@ use super::*;
 /// came out as `'weferfds'dsfsdf'`.
 fn dequote_storage_marks(value: &str) -> String {
     value
-        .replace('\x1f', "$")
+        .replace(DATA_DOLLAR, "$")
         .replace('\x1a', "`")
         .replace('\x17', "'")
         .replace('\x18', "\"")
@@ -328,7 +329,7 @@ impl Executor {
         // A `\x1d` marker is the lexer's wholly-double-quoted word bookkeeping
         // and never part of the key text.
         self.expand_subscript_string(key)
-            .trim_matches('\x1d')
+            .trim_matches(STORAGE_WORD_PREFIX)
             .to_string()
     }
 

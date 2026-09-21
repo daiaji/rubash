@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 /// Recognize `=` / `:=` whose parameter name is a bare special parameter
 /// (`!`, `@`, `*`). GNU subst.c parameter_brace_expand treats these like
@@ -172,7 +173,7 @@ impl Executor {
     ) -> Option<(String, &'static str)> {
         let word = word
             .strip_prefix('\x1b')
-            .or_else(|| word.strip_prefix('\x1d'))
+            .or_else(|| word.strip_prefix(STORAGE_WORD_PREFIX))
             .unwrap_or(word);
         let mut rest = word;
         while let Some(start) = rest.find("${") {
@@ -633,7 +634,7 @@ impl Executor {
     ) -> Option<(String, String, i32)> {
         let word = word
             .strip_prefix('\x1b')
-            .or_else(|| word.strip_prefix('\x1d'))
+            .or_else(|| word.strip_prefix(STORAGE_WORD_PREFIX))
             .unwrap_or(word);
         // Preserve Rubash's nested current-shell extension; its `${| ... }`
         // marker disambiguates the legacy enclosing form from this Bash error.
@@ -922,7 +923,7 @@ impl Executor {
     pub(in crate::executor) fn nounset_unbound_parameter(&self, word: &str) -> Option<String> {
         let mut chars = word.chars().peekable();
         while let Some(ch) = chars.next() {
-            if ch == '\x1f' {
+            if ch == DATA_DOLLAR {
                 continue;
             }
             if ch != '$' {
@@ -1249,7 +1250,7 @@ impl Executor {
         // Scalar (or unset) base: only element 0 exists, and only when the
         // variable itself is set. Array storage consults the element table.
         match self.shell_state.env_vars.get(base) {
-            Some(storage) if storage.starts_with('\x1d') || storage.starts_with('(') => self
+            Some(storage) if storage.starts_with(STORAGE_WORD_PREFIX) || storage.starts_with('(') => self
                 .nounset_indexed_element_absent(base, sub)
                 .then(|| reported.to_string()),
             Some(_) => (self.eval_integer_assignment_value(sub) != 0).then(|| reported.to_string()),

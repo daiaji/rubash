@@ -14,6 +14,7 @@ use paths::{
 use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use crate::executor::markers::{DATA_DOLLAR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -110,11 +111,11 @@ where
         // GNU cd.def:136-175 bindpwd: check readonly for OLDPWD and PWD.
         let pwd_readonly = env_vars
             .get("__RUBASH_READONLY_VARS")
-            .map(|v| v.split('\x1f').any(|name| name == "PWD"))
+            .map(|v| v.split(DATA_DOLLAR).any(|name| name == "PWD"))
             .unwrap_or(false);
         let oldpwd_readonly = env_vars
             .get("__RUBASH_READONLY_VARS")
-            .map(|v| v.split('\x1f').any(|name| name == "OLDPWD"))
+            .map(|v| v.split(DATA_DOLLAR).any(|name| name == "OLDPWD"))
             .unwrap_or(false);
         let mut failed = false;
         if oldpwd_readonly {
@@ -190,11 +191,11 @@ where
     // which uses the error_prolog format: "shell: line N: VAR: readonly variable".
     let pwd_readonly = env_vars
         .get("__RUBASH_READONLY_VARS")
-        .map(|v| v.split('\x1f').any(|name| name == "PWD"))
+        .map(|v| v.split(DATA_DOLLAR).any(|name| name == "PWD"))
         .unwrap_or(false);
     let oldpwd_readonly = env_vars
         .get("__RUBASH_READONLY_VARS")
-        .map(|v| v.split('\x1f').any(|name| name == "OLDPWD"))
+        .map(|v| v.split(DATA_DOLLAR).any(|name| name == "OLDPWD"))
         .unwrap_or(false);
     let mut failed = false;
     if oldpwd_readonly {

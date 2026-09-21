@@ -1,3 +1,4 @@
+use crate::executor::markers::{DATA_DOLLAR};
 pub(in crate::executor) fn split_shell_words(source: &str) -> Vec<String> {
     split_shell_words_with_quote_info(source)
         .into_iter()
@@ -46,7 +47,7 @@ pub(in crate::executor) fn split_shell_words_with_quote_info(source: &str) -> Ve
                     };
                     match escaped {
                         '\\' => current.push('\x14'),
-                        '$' => current.push('\x1f'),
+                        '$' => current.push(DATA_DOLLAR),
                         '`' => current.push('\x1a'),
                         '\'' => current.push('\x17'),
                         '"' => current.push('\x18'),
@@ -61,7 +62,7 @@ pub(in crate::executor) fn split_shell_words_with_quote_info(source: &str) -> Ve
                         match escaped {
                             '\\' => current.push('\x14'),
                             '"' => current.push('\x18'),
-                            '$' => current.push('\x1f'),
+                            '$' => current.push(DATA_DOLLAR),
                             '`' => current.push('\x1a'),
                             '\n' => {}
                             _ => unreachable!(),
@@ -287,7 +288,7 @@ fn copy_backtick_word_part(
 
 fn push_single_quoted_shell_word_char(current: &mut String, ch: char) {
     match ch {
-        '$' => current.push('\x1f'),
+        '$' => current.push(DATA_DOLLAR),
         '`' => current.push('\x1a'),
         '\\' => current.push('\x15'),
         _ => current.push(ch),
@@ -433,7 +434,7 @@ fn split_escaped_separator(value: &str, separator: char) -> Option<(&str, &str)>
 
 fn apply_simple_sed_line(line: &str, pattern: &str, replacement: &str) -> String {
     let pattern = pattern
-        .replace('\x1f', "$")
+        .replace(DATA_DOLLAR, "$")
         .replace('\x11', "")
         .replace(r"\\.", r"\.");
     match pattern.as_str() {

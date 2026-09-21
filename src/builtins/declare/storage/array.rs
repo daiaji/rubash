@@ -5,6 +5,8 @@ use super::{
     split_storage_words, unquote_storage_value,
 };
 use crate::executor::glob::{pathname_expand_word, PathnameExpansion};
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
 /// GNU arrayfunc.c quote_array_assignment_chars (arrayfunc.c:1107+) marks
 /// `[subscript]=value` / `[subscript]+=value` compound words W_NOGLOB: they
@@ -116,8 +118,8 @@ pub(in crate::builtins) fn append_array_value(
         let quoted_token = (token.starts_with('"') && token.ends_with('"'))
             || (token.starts_with('\'') && token.ends_with('\''));
         let token = unquoted_token;
-        let unquoted_command_substitution = token.starts_with('\x1d');
-        let token = token.strip_prefix('\x1d').unwrap_or(&token);
+        let unquoted_command_substitution = token.starts_with(STORAGE_WORD_PREFIX);
+        let token = token.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(&token);
         if token.contains(char::is_whitespace) && (!quoted_token || unquoted_command_substitution) {
             for value in token.split_whitespace() {
                 entries.insert(next_index, value.to_string());
@@ -150,7 +152,7 @@ pub(in crate::builtins) fn append_array_value(
 }
 
 pub(in crate::builtins) fn indexed_array_entries(value: &str) -> BTreeMap<usize, String> {
-    if let Some(rendered) = value.strip_prefix('\x1d') {
+    if let Some(rendered) = value.strip_prefix(STORAGE_WORD_PREFIX) {
         return rendered_array_entries(rendered);
     }
 
@@ -190,7 +192,7 @@ pub(in crate::builtins) fn format_indexed_array_storage(
         .map(|(index, value)| format!("[{index}]={}", super::quote_array_element_value(&value)))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("\x1d({rendered})")
+    format!("{STORAGE_WORD_PREFIX_STR}({rendered})")
 }
 
 fn array_assignment_index(left: &str, entries: &BTreeMap<usize, String>) -> Option<usize> {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 impl Executor {
     pub(in crate::executor) fn set_fd_input_text(&mut self, fd: u32, input: String, dynamic: bool) {
@@ -1178,7 +1179,7 @@ impl Executor {
             .find(|redirect| redirect.fd.is_some() && redirect.body.is_some())?;
         let fd = redirect.fd?;
         let body = redirect.body.as_deref()?;
-        let input = if let Some(word) = body.strip_prefix('\x1d') {
+        let input = if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
             let mut input =
                 decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
             input.push('\n');

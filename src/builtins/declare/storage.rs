@@ -1,3 +1,4 @@
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 mod array;
 mod assoc;
 mod words;
@@ -16,7 +17,7 @@ pub(super) fn parse_single_element_array(value: &str) -> Option<&str> {
 }
 
 pub(super) fn format_array_value(value: &str) -> String {
-    if let Some(rendered) = value.strip_prefix('\x1d') {
+    if let Some(rendered) = value.strip_prefix(STORAGE_WORD_PREFIX) {
         return rendered.to_string();
     }
 

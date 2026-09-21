@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 impl Executor {
     pub(in crate::executor) fn execute_lastpipe_stage(
@@ -423,7 +424,7 @@ impl Executor {
                 .to_string();
                 // \x1d marks a fully quoted word and \x1b a quoted tilde;
                 // both stay literal, as command_prepare does.
-                if expanded.starts_with('\x1d') || expanded.starts_with('\x1b') {
+                if expanded.starts_with(STORAGE_WORD_PREFIX) || expanded.starts_with('\x1b') {
                     args.push(value);
                     continue;
                 }

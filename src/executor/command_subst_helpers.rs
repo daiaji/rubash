@@ -1,4 +1,5 @@
 use crate::executor::substitution_metadata::bytes_to_shell_text;
+use crate::executor::markers::{DATA_DOLLAR};
 
 pub(in crate::executor) fn collect_braced_parameter_name(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
@@ -175,7 +176,7 @@ pub(in crate::executor) fn decode_old_style_backtick_source(source: &str) -> Str
 
 fn push_backtick_source_char(output: &mut String, ch: char, single: bool) {
     if single && ch == '$' {
-        output.push('\x1f');
+        output.push(DATA_DOLLAR);
     } else {
         output.push(ch);
     }

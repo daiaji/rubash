@@ -1,5 +1,6 @@
 use super::*;
 use std::io::IsTerminal;
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 impl Executor {
     pub(in crate::executor) fn handle_external_file_builtins(
@@ -1098,7 +1099,7 @@ fn store_emulated_file_mode(env_vars: &mut HashMap<String, String>, windows: &st
     let key = crate::builtins::test::EMULATED_FILE_MODES;
     let entries = env_vars.get(key).cloned().unwrap_or_default();
     let mut kept: Vec<String> = entries
-        .split('\x1f')
+        .split(DATA_DOLLAR)
         .filter(|entry| {
             !entry.is_empty()
                 && entry
@@ -1109,5 +1110,5 @@ fn store_emulated_file_mode(env_vars: &mut HashMap<String, String>, windows: &st
         .map(str::to_string)
         .collect();
     kept.push(format!("{}={:o}", windows, mode));
-    env_vars.insert(key.to_string(), kept.join("\x1f"));
+    env_vars.insert(key.to_string(), kept.join(DATA_DOLLAR_STR));
 }

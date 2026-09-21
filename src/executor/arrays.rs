@@ -27,6 +27,7 @@ use super::{
 };
 use crate::lexer::remove_shell_quotes;
 use crate::CommandNode;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 pub(super) fn is_array_element_assignment_word(word: &str) -> bool {
     let Some((left, _)) = word.split_once('=') else {
@@ -624,7 +625,7 @@ mod field_split_tests {
 }
 
 pub(super) fn word_is_unquoted_array_list_expansion(word: &str) -> bool {
-    if word.starts_with('"') || word.starts_with('\'') || word.starts_with('\x1d') {
+    if word.starts_with('"') || word.starts_with('\'') || word.starts_with(STORAGE_WORD_PREFIX) {
         return false;
     }
 
@@ -686,7 +687,7 @@ fn token_is_subscript_assignment(token: &str) -> bool {
 /// has consumed the structural quotes (niubash #103 follow-up).
 fn restore_quote_carriers(value: &str) -> String {
     value
-        .replace('\x1f', "$")
+        .replace(DATA_DOLLAR, "$")
         .replace('\x1a', "`")
         .replace('\x14', "\\")
         .replace('\x17', "'")
@@ -826,14 +827,14 @@ pub(super) fn append_array_value(
         // and left raw 0x18 carrier bytes in stored elements.
         let token = if partially_quoted
             && !(token.starts_with("$'") && token.ends_with('\''))
-            && !token.starts_with('\x1d')
+            && !token.starts_with(STORAGE_WORD_PREFIX)
         {
             restore_quote_carriers(&remove_shell_quotes(&token))
         } else {
             token
         };
         let token = unquote_storage_value(&token);
-        if let Some(expanded_array) = token.strip_prefix('\x1d') {
+        if let Some(expanded_array) = token.strip_prefix(STORAGE_WORD_PREFIX) {
             for value in field_split_values_with_ifs(expanded_array, ifs) {
                 match pathname_expand_array_token(&value, env_vars) {
                     crate::executor::glob::PathnameExpansion::Matches(matches) => {
@@ -915,7 +916,7 @@ pub(super) fn array_assignment_has_subscript(left: &str) -> bool {
 fn dequote_compound_element_rhs(rhs: &str) -> String {
     if has_unescaped_quote(rhs)
         && !(rhs.starts_with("$'") && rhs.ends_with('\''))
-        && !rhs.starts_with('\x1d')
+        && !rhs.starts_with(STORAGE_WORD_PREFIX)
     {
         restore_quote_carriers(&remove_shell_quotes(rhs))
     } else {

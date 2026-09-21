@@ -15,6 +15,7 @@ pub(crate) use variable::variable_is_set;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
+use crate::executor::markers::{DATA_DOLLAR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -588,7 +589,7 @@ fn marked_vars(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {
         .get(key)
         .map(|value| {
             value
-                .split('\x1f')
+                .split(DATA_DOLLAR)
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
                 .collect()
@@ -803,7 +804,7 @@ pub(crate) const EMULATED_FILE_MODES: &str = "__RUBASH_FILE_MODES";
 pub(crate) fn emulated_file_mode(operand: &str, env_vars: &HashMap<String, String>) -> Option<u32> {
     let windows = test_path(operand, env_vars).to_string_lossy().to_string();
     let entries = env_vars.get(EMULATED_FILE_MODES)?;
-    for entry in entries.split('\x1f') {
+    for entry in entries.split(DATA_DOLLAR) {
         let (path, mode) = entry.rsplit_once('=')?;
         if path == windows {
             return u32::from_str_radix(mode, 8).ok();

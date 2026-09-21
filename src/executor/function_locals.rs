@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 impl Executor {
     pub(in crate::executor) fn save_local_names(&mut self, args: &[String]) {
@@ -196,7 +197,7 @@ impl Executor {
                 )
             })
             .collect::<Vec<_>>()
-            .join("\x1f")
+            .join(DATA_DOLLAR_STR)
     }
 
     /// GNU set.def:358-386 set_current_options: apply the bitmap saved by a
@@ -204,7 +205,7 @@ impl Executor {
     /// binary-option side effects run with them (set.def:388-399
     /// set_ignoreeof binds IGNOREEOF=10 / unbinds it).
     fn apply_options_bitmap(&mut self, bitmap: &str) {
-        for entry in bitmap.split('\x1f') {
+        for entry in bitmap.split(DATA_DOLLAR) {
             let Some((name, state)) = entry.split_once('=') else {
                 continue;
             };

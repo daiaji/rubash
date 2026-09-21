@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 impl Executor {
     pub(in crate::executor) fn command_substitution_pipeline_filter(
@@ -35,7 +36,7 @@ impl Executor {
                     .map(|word| {
                         self.expand_word(word)
                             .replace('\x15', "\\")
-                            .replace('\x1f', "$")
+                            .replace(DATA_DOLLAR, "$")
                             .replace('\x11', "")
                     })
                     .collect::<Vec<_>>();
@@ -47,7 +48,7 @@ impl Executor {
                     .map(|word| {
                         self.expand_word(word)
                             .replace('\x15', "\\")
-                            .replace('\x1f', "$")
+                            .replace(DATA_DOLLAR, "$")
                     })
                     .collect::<Vec<_>>();
                 if args.len() != 2 {
@@ -217,7 +218,7 @@ impl Executor {
         if let Some(values) = self.array_at_word_values(word) {
             return values;
         }
-        let suppress_glob = quoted || word.starts_with('\x1b') || word.starts_with('\x1d');
+        let suppress_glob = quoted || word.starts_with('\x1b') || word.starts_with(STORAGE_WORD_PREFIX);
         let expanded = strip_matching_quotes(&restore_command_substitution_output(
             &self.expand_word(word),
         ))
@@ -300,12 +301,12 @@ impl Executor {
         kind: Option<&TokenKind>,
     ) -> Option<Vec<String>> {
         let quoted_positional_word =
-            (word.starts_with('"') && word.ends_with('"')) || word.starts_with('\x1d');
+            (word.starts_with('"') && word.ends_with('"')) || word.starts_with(STORAGE_WORD_PREFIX);
         let word = word
             .strip_prefix('"')
             .and_then(|word| word.strip_suffix('"'))
             .unwrap_or(word);
-        let word = word.strip_prefix('\x1d').unwrap_or(word);
+        let word = word.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(word);
         if word == "${@}" {
             return Some(self.shell_state.positional_params.clone());
         }
@@ -539,7 +540,7 @@ impl Executor {
         &self,
         word: &str,
     ) -> bool {
-        if word.starts_with('"') || word.starts_with('\'') || word.starts_with('\x1d') {
+        if word.starts_with('"') || word.starts_with('\'') || word.starts_with(STORAGE_WORD_PREFIX) {
             return false;
         }
         let Some(inner) = word
@@ -561,7 +562,7 @@ impl Executor {
         &self,
         word: &str,
     ) -> bool {
-        if word.starts_with('"') || word.starts_with('\'') || word.starts_with('\x1d') {
+        if word.starts_with('"') || word.starts_with('\'') || word.starts_with(STORAGE_WORD_PREFIX) {
             return false;
         }
         let Some(inner) = word
@@ -1106,7 +1107,7 @@ fn decode_backtick_substitution_source(source: &str) -> String {
     decode_old_style_backtick_source(source)
         .replace('\x1a', "`")
         .replace('\x11', "")
-        .replace('\x1f', "$")
+        .replace(DATA_DOLLAR, "$")
         .replace('\x15', "\\")
 }
 

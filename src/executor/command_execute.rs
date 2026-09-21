@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 impl Executor {
     /// Execute an AST
@@ -688,7 +689,7 @@ impl Executor {
 
     fn stdin_body_needs_expansion(body: &str) -> bool {
         !body.starts_with(crate::lexer::QUOTED_HEREDOC_MARKER)
-            && !body.starts_with('\x1d')
+            && !body.starts_with(STORAGE_WORD_PREFIX)
             && !body.starts_with(PREEXPANDED_STDIN_BODY)
     }
 }

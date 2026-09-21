@@ -65,6 +65,7 @@ const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 const TRACE_VARS: &str = "__RUBASH_TRACE_VARS";
 const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
 use crate::executor::types::COMPOUND_ASSIGNMENT_MARKER;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 const EX_USAGE: i32 = 2;
 
 /// Synchronize indexed declarations into the typed variable owner after the
@@ -150,7 +151,7 @@ pub(crate) fn sync_typed_attributes(
             // (`declare -a v` on v=7 keeps [0]="7"). Serialized storage text
             // is parsed back into entries.
             let env_value = variables.get(base).cloned().unwrap_or_default();
-            let elements: Vec<String> = if env_value.starts_with('\x1d')
+            let elements: Vec<String> = if env_value.starts_with(STORAGE_WORD_PREFIX)
                 || (env_value.starts_with('(') && env_value.ends_with(')'))
             {
                 indexed_array_entries(&env_value).into_values().collect()
@@ -172,10 +173,10 @@ pub(crate) fn sync_typed_attributes(
             // later `v+=(1 one)` merges instead of replacing. Serialized
             // assoc storage text is parsed back into entries.
             let env_value = variables.get(base).cloned().unwrap_or_default();
-            let entries: Vec<(String, String)> = if env_value.starts_with('\x1d')
+            let entries: Vec<(String, String)> = if env_value.starts_with(STORAGE_WORD_PREFIX)
                 || (env_value.starts_with('(') && env_value.ends_with(')'))
             {
-                parse_assoc_words(env_value.strip_prefix('\x1d').unwrap_or(&env_value))
+                parse_assoc_words(env_value.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(&env_value))
             } else if env_value.is_empty() {
                 Vec::new()
             } else {
@@ -600,7 +601,7 @@ where
                     // A compound/array-storage cell is not a nameref value at
                     // all -- GNU reaches the array-rejection diagnostic for
                     // those (nameref22.sub:50), not the invalid-value error.
-                    !current.starts_with('\x1d')
+                    !current.starts_with(STORAGE_WORD_PREFIX)
                         && !current.starts_with('(')
                         && !current.starts_with(COMPOUND_ASSIGNMENT_MARKER)
                         && !valid_nameref_value(current)

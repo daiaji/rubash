@@ -19,10 +19,28 @@ pub(crate) fn is_assignment_carrier_byte(byte: u32) -> bool {
     // U+001B is the quoted-tilde marker prefix (lexer/word.rs);
     // a decoded \c[ (0x1b, ESC) must be tagged so it is not misinterpreted
     // as a tilde marker (nquote5.sub $'\c[').
-    matches!(
-        byte,
-        0x0c | 0x11 | 0x13 | 0x14 | 0x16 | 0x17 | 0x18 | 0x1a | 0x1b | 0x1c | 0x1d | 0x1f
-    )
+    // 0x0c is a plain data byte (the former PATSUB_QUOTED_VALUE_END carrier
+    // moved to U+E311); it stays encoded so user \f input never collides
+    // with residual text-layer consumers.
+    use crate::executor::markers::{
+        CTLESC, DATA_BACKSLASH, DATA_BACKTICK, DATA_DOLLAR, DATA_DQUOTE, DATA_SQUOTE, IFS_GLUE,
+        PARAM_NAME_END_MARKER, PROTECTED_ESCAPED_SQUOTE, QUOTED_WORD_PREFIX, STORAGE_WORD_PREFIX,
+    };
+    [
+        0x0c,
+        CTLESC as u32,
+        PARAM_NAME_END_MARKER as u32,
+        DATA_BACKSLASH as u32,
+        PROTECTED_ESCAPED_SQUOTE as u32,
+        DATA_SQUOTE as u32,
+        DATA_DQUOTE as u32,
+        DATA_BACKTICK as u32,
+        QUOTED_WORD_PREFIX as u32,
+        IFS_GLUE as u32,
+        STORAGE_WORD_PREFIX as u32,
+        DATA_DOLLAR as u32,
+    ]
+    .contains(&byte)
 }
 
 pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {

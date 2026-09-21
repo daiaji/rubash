@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 /// GNU bash accepts an ANSI-C quoted span as the parameter name (the extquote
 /// feature: subst.c expand_brace_dollar decodes the name word and re-dispatches
@@ -156,7 +157,7 @@ impl Executor {
             return Some(self.expand_embedded_parameters(word));
         }
 
-        if let Some(word) = word.strip_prefix('\x1d') {
+        if let Some(word) = word.strip_prefix(STORAGE_WORD_PREFIX) {
             return Some(self.expand_quoted_parameter_word(word));
         }
 

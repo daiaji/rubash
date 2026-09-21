@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
@@ -116,7 +117,7 @@ fn parse_array_subscript(value: &str) -> Option<(&str, &str)> {
 }
 
 fn is_array_storage(value: &str) -> bool {
-    value.starts_with('(') && value.ends_with(')') || value.starts_with('\x1d')
+    value.starts_with('(') && value.ends_with(')') || value.starts_with(STORAGE_WORD_PREFIX)
 }
 
 fn array_index_is_set(value: &str, index: usize) -> bool {
@@ -142,7 +143,7 @@ fn resolve_array_index(value: &str, index: i128) -> Option<usize> {
 }
 
 fn array_entries(value: &str) -> Vec<(usize, String)> {
-    let value = value.strip_prefix('\x1d').unwrap_or(value);
+    let value = value.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(value);
     let Some(inner) = value
         .strip_prefix('(')
         .and_then(|value| value.strip_suffix(')'))
@@ -167,7 +168,7 @@ fn array_entries(value: &str) -> Vec<(usize, String)> {
 }
 
 fn assoc_key_is_set(value: &str, key: &str) -> bool {
-    let value = value.strip_prefix('\x1d').unwrap_or(value);
+    let value = value.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(value);
     let Some(inner) = value
         .strip_prefix('(')
         .and_then(|value| value.strip_suffix(')'))
@@ -278,7 +279,7 @@ fn marked_vars(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {
         .get(key)
         .map(|value| {
             value
-                .split('\x1f')
+                .split(DATA_DOLLAR)
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
                 .collect()

@@ -15,6 +15,7 @@ use super::{
 };
 use crate::executor::arithmetic::eval_conditional_arith_value;
 use crate::executor::types::ARRAY_FIELD_SPLIT_MARKER;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 pub(super) fn assign_declare_names<W>(
     command_name: &str,
@@ -57,7 +58,7 @@ where
             // declare -A assoc then prints [0]="assoc" and ${assoc[@]}).
             if marked_vars(variables, ASSOC_VARS).contains(bare) {
                 if let Some(current) = variables.get(bare).cloned() {
-                    let is_array_storage = current.starts_with('\x1d')
+                    let is_array_storage = current.starts_with(STORAGE_WORD_PREFIX)
                         || (current.starts_with('(') && current.ends_with(')'));
                     if !current.is_empty() && !is_array_storage {
                         let converted =
@@ -187,7 +188,7 @@ where
                 && !marked_vars(variables, ARRAY_VARS).contains(base)
                 && !marked_vars(variables, ASSOC_VARS).contains(base)
                 && !variables.get(base).is_some_and(|v| {
-                    v.starts_with('\x1d') || (v.starts_with('(') && v.ends_with(')'))
+                    v.starts_with(STORAGE_WORD_PREFIX) || (v.starts_with('(') && v.ends_with(')'))
                 })
             {
                 writeln!(
@@ -280,7 +281,7 @@ where
                     // phantom [0]="" element in every freshly created array.
                     let arrays = marked_vars(variables, ARRAY_VARS);
                     let mut entries = match variables.get(base).cloned() {
-                        Some(current) if current.starts_with('\x1d') => {
+                        Some(current) if current.starts_with(STORAGE_WORD_PREFIX) => {
                             indexed_array_entries(&current)
                         }
                         Some(current) if !current.is_empty() || !arrays.contains(base) => {
@@ -505,7 +506,7 @@ where
             } else if compound_marked
                 || array
                 || marked_vars(variables, ARRAY_VARS).contains(var_name)
-                || current.starts_with('\x1d')
+                || current.starts_with(STORAGE_WORD_PREFIX)
                 || current.starts_with('(') && current.ends_with(')')
             {
                 match append_array_value(&current, value, integer, variables) {
@@ -588,7 +589,7 @@ where
                 || array
                 || marked_vars(variables, ARRAY_VARS).contains(var_name)
                 || variables.get(var_name).is_some_and(|current| {
-                    current.starts_with('\x1d')
+                    current.starts_with(STORAGE_WORD_PREFIX)
                         || (current.starts_with('(') && current.ends_with(')'))
                 }))
         {
@@ -627,7 +628,7 @@ where
                     append_assoc_value(&current, &element, integer, variables)
                 } else {
                     let is_indexed = marked_vars(variables, ARRAY_VARS).contains(var_name)
-                        || current.starts_with('\x1d')
+                        || current.starts_with(STORAGE_WORD_PREFIX)
                         || (current.starts_with('(') && current.ends_with(')'));
                     if is_indexed {
                         let mut entries = indexed_array_entries(&current);
@@ -825,7 +826,7 @@ fn expand_compound_array_value(value: &str, variables: &HashMap<String, String>)
     // Restore marker characters (array.tests:408 declare -a x=(\$0)
     // stores \x1f0 literally without this restore).
     result
-        .replace('\x1f', "$")
+        .replace(DATA_DOLLAR, "$")
         .replace('\x1a', "`")
         .replace('\x17', "'")
         .replace('\x14', "\\")

@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::substitution_metadata::bytes_to_shell_text;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 impl Executor {
     pub(in crate::executor) fn finish_read_error(
@@ -97,7 +98,7 @@ impl Executor {
 
             let expanded_target = self.expand_word(&redirect.target);
             if let Some(fd) = expanded_target.strip_prefix('&') {
-                let fd = fd.trim_matches(|ch| ch == '"' || ch == '\x1d');
+                let fd = fd.trim_matches(|ch| ch == '"' || ch == STORAGE_WORD_PREFIX);
                 if let Ok(fd) = fd.parse::<u32>() {
                     if let Some(output) =
                         self.read_coproc_stdout(fd, delimiter, char_limit, exact_char_limit)

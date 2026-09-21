@@ -8,6 +8,7 @@ use super::{
     ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, CAPCASE_VARS, EXECUTION_FAILURE, EXPORTED_VARS,
     INTEGER_VARS, LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, TRACE_VARS, UPPERCASE_VARS,
 };
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 #[derive(Clone, Copy)]
 pub(super) struct DeclareOptions {
@@ -269,7 +270,7 @@ where
             // compound appends all see the canonical form — including the
             // scalar a local inherits under localvar_inherit.
             if let Some(current) = variables.get(name) {
-                let is_storage = current.starts_with('\x1d')
+                let is_storage = current.starts_with(STORAGE_WORD_PREFIX)
                     || (current.starts_with('(') && current.ends_with(')'));
                 if !current.is_empty() && !is_storage {
                     let converted = super::storage::format_assoc_storage(vec![(

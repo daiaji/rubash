@@ -1,6 +1,7 @@
 use super::{command_boundary_keyword_allowed, is_case_end_keyword, parse, ProcessSubstitution};
 use crate::lexer::{Token, TokenKind};
 use std::collections::VecDeque;
+use crate::executor::markers::{DATA_DOLLAR};
 
 pub(super) fn process_substitution_redirect_target(
     tokens: &[Token],
@@ -305,7 +306,7 @@ fn process_substitution_source(tokens: &[Token]) -> String {
                 .value
                 .strip_prefix(crate::lexer::QUOTED_HEREDOC_MARKER)
                 .unwrap_or(&token.value);
-            source.push_str(body.strip_prefix('\x1f').unwrap_or(body));
+            source.push_str(body.strip_prefix(DATA_DOLLAR).unwrap_or(body));
             if !source.ends_with('\n') {
                 source.push('\n');
             }

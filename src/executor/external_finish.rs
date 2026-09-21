@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::ast_exec::is_closed_output_io_error;
+use crate::executor::markers::DATA_DOLLAR_STR;
 
 impl Executor {
     pub(in crate::executor) fn write_cat_output(
@@ -501,7 +502,7 @@ impl Executor {
                     .or_insert_with(|| value.clone());
             }
         }
-        child.insert(EXPORTED_VARS.to_string(), exported.join("\x1f"));
+        child.insert(EXPORTED_VARS.to_string(), exported.join(DATA_DOLLAR_STR));
         child
     }
 

@@ -2,6 +2,8 @@ use super::*;
 use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 use crate::lexer::Token;
 use crate::lexer::TokenKind;
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
 pub(super) fn compound_assignment_from_word(
     word: &str,
@@ -16,7 +18,7 @@ pub(super) fn compound_assignment_from_word(
     let append = name.ends_with('+');
     let operator = if append { "+=" } else { "=" }.to_string();
     let name = name.strip_suffix('+').unwrap_or(name).to_string();
-    let ast_value = value.replace('\x1d', "");
+    let ast_value = value.replace(STORAGE_WORD_PREFIX, "");
     Some(CompoundAssignment {
         name: name.clone(),
         name_metadata: Box::new(build_word_metadata(0, &name, &name)),
@@ -756,7 +758,7 @@ fn quote_compound_assignment_token_word(
     word: &str,
 ) -> String {
     if compound_assignment_word_has_unquoted_command_substitution(tokens, index, next_index) {
-        return quote_compound_assignment_word_forced(&format!("\x1d{word}"));
+        return quote_compound_assignment_word_forced(&format!("{STORAGE_WORD_PREFIX_STR}{word}"));
     }
 
     if next_index == index + 1

@@ -1,4 +1,5 @@
 /// Token types for bash
+use crate::executor::markers::{DATA_DOLLAR};
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Word,
@@ -64,7 +65,7 @@ impl Token {
                 .value
                 .strip_prefix(crate::lexer::QUOTED_HEREDOC_MARKER)
                 .unwrap_or(&self.value)
-                .starts_with('\x1f')
+                .starts_with(DATA_DOLLAR)
     }
 
     pub fn new_with_raw(kind: TokenKind, value: &str, raw: &str, position: usize) -> Self {

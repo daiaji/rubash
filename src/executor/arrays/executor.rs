@@ -6,6 +6,7 @@ use crate::executor::{
     eval_conditional_arith_value_with_writes, IndexedSubscript, SubscriptSource,
     DECLARED_UNSET_VARS, NAMEREF_VARS,
 };
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 impl Executor {
     pub(in crate::executor) fn indexed_array_stack(&self, name: &str) -> Vec<String> {
@@ -304,12 +305,12 @@ impl Executor {
 
     pub(in crate::executor) fn array_at_word_values(&self, word: &str) -> Option<Vec<String>> {
         let quoted_array_word =
-            (word.starts_with('"') && word.ends_with('"')) || word.starts_with('\x1d');
+            (word.starts_with('"') && word.ends_with('"')) || word.starts_with(STORAGE_WORD_PREFIX);
         let word = word
             .strip_prefix('"')
             .and_then(|word| word.strip_suffix('"'))
             .unwrap_or(word);
-        let word = word.strip_prefix('\x1d').unwrap_or(word);
+        let word = word.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(word);
         if let Some(values) = self.array_transform_word_values(word, quoted_array_word) {
             return Some(values);
         }

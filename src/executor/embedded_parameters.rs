@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::embedded_mutations::mark_expansion_whitespace;
+use crate::executor::markers::{DATA_DOLLAR};
 
 thread_local! {
     static EXPAND_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -100,7 +101,7 @@ impl Executor {
                 continue;
             }
 
-            if ch == '\x1f' {
+            if ch == DATA_DOLLAR {
                 output.push('$');
                 continue;
             }
@@ -648,7 +649,7 @@ fn decode_backtick_substitution_source(source: &str) -> String {
         .replace('\x1a', "`")
         .replace('\x11', "")
         .replace(crate::lexer::PARAM_NAME_END_MARKER, "")
-        .replace('\x1f', "$")
+        .replace(DATA_DOLLAR, "$")
         .replace('\x15', "\\")
 }
 

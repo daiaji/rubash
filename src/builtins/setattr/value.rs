@@ -9,6 +9,7 @@ use crate::builtins::declare::storage::{
     parse_assoc_words,
 };
 use crate::builtins::declare::storage::{append_array_value, append_assoc_value};
+use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 pub(super) fn is_array_value(value: &str) -> bool {
     value.starts_with('(') && value.ends_with(')')
@@ -81,7 +82,7 @@ pub(super) fn array_attribute_assignment_value(
     let array_target = array
         || marked_vars(env_vars, ARRAY_VARS).contains(name)
         || env_vars.get(name).is_some_and(|current| {
-            current.starts_with('\x1d')
+            current.starts_with(STORAGE_WORD_PREFIX)
                 || (current.starts_with('(') && current.ends_with(')'))
         });
     if assoc_target {
@@ -148,7 +149,7 @@ pub(super) fn readonly_error_subject(
 }
 
 pub(super) fn format_array_value(value: &str) -> String {
-    if let Some(rendered) = value.strip_prefix('\x1d') {
+    if let Some(rendered) = value.strip_prefix(STORAGE_WORD_PREFIX) {
         return rendered.to_string();
     }
     if value == "()" {
