@@ -1,8 +1,10 @@
-//! Thin Windows-compatible bash entry point for Winuxsh installations.
+//! Thin Windows-compatible bash entry point for Niubash installations.
 //!
 //! The shim intentionally forwards the command line and standard handles
 //! without interpreting shell syntax. It lets Unix scripts resolve
-//! `/usr/bin/bash` to the installed Winuxsh executable.
+//! `/usr/bin/bash` to the installed Niubash executable. The pre-rename
+//! `winuxsh.exe` / `WINUXSH_SHELL` names stay in the fallback chain so
+//! layouts built by older installers keep launching.
 
 use std::env;
 use std::io::{self, Write};
@@ -10,10 +12,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn main() {
-    let Some(shell) = locate_winuxsh() else {
+    let Some(shell) = locate_shell() else {
         let _ = writeln!(
             io::stderr(),
-            "bash shim: cannot locate winuxsh.exe; set WINUXSH_SHELL to its path",
+            "bash shim: cannot locate niu.exe; set NIU_SHELL to its path",
         );
         std::process::exit(127);
     };
@@ -38,19 +40,23 @@ fn main() {
     }
 }
 
-fn locate_winuxsh() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("WINUXSH_SHELL").map(PathBuf::from) {
-        if is_executable_file(&path) && !same_as_current_exe(&path) {
-            return Some(path);
+fn locate_shell() -> Option<PathBuf> {
+    for variable in ["NIU_SHELL", "WINUXSH_SHELL"] {
+        if let Some(path) = env::var_os(variable).map(PathBuf::from) {
+            if is_executable_file(&path) && !same_as_current_exe(&path) {
+                return Some(path);
+            }
         }
     }
 
     if let Ok(current) = env::current_exe() {
         let mut directory = current.parent().map(Path::to_path_buf);
         while let Some(path) = directory {
-            let candidate = path.join("winuxsh.exe");
-            if is_executable_file(&candidate) && !same_as_current_exe(&candidate) {
-                return Some(candidate);
+            for name in ["niu.exe", "winuxsh.exe"] {
+                let candidate = path.join(name);
+                if is_executable_file(&candidate) && !same_as_current_exe(&candidate) {
+                    return Some(candidate);
+                }
             }
             directory = path.parent().map(Path::to_path_buf);
         }
@@ -64,7 +70,9 @@ fn locate_winuxsh() -> Option<PathBuf> {
         }
     }
 
-    find_on_path("winuxsh.exe").or_else(|| find_on_path("winuxsh"))
+    find_on_path("niu.exe")
+        .or_else(|| find_on_path("winuxsh.exe"))
+        .or_else(|| find_on_path("winuxsh"))
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
