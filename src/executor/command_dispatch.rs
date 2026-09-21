@@ -144,13 +144,6 @@ impl Executor {
     }
 
     fn execute_prepared_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        if self
-            .shell_state.env_vars
-            .contains_key(SKIP_POSIXPIPE_TIME_COUNT_REMAINDER)
-        {
-            return self.execute_skipped_posixpipe_command();
-        }
-
         let Some(word) = cmd.words.first() else {
             return Ok(());
         };
@@ -166,23 +159,5 @@ impl Executor {
             return result;
         }
         self.execute_late_builtin_command(cmd, word)
-    }
-
-    fn execute_skipped_posixpipe_command(&mut self) -> Result<(), ExecuteError> {
-        let remaining = self
-            .shell_state.env_vars
-            .get(SKIP_POSIXPIPE_TIME_COUNT_REMAINDER)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(1);
-        if remaining > 1 {
-            self.shell_state.env_vars.insert(
-                SKIP_POSIXPIPE_TIME_COUNT_REMAINDER.to_string(),
-                (remaining - 1).to_string(),
-            );
-        } else {
-            self.shell_state.env_vars.remove(SKIP_POSIXPIPE_TIME_COUNT_REMAINDER);
-        }
-        self.exit_code = 0;
-        Ok(())
     }
 }

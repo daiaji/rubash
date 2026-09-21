@@ -891,7 +891,15 @@ impl Executor {
             &self.diagnostic_prefix(),
             &mut stderr,
         )?;
-        let has_job_control = self.job_table.jobs.values().any(|job| job.background);
+        // GNU fg_bg.def:108-113 — `job_control == 0` (the monitor option,
+        // off by default in non-interactive shells) reports "no job
+        // control" before any operand processing, regardless of whether
+        // background jobs exist. A background job table entry alone does
+        // not imply job control.
+        let has_job_control = crate::builtins::set::shell_option_enabled(
+            &self.shell_state.env_vars,
+            "monitor",
+        );
         let status = match action {
             // Bash reports the non-interactive job-control failure before
             // validating fg/bg operands or options when no jobs exist.
@@ -938,6 +946,20 @@ impl Executor {
             return Ok(1);
         };
 
+        // GNU fg_bg.def:154-160 — a job started without job control
+        // (J_JOBCONTROL unset, e.g. spawned before `set -m`) cannot be
+        // foregrounded; refuse instead of waiting on it.
+        if !self.job_table.job_control_for_pid(pid) {
+            let job_id = self.job_table.job_id_for_pid(pid).unwrap_or(0);
+            writeln!(
+                stderr,
+                "{}fg: job {} started without job control",
+                self.diagnostic_prefix(),
+                job_id
+            )?;
+            return Ok(1);
+        }
+
         let Some(mut child) = self.background_children.remove(&pid) else {
             self.shell_state.background_jobs.remove(&pid);
             self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
@@ -976,6 +998,17 @@ impl Executor {
         let mut status = 0;
         for job in requested {
             if let Some(pid) = self.resolve_requested_background_job(job) {
+                if !self.job_table.job_control_for_pid(pid) {
+                    let job_id = self.job_table.job_id_for_pid(pid).unwrap_or(0);
+                    writeln!(
+                        stderr,
+                        "{}bg: job {} started without job control",
+                        self.diagnostic_prefix(),
+                        job_id
+                    )?;
+                    status = 1;
+                    continue;
+                }
                 self.job_table.mark_running(pid);
                 if let Some(job_id) = self.job_table.pid_to_job.get(&pid).copied() {
                     if let Some(entry) = self.job_table.jobs.get_mut(&job_id) {

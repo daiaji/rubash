@@ -381,16 +381,6 @@ impl Executor {
             return Ok(());
         }
 
-        if self.is_posixpipe_time_count_fragment(cmd) {
-            println!("4");
-            self.shell_state.env_vars.insert(
-                SKIP_POSIXPIPE_TIME_COUNT_REMAINDER.to_string(),
-                "2".to_string(),
-            );
-            self.exit_code = 0;
-            return Ok(());
-        }
-
         if self.command_output_redirect_fails(cmd)? {
             return Ok(());
         }
@@ -498,17 +488,6 @@ impl Executor {
     }
 
     fn handle_external_shortcuts(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        if self.is_posixpipe_time_count_remainder(cmd) {
-            self.exit_code = 0;
-            return Ok(true);
-        }
-
-        if self.is_this_shell_posixpipe_time_count(cmd) {
-            println!("4");
-            self.exit_code = 0;
-            return Ok(true);
-        }
-
         if self.execute_same_shell_script(cmd)? {
             return Ok(true);
         }

@@ -335,14 +335,6 @@ impl Executor {
             };
             commands.push(command);
         }
-        if commands.iter().any(|command| {
-            self.is_this_shell_posixpipe_time_count(command)
-                || self.is_posixpipe_time_count_fragment(command)
-                || self.is_posixpipe_time_count_remainder(command)
-        }) {
-            return Ok(None);
-        }
-
         if self.execute_timed_read_pipeline(&commands)?.is_some() {
             return Ok(Some(end + 1));
         }

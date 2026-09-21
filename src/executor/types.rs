@@ -64,5 +64,3 @@ pub const DEFERRED_COMPOUND_BODY: char = '\u{3}';
 /// the sentinel into a literal `$` and vice versa.
 pub const FAILED_SUBSCRIPT_SENTINEL: &str = "\u{E200}";
 pub const ARRAY_FIELD_SPLIT_MARKER: char = '';
-pub const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str =
-    "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";

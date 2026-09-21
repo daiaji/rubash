@@ -238,6 +238,40 @@ stdio 载体路径的接线，需定向探针护航。
   丢 heredoc 上下文（GNU 出 `'q'`，RB 出 `'q'`）；`declare -A 'a[$q]=v'`
   空键接收 vs GNU bad-subscript。
 
+**台账修正记录（2026-09-22，`master-fix` 分支）**：
+
+- 用户复核发现 master `7e57003e` 上 `precedence`（40 行）与 `posixpipe`
+  （2 行）确定性分歧，而 9-21 台账记二者零差。根因查明：precedence 由
+  `ab811d04` 的 `${x-word}` 引号门控回归造成（已在 `6e29c031` 修复，非
+  pipeline stdin cursor 工作的副作用）；posixpipe 是 6-19 遗留的脚本名
+  硬编码 hack（`is_this_shell_posixpipe_time_count` 家族直接 `println!("4")`
+  并跳过管道），`tests/` 种子目录缺 `test-glue-functions` 等文件时套件
+  双侧同报 "No such file" 形成**假零差**掩盖了它——旧台账的 57 零差
+  因此作废。
+- 修复与真实缺口补齐：① 删除整个 posixpipe 硬编码 hack 族
+  （external_finish.rs/command_dispatch.rs/external_inner.rs/
+  pipeline_exec.rs/types.rs），真实管道机制实测零差；② `kill -n9`/
+  `-sNAME` 黏连信号规格（GNU `builtins/kill.def:134-142`）——缺失曾使
+  `jobs2.sub` 的 `kill -9` 无效、`wait` 空挂；③ `set -m` 映射 monitor
+  选项（support_names.rs `short_set_flag_option` 缺 'm' 项）；④ `fg`/`bg`
+  两级作业控制检查——shell 级 monitor 关→"no job control"，作业级
+  `J_JOBCONTROL` 未置→"job N started without job control"
+  （`builtins/fg_bg.def:108-113,154-160`，`JobEntry.job_control` 按注册时
+  monitor 状态打标）；⑤ `${THIS_SH}` 同进程子壳作业表进程边界
+  （`execute_cmd.c:6139-6233`：exec 模型清表、fork 模型快照恢复，
+  `background_children` 句柄停泊防子壳收割父进程）。
+- **修正后诚实台账：55 零差 / 799 原始行**；其中 `jobs` 31 + `history`
+  173 = 204 行为 harness 40s 超时双侧截断（GNU 侧 rc=124/137 同样被杀，
+  jobs.tests 含真实秒级 sleep、history 在 `env -i` 下交互挂起），真实
+  语义差 ≈595 行 / 26 套件。零差名单较作废台账：−nameref(1, coproc
+  时序噪音)、−posixexp(1)、−procsub(13, 种子补齐后暴露真差)、+mapfile(0)。
+- `jobs` 套件另观测到一次时序性静默退出（rb 进程于 `wait` 边界消失、
+  tasklist 无残留、孤儿 `sleep.exe` 存活），疑似后台子进程生命周期竞态，
+  与本次修复无关，需后续专项调查。
+- harness 加固：`scripts/true-baseline.sh` 改为每轮全量 gap-fill 种子
+  同步 + ELF magic 守卫（`recho` 二进制不再被 `tr` 误伤；`file` 对高位
+  字节文本误判 data，故改用 od 魔数判定）。
+
 ### 3.7 双层测试口径（引擎层 + 产品层）
 
 **真正的 shell 层是 niubash**（`D:/repo/niubash-*`，crate `niubash`，依赖

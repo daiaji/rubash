@@ -60,11 +60,36 @@ fi
 export LC_ALL=en_US.UTF-8
 
 # ---- sync: LF-normalized rw copies -----------------------------------------
+# Gap-fill + CR-repair every run. The previous seed ran only when $BASE/recho
+# was absent and its find(1) pattern skipped extension-less helpers
+# (test-glue-functions, history.list, execscript, misc/, version*), so a BASE
+# seeded early kept missing/CRLF helpers forever: suites then produced
+# identical "command not found" output on both sides and false-zero diffs
+# (posixpipe hid a broken |& pipeline this way). Re-syncing unconditionally
+# makes the measured surface match third_party/bash/tests exactly.
 mkdir -p "$BASE"
-if [ ! -f "$BASE/recho" ] && [ -d "$TESTS_SRC" ]; then
-  cp -r "$TESTS_SRC/." "$BASE/"
-  find "$BASE" -type f \( -name "*.tests" -o -name "run-*" -o -name "*.right" -o -name "*.sub" -o -name "*.in" \) \
-    -exec sh -c 'tr -d "\r" < "$1" > "$1.lf" && mv "$1.lf" "$1"' _ {} \;
+if [ -d "$TESTS_SRC" ]; then
+  for f in "$TESTS_SRC"/*; do
+    b=${f##*/}
+    if [ -d "$f" ]; then
+      if [ ! -e "$BASE/$b" ]; then
+        cp -r "$f" "$BASE/$b"
+        find "$BASE/$b" -type f -exec sh -c 'tr -d "\r" < "$1" > "$1.lf" && mv "$1.lf" "$1"' _ {} \;
+      fi
+      continue
+    fi
+    # recho is an ELF helper — piping it through tr destroys the binary
+    # (observed: "Exec format error" poisoning comsub et al). Everything
+    # else in the tests dir is text; files that file(1) reports as "data"
+    # are latin1/UTF-8 text whose only CRs are CRLF checkout pollution
+    # (verified: zero files contain a lone CR). Gate on ELF magic.
+    is_elf() { [ "$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" = "7f454c46" ]; }
+    if [ ! -e "$BASE/$b" ]; then
+      if is_elf "$f"; then cp "$f" "$BASE/$b"; else tr -d '\r' < "$f" > "$BASE/$b"; fi
+    elif ! is_elf "$BASE/$b" && grep -q "$(printf '\r')" "$BASE/$b" 2>/dev/null; then
+      tr -d '\r' < "$BASE/$b" > "$BASE/$b.lf" && mv "$BASE/$b.lf" "$BASE/$b"
+    fi
+  done
 fi
 # always re-normalize requested suites (the repo file is the source of truth)
 sync_suite() {

@@ -110,6 +110,10 @@ where
     let mut signal = 15;
     let mut index = 0;
     let mut operands_start = 0;
+    // GNU builtins/kill.def:99,124 saw_signal: once any signal spec is seen
+    // (separate or attached), a later `-word` is an operand (process group)
+    // rather than another signal specification.
+    let mut saw_signal = false;
     while let Some(value) = args.get(index).map(String::as_str) {
         if value == "--" {
             operands_start = index + 1;
@@ -138,12 +142,36 @@ where
             signal = signal_number_from_spec(sigspec).unwrap_or(15);
             index += 2;
             operands_start = index;
-            // After an explicit signal option, the remaining words are
-            // operands. In particular, `kill -s 0 -1` uses -1 as a process
-            // group operand, not as another short signal specification.
-            break;
+            saw_signal = true;
+            continue;
         }
-        if value.starts_with('-') && value != "-" {
+        // GNU builtins/kill.def:134-142: the signal spec may be attached to
+        // the option letter — `-sNAME` when the letter is followed by an
+        // alphabetic char, `-nNUM` when followed by a digit.
+        let attached = value
+            .strip_prefix("-s")
+            .filter(|s| s.chars().next().is_some_and(|c| c.is_ascii_alphabetic()))
+            .or_else(|| {
+                value
+                    .strip_prefix("-n")
+                    .filter(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            });
+        if let Some(sigspec) = attached {
+            if translate_signal(sigspec).is_none() {
+                writeln!(
+                    stderr,
+                    "{}kill: {sigspec}: invalid signal specification",
+                    diagnostic_prefix()
+                )?;
+                return Ok(1);
+            }
+            signal = signal_number_from_spec(sigspec).unwrap_or(15);
+            index += 1;
+            operands_start = index;
+            saw_signal = true;
+            continue;
+        }
+        if value.starts_with('-') && value != "-" && !saw_signal {
             let sigspec = value.trim_start_matches('-');
             if translate_signal(sigspec).is_none() {
                 writeln!(
@@ -156,6 +184,7 @@ where
             signal = signal_number_from_spec(sigspec).unwrap_or(15);
             index += 1;
             operands_start = index;
+            saw_signal = true;
             continue;
         }
         operands_start = index;

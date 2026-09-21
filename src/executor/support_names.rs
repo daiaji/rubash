@@ -317,6 +317,7 @@ pub(in crate::executor) fn short_set_flag_option(flag: char) -> Option<&'static 
         'h' => Some("hashall"),
         'H' => Some("histexpand"),
         'k' => Some("keyword"),
+        'm' => Some("monitor"),
         'P' => Some("physical"),
         'p' => Some("privileged"),
         'r' => Some("restricted"),

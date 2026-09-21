@@ -371,6 +371,13 @@ impl Executor {
         self.background_children.insert(pid, child);
         self.job_table
             .register_process(pid, display_source.clone(), true);
+        self.job_table.set_job_control(
+            pid,
+            crate::builtins::set::shell_option_enabled(
+                &self.shell_state.env_vars,
+                "monitor",
+            ),
+        );
         self.shell_state.background_jobs.insert(pid, display_source);
         self.shell_state.background_job_order.push(pid);
         self.shell_state.last_background_pid = Some(pid);
@@ -1359,6 +1366,13 @@ impl Executor {
                     let job_id =
                         self.job_table
                             .register_process(pid, bash_command_source_text(cmd), true);
+                    self.job_table.set_job_control(
+                        pid,
+                        crate::builtins::set::shell_option_enabled(
+                            &self.shell_state.env_vars,
+                            "monitor",
+                        ),
+                    );
                     self.shell_state.background_jobs
                         .insert(pid, bash_command_source_text(cmd));
                     self.shell_state.background_job_order.push(pid);

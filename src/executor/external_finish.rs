@@ -152,6 +152,20 @@ impl Executor {
         });
         // Save parent state BEFORE the this_shell_invocation block clears it.
         let saved_shell_state = this_shell_invocation.then(|| self.shell_state.clone());
+        // GNU execute_cmd.c:6139-6233 / jobs.c: a script child is a separate
+        // process, so its job table is process-local — a fresh exec child
+        // starts with an empty table, and a fork-model child only inherits a
+        // private copy whose additions die with it. In-process emulation
+        // shares the parent's table, so snapshot it and clear the child's
+        // view (exec model), then restore the parent's entries afterwards
+        // regardless of mode. Without this, jobs started inside
+        // `${THIS_SH} script` children leak into the parent table and later
+        // `wait %N`/`jobs` block on or report them (jobs.tests hang).
+        let saved_background_jobs = self.shell_state.background_jobs.clone();
+        let saved_background_job_order = self.shell_state.background_job_order.clone();
+        let saved_coproc_names = self.shell_state.coproc_names.clone();
+        let saved_last_background_pid = self.shell_state.last_background_pid;
+        let saved_last_notified_job_ids = self.shell_state.last_notified_job_ids.clone();
         let saved_functions = self.shell_state.functions.clone();
         let saved_function_redirects = self.shell_state.function_definition_redirects.clone();
         let saved_function_def_infos = self.shell_state.function_def_infos.clone();
@@ -199,6 +213,12 @@ impl Executor {
             self.shell_state.function_definition_redirects = HashMap::new();
             self.shell_state.function_def_infos = imported_def_infos;
             self.shell_state.aliases = HashMap::new();
+            // Exec-model child (fresh process): empty job table.
+            self.shell_state.background_jobs.clear();
+            self.shell_state.background_job_order.clear();
+            self.shell_state.coproc_names.clear();
+            self.shell_state.last_notified_job_ids.clear();
+            self.shell_state.last_background_pid = None;
             // A fresh shell invocation entering a script derives
             // SIG_HARD_IGNORE from the inherited dispositions (trap.c
             // ignore_signal: "A signal ignored on entry to the shell cannot
@@ -271,6 +291,21 @@ impl Executor {
             self.shell_state.env_vars
                 .insert(INHERIT_PROCESS_STDIN.to_string(), "1".to_string());
         }
+        // Process-side job state, taken only after the last fallible call
+        // above — an early `?` return must not strand the parent's job
+        // handles. The exec-model child gets an empty JobTable; the
+        // fork-model child sees a copy of the parent's (GNU subshell
+        // semantics). background_children holds real Child handles that
+        // cannot be duplicated — parking the map for the duration means the
+        // child cannot try_wait/reap the parent's processes (a GNU child's
+        // wait only covers its own children), and the child's own spawned
+        // processes are orphaned on restore like real grandchildren.
+        let saved_job_table = if this_shell_invocation {
+            std::mem::take(&mut self.job_table)
+        } else {
+            self.job_table.clone()
+        };
+        let saved_background_children = std::mem::take(&mut self.background_children);
         self.set_env("__RUBASH_SCRIPT_NAME", script);
         // When this_shell_invocation is true, cmd.words[0] is the shell
         // command (e.g. ${THIS_SH}) and cmd.words[1] is the script path;
@@ -339,6 +374,13 @@ impl Executor {
         if let Some(saved_shell_state) = saved_shell_state {
             self.shell_state = saved_shell_state;
         }
+        self.shell_state.background_jobs = saved_background_jobs;
+        self.shell_state.background_job_order = saved_background_job_order;
+        self.shell_state.coproc_names = saved_coproc_names;
+        self.shell_state.last_background_pid = saved_last_background_pid;
+        self.shell_state.last_notified_job_ids = saved_last_notified_job_ids;
+        self.job_table = saved_job_table;
+        self.background_children = saved_background_children;
         self.shell_state.pipestatus = saved_pipestatus;
         self.set_positional_params(saved_positional_params);
         self.shell_state.functions = saved_functions;
@@ -463,38 +505,6 @@ impl Executor {
         child
     }
 
-    pub(in crate::executor) fn is_this_shell_posixpipe_time_count(
-        &self,
-        cmd: &CommandNode,
-    ) -> bool {
-        self.shell_state.env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .is_some_and(|script| script.ends_with("posixpipe.tests"))
-            && cmd
-                .words
-                .iter()
-                .any(|word| word.contains("{ time; echo after; }"))
-    }
-
-    pub(in crate::executor) fn is_posixpipe_time_count_fragment(&self, cmd: &CommandNode) -> bool {
-        self.shell_state.env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .is_some_and(|script| script.ends_with("posixpipe.tests"))
-            && cmd
-                .words
-                .first()
-                .is_some_and(|word| word.contains("time") && word.contains("echo after"))
-    }
-
-    pub(in crate::executor) fn is_posixpipe_time_count_remainder(&self, cmd: &CommandNode) -> bool {
-        self.shell_state.env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .is_some_and(|script| script.ends_with("posixpipe.tests"))
-            && cmd
-                .words
-                .iter()
-                .any(|word| matches!(word.as_str(), "wc" | "_cut_leading_spaces" | "-l"))
-    }
 }
 
 fn direct_windows_shell_script_path(
