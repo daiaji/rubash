@@ -10,6 +10,95 @@ use std::sync::Mutex;
 
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn diagnostic_prefix_three_modes_match_gnu() {
+    let _lock = ENV_LOCK.lock().unwrap();
+
+    // Interactive mode: only shell name, no line segment
+    let mut exec_interactive = Executor::new();
+    exec_interactive
+        .set_env("__RUBASH_INTERACTIVE", "1");
+    exec_interactive
+        .set_env("__RUBASH_SHELL_NAME", "niu");
+    assert_eq!(
+        exec_interactive.diagnostic_prefix(),
+        "niu: "
+    );
+
+    // Script mode: script name + line (no INTERACTIVE flag)
+    let mut exec_script = Executor::new();
+    exec_script.unset_env("__RUBASH_INTERACTIVE");
+    exec_script
+        .set_env("__RUBASH_SCRIPT_NAME", "test.sh");
+    exec_script
+        .set_env("__RUBASH_CURRENT_LINE", "5");
+    assert_eq!(
+        exec_script.diagnostic_prefix(),
+        "test.sh: line 5: "
+    );
+
+    // -c mode: bash + line (no script name, IS_C flag)
+    let mut exec_c = Executor::new();
+    exec_c.unset_env("__RUBASH_INTERACTIVE");
+    exec_c
+        .set_env("__RUBASH_CURRENT_LINE", "2");
+    exec_c
+        .set_env("__RUBASH_IS_C", "1");
+    assert_eq!(
+        exec_c.diagnostic_prefix(),
+        "bash: line 2: "
+    );
+
+    // Fallback: no context (no line, no script, no interactive)
+    let mut exec_fallback = Executor::new();
+    exec_fallback.unset_env("__RUBASH_INTERACTIVE");
+    exec_fallback.unset_env("__RUBASH_CURRENT_LINE");
+    exec_fallback.unset_env("__RUBASH_SCRIPT_NAME");
+    assert_eq!(
+        exec_fallback.diagnostic_prefix(),
+        "bash: "
+    );
+}
+
+#[test]
+fn builtin_error_prefix_three_modes_match_gnu() {
+    let _lock = ENV_LOCK.lock().unwrap();
+
+    // Interactive mode: only shell name, no line segment
+    let mut env_interactive = std::collections::HashMap::new();
+    env_interactive.insert("__RUBASH_INTERACTIVE".to_string(), "1".to_string());
+    env_interactive.insert("__RUBASH_SHELL_NAME".to_string(), "niu".to_string());
+    // Call through the public accessor in set module
+    assert_eq!(
+        rubash::builtins::set::builtin_error_prefix(&env_interactive),
+        "niu: "
+    );
+
+    // Script mode: script name + line
+    let mut env_script = std::collections::HashMap::new();
+    env_script.insert("__RUBASH_SCRIPT_NAME".to_string(), "test.sh".to_string());
+    env_script.insert("__RUBASH_CURRENT_LINE".to_string(), "5".to_string());
+    assert_eq!(
+        rubash::builtins::set::builtin_error_prefix(&env_script),
+        "test.sh: line 5: "
+    );
+
+    // -c mode: rubash + line (no script name)
+    let mut env_c = std::collections::HashMap::new();
+    env_c.insert("__RUBASH_CURRENT_LINE".to_string(), "2".to_string());
+    assert_eq!(
+        rubash::builtins::set::builtin_error_prefix(&env_c),
+        "rubash: line 2: "
+    );
+
+    // Fallback: no context
+    let env_fallback = std::collections::HashMap::new();
+    assert_eq!(
+        rubash::builtins::set::builtin_error_prefix(&env_fallback),
+        "rubash: "
+    );
+}
+
 fn shell_test_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }

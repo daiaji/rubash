@@ -541,7 +541,7 @@ impl Executor {
         self.shell_state.env_vars.clone()
     }
 
-    pub(crate) fn env_vars(&self) -> &HashMap<String, String> {
+    pub fn env_vars(&self) -> &HashMap<String, String> {
         &self.shell_state.env_vars
     }
 
@@ -640,30 +640,45 @@ impl Executor {
         self.shell_state.pipestatus.iter().map(i32::to_string).collect()
     }
 
-    pub(crate) fn diagnostic_prefix(&self) -> String {
+    pub fn diagnostic_prefix(&self) -> String {
         // GNU error.c:75-86 (report_prolog): runtime errors (command not
         // found, file not found, etc.) use only get_name_for_error() —
         // BASH_SOURCE[0] or dollar_vars[0] — as the prolog name, with no
         // input-stream segment. The "-c:" segment is exclusive to
         // parser_error (error.c:300-316) which appends yy_input_name().
-        if let (Some(script), Some(line)) = (
-            self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"),
-            self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"),
-        ) {
-            // GNU error.c report_prolog prints only get_name_for_error() —
-            // the "eval:" input-name segment is exclusive to parser_error
-            // (error.c:300-316, yy_input_name), so runtime errors inside
-            // eval report `script: line N:` / `bash: line N:` like any
-            // other command (verified GNU 5.3: `eval 'nosuch'` under both
-            // a script and -c prints no eval segment).
-            return format!("{script}: line {line}: ");
+        // Interactive mode (shell reading input from a terminal) omits the
+        // line segment entirely (error.c:88-120 get_name_for_error returns
+        // only base_pathname(shell_name), no line number).
+        if self.shell_state.env_vars.contains_key("__RUBASH_INTERACTIVE") {
+            // Interactive mode: report only the shell name, no line segment.
+            // GNU error.c:88-120 (get_name_for_error) for interactive shells
+            // returns base_pathname(shell_name) with no line number.
+            if let Some(shell_name) = self.shell_state.env_vars.get("__RUBASH_SHELL_NAME") {
+                return format!("{shell_name}: ");
+            }
+            return "bash: ".to_string();
         }
 
-        // GNU error.c:88-120 (get_name_for_error): without a script/$0
-        // context the prolog falls back to base_pathname(shell_name), i.e.
-        // the canonical shell name. Rubash reports as "bash"; the upstream
-        // suites normalize the baseline's invoked path to the same name.
-        "bash: ".to_string()
+        // Script/-c mode: line segment present
+        let line = self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE");
+        let script = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME");
+        match (script, line) {
+            (Some(script), Some(line)) => {
+                // Script mode: "script: line N:"
+                format!("{script}: line {line}: ")
+            }
+            (None, Some(line)) => {
+                // -c mode: "bash: line N:"
+                format!("bash: line {line}: ")
+            }
+            _ => {
+                // GNU error.c:88-120 (get_name_for_error): without a script/$0
+                // context the prolog falls back to base_pathname(shell_name), i.e.
+                // the canonical shell name. Rubash reports as "bash"; the upstream
+                // suites normalize the baseline's invoked path to the same name.
+                "bash: ".to_string()
+            }
+        }
     }
 
     /// Parser/syntax-error diagnostic prefix. GNU parser_error (error.c:300-316)

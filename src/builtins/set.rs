@@ -51,17 +51,36 @@ pub fn set(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Resul
 /// added by each call site, so this only carries the script/line prolog.
 /// Reads the executor env map (same sources as
 /// Executor::diagnostic_prefix), matching GNU's script-relative prolog.
-fn builtin_error_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        if env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
-            return format!("{script}: eval: line {line}: ");
+/// Interactive mode (shell reading from a terminal) omits the line segment.
+pub fn builtin_error_prefix(env_vars: &HashMap<String, String>) -> String {
+    if env_vars.contains_key("__RUBASH_INTERACTIVE") {
+        // Interactive mode: report only the shell name, no line segment.
+        // GNU error.c:88-120 (get_name_for_error) for interactive shells
+        // returns base_pathname(shell_name) with no line number.
+        if let Some(shell_name) = env_vars.get("__RUBASH_SHELL_NAME") {
+            return format!("{shell_name}: ");
         }
-        return format!("{script}: line {line}: ");
+        return "rubash: ".to_string();
     }
-    "rubash: ".to_string()
+
+    // Script/-c mode: line segment present
+    let line = env_vars.get("__RUBASH_CURRENT_LINE");
+    let script = env_vars.get("__RUBASH_SCRIPT_NAME");
+    match (script, line) {
+        (Some(script), Some(line)) => {
+            if env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
+                format!("{script}: eval: line {line}: ")
+            } else {
+                // Script mode: "script: line N:"
+                format!("{script}: line {line}: ")
+            }
+        }
+        (None, Some(line)) => {
+            // -c mode: "rubash: line N:"
+            format!("rubash: line {line}: ")
+        }
+        _ => "rubash: ".to_string(),
+    }
 }
 
 pub(crate) fn set_with_io<'a, I, W, E>(
