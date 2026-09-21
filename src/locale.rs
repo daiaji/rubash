@@ -441,6 +441,12 @@ pub fn decode_to_visible_text(text: &str) -> String {
             "ASSIGN_SQ_BACKTICK leaked to output");
         debug_assert!(!out.contains(crate::executor::markers::ASSIGN_SQ_BACKSLASH),
             "ASSIGN_SQ_BACKSLASH leaked to output");
+        // Golden assertion: CTLESC must never leak to output
+        // This is the most-traveled C0 carrier (0x11) used throughout the
+        // lexer/parser/executor pipeline to protect characters through
+        // intermediate passes. If it appears in output, the decode pass failed.
+        debug_assert!(!out.contains(CTLESC),
+            "CTLESC leaked to output");
     }
     out
 }
