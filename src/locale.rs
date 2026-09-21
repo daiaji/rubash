@@ -414,6 +414,33 @@ pub fn decode_to_visible_text(text: &str) -> String {
             "PROMPT_ESCAPE_GUARD leaked to output");
         debug_assert!(!out.contains(crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD),
             "CASE_PATTERN_BACKSLASH_GUARD leaked to output");
+        // Golden assertion: ASSIGN_DATA_* markers must never leak to output
+        // These are storage-boundary PUA markers (U+E301-E30C) with no
+        // external boundary; if they appear in output, the decode pass failed.
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_DATA_SQUOTE),
+            "ASSIGN_DATA_SQUOTE leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_DATA_DQUOTE),
+            "ASSIGN_DATA_DQUOTE leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_DATA_BACKTICK),
+            "ASSIGN_DATA_BACKTICK leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_ESCAPED_DQUOTE),
+            "ASSIGN_ESCAPED_DQUOTE leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_ESCAPED_SQUOTE),
+            "ASSIGN_ESCAPED_SQUOTE leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_ESCAPED_BACKSLASH),
+            "ASSIGN_ESCAPED_BACKSLASH leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_HOISTED_SQUOTE),
+            "ASSIGN_HOISTED_SQUOTE leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_HOISTED_BACKSLASH),
+            "ASSIGN_HOISTED_BACKSLASH leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG),
+            "COMPOUND_EXPANSION_WS_TAG leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_SQ_DOLLAR),
+            "ASSIGN_SQ_DOLLAR leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_SQ_BACKTICK),
+            "ASSIGN_SQ_BACKTICK leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_SQ_BACKSLASH),
+            "ASSIGN_SQ_BACKSLASH leaked to output");
     }
     out
 }
