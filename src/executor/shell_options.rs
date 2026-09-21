@@ -19,10 +19,19 @@ impl Executor {
             .map_err(|e| crate::posix_errors::path_error(target, e))
     }
 
-    fn open_fd_read_endpoint(&self, fd: u32, target: &str) -> io::Result<File> {
+    pub(in crate::executor) fn open_fd_read_endpoint(
+        &self,
+        fd: u32,
+        target: &str,
+    ) -> io::Result<File> {
         match self.fd_table.read_endpoint(fd) {
-            Some(FdReadEndpoint::File(path)) => File::open(&path)
-                .map_err(|e| crate::posix_errors::path_error(&path.to_string_lossy(), e)),
+            // DuplicateHandle shares the kernel file object: the child sees
+            // the fd at its current offset (POSIX open file description).
+            Some(FdReadEndpoint::File(file_fd)) => crate::fd::duplicate_handle(file_fd.handle)
+                .map(crate::fd::handle_to_file)
+                .map_err(|e| {
+                    crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e)
+                }),
             Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
                 let bytes = self
                     .virtual_fd_stdin_remaining_bytes(fd)
@@ -112,8 +121,14 @@ impl Executor {
             .fd_table
             .output_endpoint(fd)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "fd is not writable"))?;
+        // Handle-backed endpoints duplicate the real kernel object, keeping
+        // the shared file offset (POSIX open file description) instead of
+        // reopening the path at offset 0.
+        if let FdWriteEndpoint::File(file_fd) = endpoint {
+            return crate::fd::duplicate_handle(file_fd.handle)
+                .map(crate::fd::handle_to_file);
+        }
         let path = match endpoint {
-            FdWriteEndpoint::File(path) => path,
             FdWriteEndpoint::ProcessSubstitution { path, .. } => path,
             FdWriteEndpoint::Stdout | FdWriteEndpoint::Stderr => {
                 return Err(io::Error::new(
@@ -127,6 +142,7 @@ impl Executor {
                     "coprocess file descriptor",
                 ));
             }
+            FdWriteEndpoint::File(_) => unreachable!("handled above"),
         };
         if is_null_device(&path.to_string_lossy()) {
             return OpenOptions::new()
@@ -160,9 +176,8 @@ impl Executor {
                 };
                 writer.write_all(output)?;
             }
-            FdWriteEndpoint::File(path) => {
-                let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-                file.write_all(output)?;
+            FdWriteEndpoint::File(file_fd) => {
+                crate::fd::write_all(file_fd.handle, output)?;
             }
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 let mut file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -268,9 +283,8 @@ impl Executor {
                 };
                 writer.write_all(output)?;
             }
-            FdWriteEndpoint::File(path) => {
-                let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-                file.write_all(output)?;
+            FdWriteEndpoint::File(file_fd) => {
+                crate::fd::write_all(file_fd.handle, output)?;
             }
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 let mut file = OpenOptions::new().create(true).append(true).open(path)?;

@@ -254,8 +254,8 @@ impl Executor {
                 match entry.write.as_ref().expect("checked above") {
                     FdWriteEndpoint::Stdout => OutputTarget::Stdout,
                     FdWriteEndpoint::Stderr => OutputTarget::Stderr,
-                    FdWriteEndpoint::File(path) => {
-                        let path = shell_display_path(&path.to_string_lossy());
+                    FdWriteEndpoint::File(file_fd) => {
+                        let path = shell_display_path(&file_fd.path.to_string_lossy());
                         if is_null_device(&path) {
                             OutputTarget::Null
                         } else {

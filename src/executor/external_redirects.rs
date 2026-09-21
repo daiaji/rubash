@@ -116,9 +116,9 @@ impl Executor {
                 Some(FdWriteEndpoint::Stderr)
             ) {
                 process.stdout(Stdio::piped());
-            } else if let Some(FdWriteEndpoint::File(path)) = self.fd_table.write_endpoint(1) {
-                let file = OpenOptions::new().create(true).append(true).open(path)?;
-                process.stdout(Stdio::from(file));
+            } else if let Some(FdWriteEndpoint::File(file_fd)) = self.fd_table.write_endpoint(1) {
+                let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+                process.stdout(Stdio::from(crate::fd::handle_to_file(dup)));
             } else if self.stdout_capture.is_some()
                 || crate::executor::shell_options::stdout_capture_active()
             {
@@ -228,9 +228,9 @@ impl Executor {
                 Some(FdWriteEndpoint::Stdout)
             ) {
                 process.stderr(Stdio::piped());
-            } else if let Some(FdWriteEndpoint::File(path)) = self.fd_table.write_endpoint(2) {
-                let file = OpenOptions::new().create(true).append(true).open(path)?;
-                process.stderr(Stdio::from(file));
+            } else if let Some(FdWriteEndpoint::File(file_fd)) = self.fd_table.write_endpoint(2) {
+                let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+                process.stderr(Stdio::from(crate::fd::handle_to_file(dup)));
             }
         }
 

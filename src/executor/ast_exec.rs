@@ -85,6 +85,12 @@ impl Executor {
         // resource (niubash#100) and is restored separately.
         let mut subshell_state: Option<crate::shell::ShellState> = None;
         let mut subshell_cwd: Option<PathBuf> = None;
+        // The fd table is executor state, outside ShellState: a forked
+        // child's descriptor table is a copy, so `( exec 3<&- )` must not
+        // close the parent's fd 3. Rc-shared endpoints still alias the same
+        // open file description — reads in the subshell advance the shared
+        // offset, matching fork().
+        let mut subshell_fd_table: Option<crate::executor::fd_table::FdTable> = None;
         // GNU execute_cmd.c: `exit` and an errexit trigger unwind the shell
         // via jump_to_top_level (exit.def:152 EXITBLTIN, execute_cmd.c:1174
         // ERREXIT) — they are never a plain command status. The jump stops
@@ -114,6 +120,9 @@ impl Executor {
                 }
                 if let Some(saved_state) = subshell_state.take() {
                     self.restore_flat_subshell(saved_state, subshell_cwd.take());
+                    if let Some(saved) = subshell_fd_table.take() {
+                        self.fd_table = saved;
+                    }
                 }
                 // The dead subshell's status is a failing command status in
                 // the parent: under `set -e` it exits the script unless the
@@ -154,6 +163,9 @@ impl Executor {
                     if command.subshell_end {
                         if let Some(saved_state) = subshell_state.take() {
                             self.restore_flat_subshell(saved_state, subshell_cwd.take());
+                            if let Some(saved) = subshell_fd_table.take() {
+                                self.fd_table = saved;
+                            }
                         }
                         self.evalerror_pending.set(false);
                         self.evalerror_line.set(None);
@@ -211,6 +223,9 @@ impl Executor {
                 if command.subshell_end {
                     if let Some(saved_state) = subshell_state.take() {
                         self.restore_flat_subshell(saved_state, subshell_cwd.take());
+                        if let Some(saved) = subshell_fd_table.take() {
+                            self.fd_table = saved;
+                        }
                     }
                 }
                 index += 1;
@@ -225,6 +240,7 @@ impl Executor {
             // (execute_cmd.c:1576 execute_in_subshell).
             if command.subshell && subshell_state.is_none() {
                 subshell_state = Some(self.shell_state.clone());
+                subshell_fd_table = Some(self.fd_table.clone());
                 subshell_cwd = env::current_dir().ok();
                 self.shell_state.loop_depth = 0;
                 crate::builtins::trap::reset_for_subshell(&mut self.shell_state.env_vars);
@@ -920,6 +936,9 @@ impl Executor {
                     }
                     if let Some(saved_state) = subshell_state.take() {
                         self.restore_flat_subshell(saved_state, subshell_cwd.take());
+                        if let Some(saved) = subshell_fd_table.take() {
+                            self.fd_table = saved;
+                        }
                     }
                     // A malformed subshell can leave the command list with
                     // no closing marker.  In that case there is no boundary
@@ -980,6 +999,9 @@ impl Executor {
                 self.evalerror_line.set(None);
                 if let Some(saved_state) = subshell_state.take() {
                     self.restore_flat_subshell(saved_state, subshell_cwd.take());
+                    if let Some(saved) = subshell_fd_table.take() {
+                        self.fd_table = saved;
+                    }
                 }
             }
 

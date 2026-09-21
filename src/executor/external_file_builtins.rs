@@ -569,6 +569,23 @@ impl Executor {
             if cmd.redirect_in.is_none()
                 && cmd.heredoc.is_none()
                 && cmd.here_string.is_none()
+            {
+                // fd 0 may carry a real/virtual endpoint from a compound
+                // redirect (`{ cat; } <&3`) — GNU reads fd 0 directly.
+                if !matches!(
+                    self.fd_table.read_endpoint(0),
+                    None | Some(FdReadEndpoint::InheritedProcessStdin)
+                ) {
+                    if let Some(bytes) = self.fd_table.read_all_bytes(0) {
+                        self.write_cat_output(cmd, &filter(&bytes))?;
+                        self.exit_code = 0;
+                        return Ok(true);
+                    }
+                }
+            }
+            if cmd.redirect_in.is_none()
+                && cmd.heredoc.is_none()
+                && cmd.here_string.is_none()
                 && self.shell_state.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) == Some("1")
             {
                 return self.stream_inherited_cat(cmd);

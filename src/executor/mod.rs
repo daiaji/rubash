@@ -195,7 +195,7 @@ pub(crate) use execution_misc::RandomGen;
 use external_setup::{
     command_needs_process_substitution_materialization, ProcessSubstitutionFiles,
 };
-use fd_table::{FdReadEndpoint, FdTable, FdWriteEndpoint, MaterializedRead};
+use fd_table::{FdReadEndpoint, FdTable, FdWriteEndpoint, FileFd, MaterializedRead};
 use function_env::*;
 use local_helpers::*;
 use parameter_case::*;

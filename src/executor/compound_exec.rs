@@ -929,6 +929,12 @@ impl Executor {
         // aliases, functions, set --, IFS, env-carried traps, positional
         // params, and job bookkeeping all restore wholesale at the end.
         let saved_state = self.shell_state.clone();
+        // The fd table is executor state, not ShellState: a forked child's
+        // descriptor table is a copy (execute_in_subshell after make_child),
+        // so `( exec 3<&- )` cannot close the parent's fd 3. Rc-shared
+        // entries still alias the same open file description — reads in the
+        // subshell advance the shared offset, matching fork().
+        let saved_fd_table = self.fd_table.clone();
         let saved_depth = self.shell_state.subshell_depth.get();
         // GNU execute_cmd.c runs `( list )` via execute_in_subshell ->
         // make_child: the forked child owns its own cwd, so a `cd` in the
@@ -1026,7 +1032,9 @@ impl Executor {
                 command.redirects.splice(0..0, numbered_redirects.clone());
             }
         }
-        let result = self.with_command_input_redirects(cmd, |executor| executor.execute_ast(&body));
+        let result = self.with_loop_fd_heredocs(cmd, |executor| {
+            executor.with_command_input_redirects(cmd, |executor| executor.execute_ast(&body))
+        });
         // GNU execute_cmd.c execute_in_subshell: expr.c evalerror's
         // jump_to_top_level(DISCARD) reaches only the forked subshell's own
         // top level — the abort dies with the subshell (status 1) and cannot
@@ -1049,6 +1057,7 @@ impl Executor {
             | Err(ExecuteError::Return(code)) => code,
             Err(error) => {
                 self.restore_flat_subshell(saved_state.clone(), saved_cwd.clone());
+                self.fd_table = saved_fd_table.clone();
                 return Err(error);
             }
         };
@@ -1066,11 +1075,13 @@ impl Executor {
             Ok(trap_status) => trap_status,
             Err(error) => {
                 self.restore_flat_subshell(saved_state.clone(), saved_cwd.clone());
+                self.fd_table = saved_fd_table.clone();
                 return Err(error);
             }
         };
 
         self.restore_flat_subshell(saved_state, saved_cwd);
+        self.fd_table = saved_fd_table;
         let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
         self.exit_code = status;
         finish_result?;
@@ -1131,7 +1142,7 @@ impl Executor {
         Ok(())
     }
 
-    fn with_loop_fd_heredocs<F>(&mut self, cmd: &CommandNode, f: F) -> Result<(), ExecuteError>
+    pub(in crate::executor) fn with_loop_fd_heredocs<F>(&mut self, cmd: &CommandNode, f: F) -> Result<(), ExecuteError>
     where
         F: FnOnce(&mut Executor) -> Result<(), ExecuteError>,
     {
@@ -1552,7 +1563,9 @@ impl Executor {
         match self.fd_table.write_endpoint(2)? {
             FdWriteEndpoint::Stdout => Some(CoprocStderrForwardTarget::Stdout),
             FdWriteEndpoint::Stderr => Some(CoprocStderrForwardTarget::Stderr),
-            FdWriteEndpoint::File(path) => Some(CoprocStderrForwardTarget::File(path)),
+            FdWriteEndpoint::File(file_fd) => {
+                Some(CoprocStderrForwardTarget::File(file_fd.path.clone()))
+            }
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 Some(CoprocStderrForwardTarget::File(path))
             }

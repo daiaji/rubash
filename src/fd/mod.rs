@@ -315,37 +315,12 @@ impl FdTable {
     /// Read up to `n` bytes from a slot (advancing the shared offset).
     pub fn read_n(&self, slot: usize, n: usize) -> Result<Vec<u8>, String> {
         let h = self.query(slot).ok_or(format!("read: fd {slot} not open"))?;
-        let mut buf = vec![0u8; n];
-        let mut got: DWORD = 0;
-        let ok = unsafe { ReadFile(h, buf.as_mut_ptr(), n as DWORD, &mut got, std::ptr::null_mut()) };
-        if ok == 0 {
-            // A drained anonymous pipe whose write end is closed reports
-            // ERROR_BROKEN_PIPE instead of a zero-byte read: that is EOF.
-            const ERROR_BROKEN_PIPE: DWORD = 109;
-            if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
-                buf.truncate(0);
-                return Ok(buf);
-            }
-            return Err(format!("read fd {slot}: ReadFile failed: {}", std::io::Error::last_os_error()));
-        }
-        buf.truncate(got as usize);
-        Ok(buf)
+        read_some(h, n).map_err(|e| format!("read fd {slot}: {e}"))
     }
 
     pub fn write_all(&self, slot: usize, bytes: &[u8]) -> Result<(), String> {
         let h = self.query(slot).ok_or(format!("write: fd {slot} not open"))?;
-        let mut off = 0usize;
-        while off < bytes.len() {
-            let mut n: DWORD = 0;
-            let ok = unsafe {
-                WriteFile(h, bytes[off..].as_ptr(), (bytes.len() - off) as DWORD, &mut n, std::ptr::null_mut())
-            };
-            if ok == 0 {
-                return Err(format!("write fd {slot}: WriteFile failed"));
-            }
-            off += n as usize;
-        }
-        Ok(())
+        write_all(h, bytes).map_err(|e| format!("write fd {slot}: {e}"))
     }
 
     /// Explicit seek on the shared file object (SetFilePointer).
@@ -366,6 +341,151 @@ impl FdTable {
 /// `h` must be a valid readable HANDLE; `buf`/`n` a valid region.
 pub unsafe fn raw_read(h: HANDLE, buf: *mut u8, n: DWORD, got: *mut DWORD) -> BOOL {
     ReadFile(h, buf, n, got, std::ptr::null_mut())
+}
+
+// ---- engine-facing free functions (FdTable-independent) ----
+
+const FILE_APPEND_DATA: DWORD = 0x0000_0004;
+const CREATE_NEW: DWORD = 1;
+const OPEN_ALWAYS: DWORD = 4;
+const FILE_END: DWORD = 2;
+
+fn create_file(
+    path: &std::path::Path,
+    access: DWORD,
+    disposition: DWORD,
+) -> std::io::Result<HANDLE> {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let h = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            disposition,
+            0,
+            0,
+        )
+    };
+    if h == INVALID_HANDLE_VALUE || h == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(h)
+}
+
+/// `N<file` — O_RDONLY equivalent.
+pub fn open_file_read(path: &std::path::Path) -> std::io::Result<HANDLE> {
+    create_file(path, GENERIC_READ, OPEN_EXISTING)
+}
+
+/// `N>file` / `N>|file` — O_WRONLY|O_CREAT|O_TRUNC.
+pub fn open_file_write_trunc(path: &std::path::Path) -> std::io::Result<HANDLE> {
+    create_file(path, GENERIC_WRITE, CREATE_ALWAYS)
+}
+
+/// `set -C` non-clobber `>` — O_WRONLY|O_CREAT|O_EXCL.
+pub fn open_file_create_new(path: &std::path::Path) -> std::io::Result<HANDLE> {
+    create_file(path, GENERIC_WRITE, CREATE_NEW)
+}
+
+/// `N>>file` — O_WRONLY|O_CREAT|O_APPEND. FILE_APPEND_DATA makes every
+/// write land at end-of-file regardless of the shared offset.
+pub fn open_file_append(path: &std::path::Path) -> std::io::Result<HANDLE> {
+    create_file(path, FILE_APPEND_DATA | GENERIC_WRITE, OPEN_ALWAYS)
+}
+
+/// `N<>file` — O_RDWR|O_CREAT.
+pub fn open_file_readwrite(path: &std::path::Path) -> std::io::Result<HANDLE> {
+    create_file(path, GENERIC_READ | GENERIC_WRITE, OPEN_ALWAYS)
+}
+
+/// `N>&M` at the kernel level: the duplicate refers to the same file
+/// object, so the file offset stays shared.
+pub fn duplicate_handle(h: HANDLE) -> std::io::Result<HANDLE> {
+    let mut target: HANDLE = 0;
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            h,
+            GetCurrentProcess(),
+            &mut target,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(target)
+}
+
+pub fn close_handle(h: HANDLE) {
+    unsafe {
+        CloseHandle(h);
+    }
+}
+
+/// Read up to `n` bytes; ERROR_BROKEN_PIPE (drained anonymous pipe) is EOF.
+pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; n.max(1)];
+    let mut got: DWORD = 0;
+    let ok = unsafe { ReadFile(h, buf.as_mut_ptr(), n as DWORD, &mut got, std::ptr::null_mut()) };
+    if ok == 0 {
+        const ERROR_BROKEN_PIPE: DWORD = 109;
+        if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
+            return Ok(Vec::new());
+        }
+        return Err(std::io::Error::last_os_error());
+    }
+    buf.truncate(got as usize);
+    Ok(buf)
+}
+
+pub fn write_all(h: HANDLE, bytes: &[u8]) -> std::io::Result<()> {
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let mut n: DWORD = 0;
+        let ok = unsafe {
+            WriteFile(
+                h,
+                bytes[off..].as_ptr(),
+                (bytes.len() - off) as DWORD,
+                &mut n,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        off += n as usize;
+    }
+    Ok(())
+}
+
+/// Move the shared file offset to end-of-file (append-by-seek for `<>`
+/// readers, or `consume` semantics).
+pub fn seek_end(h: HANDLE) -> std::io::Result<()> {
+    let r = unsafe { SetFilePointer(h, 0, std::ptr::null_mut(), FILE_END) };
+    if r == 0xFFFF_FFFF {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Adopt a raw HANDLE into a `std::fs::File` (ownership transferred —
+/// the File closes it on drop).
+pub fn handle_to_file(h: HANDLE) -> std::fs::File {
+    use std::os::windows::io::FromRawHandle;
+    std::fs::File::from(unsafe {
+        std::os::windows::io::OwnedHandle::from_raw_handle(
+            h as std::os::windows::io::RawHandle,
+        )
+    })
 }
 
 #[cfg(test)]

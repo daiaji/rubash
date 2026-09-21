@@ -184,12 +184,33 @@ impl Executor {
                         }
                         // `< /dev/fd/N` (and `<&N`) on a file-backed fd dup
                         // the open file into the child's stdin (GNU redir.c
-                        // dup2 semantics through the /dev/fd device layer).
-                        Some(FdReadEndpoint::File(path)) => {
-                            process.stdin(Stdio::from(File::open(&path)?));
+                        // dup2 semantics through the /dev/fd device layer):
+                        // DuplicateHandle keeps the shared file offset, so a
+                        // partially-read fd feeds the child only the rest.
+                        Some(FdReadEndpoint::File(file_fd)) => {
+                            let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+                            process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
                             return Ok(());
                         }
-                        _ => {}
+                        // Text/process-substitution endpoints materialize to
+                        // a temp file; inherited stdin dups the real handle.
+                        // The child drains the stream, so consume the
+                        // parent's copy too (shared-offset semantics).
+                        Some(_) => {
+                            let file = self.open_fd_read_endpoint(fd, &target)?;
+                            self.fd_table.consume_all_text(fd);
+                            process.stdin(Stdio::from(file));
+                            return Ok(());
+                        }
+                        // `cmd <&N` with N closed/absent — GNU redir.c
+                        // dup2 fails EBADF; the open never happens.
+                        None => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("{fd}: Bad file descriptor"),
+                            )
+                            .into());
+                        }
                     }
                 }
             }
@@ -358,14 +379,10 @@ impl Executor {
                             self.shell_state.env_vars.insert(fd_stdin_offset_key(fd), input_len);
                             redirect.target = shell_display_path(&path.to_string_lossy());
                             files.inputs.push(path);
-                        } else if let Some(MaterializedRead::File(path)) = self
-                            .fd_table
-                            .materialize_for_child()
-                            .get(&fd)
-                            .and_then(|materialized| materialized.read.clone())
-                        {
-                            redirect.target = shell_display_path(&path.to_string_lossy());
                         }
+                        // File-backed fds keep `&N`: the spawn layer dups
+                        // the real handle (shared offset) — a path rewrite
+                        // would reopen the file at offset 0.
                     } else if let Some(input) = self.external_fd_heredoc_input(cmd, fd) {
                         let path = self.write_process_substitution_temp(&input)?;
                         redirect.target = shell_display_path(&path.to_string_lossy());

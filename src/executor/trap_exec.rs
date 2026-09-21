@@ -29,19 +29,72 @@ impl Executor {
         self.shell_state.env_vars.remove(&fd_closed_key(fd));
     }
 
+    /// `exec N<file` — install a real kernel handle in the slot instead of
+    /// snapshotting file contents. The endpoint's Rc is shared by every
+    /// `N<&M` duplicate and by subshell table clones, so the file offset is
+    /// shared exactly like GNU's open file description (redir.c dup2 /
+    /// execute_cmd.c execute_in_subshell fd inheritance).
+    pub(in crate::executor) fn set_fd_input_file(
+        &mut self,
+        fd: u32,
+        file: Rc<FileFd>,
+        dynamic: bool,
+    ) {
+        self.fd_table
+            .open_input(fd, FdReadEndpoint::File(file), dynamic);
+        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+        if dynamic {
+            self.shell_state.env_vars
+                .insert(fd_dynamic_input_key(fd), "1".to_string());
+        } else {
+            self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+        }
+    }
+
+    /// `[N]<>file` — one O_RDWR handle feeding both directions of the slot
+    /// (GNU redir.c r_input_output opens a single descriptor).
+    pub(in crate::executor) fn set_fd_readwrite_file(
+        &mut self,
+        fd: u32,
+        target: &str,
+        dynamic: bool,
+    ) -> std::io::Result<()> {
+        let path = shell_path_to_windows(target, &self.shell_state.env_vars);
+        let file = FileFd::open_readwrite(path)?;
+        self.set_fd_input_file(fd, file.clone(), dynamic);
+        self.fd_table
+            .open_output(fd, FdWriteEndpoint::File(file), dynamic);
+        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+        self.shell_state.env_vars
+            .remove(&fd_output_process_substitution_key(fd));
+        self.shell_state
+            .env_vars
+            .insert(fd_output_key(fd), target.to_string());
+        Ok(())
+    }
+
+    /// `exec N>file` / `N>>file` — hold the real write handle on the slot.
+    /// `append` selects FILE_APPEND_DATA (GNU O_APPEND); truncation /
+    /// noclobber checks must have run already (create_redirect_output).
     pub(in crate::executor) fn set_fd_output_file(
         &mut self,
         fd: u32,
         target: String,
         dynamic: bool,
-    ) {
+        append: bool,
+    ) -> std::io::Result<()> {
         let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+        let file = FileFd::open_write(path, append, false)
+            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
         self.fd_table
-            .open_output(fd, FdWriteEndpoint::File(path), dynamic);
+            .open_output(fd, FdWriteEndpoint::File(file), dynamic);
         self.shell_state.env_vars.remove(&fd_closed_key(fd));
         self.shell_state.env_vars
             .remove(&fd_output_process_substitution_key(fd));
         self.shell_state.env_vars.insert(fd_output_key(fd), target);
+        Ok(())
     }
 
     pub(in crate::executor) fn execute_eval(
@@ -998,28 +1051,24 @@ impl Executor {
                         if !is_null_device(&path) {
                             self.create_redirect_output(&path, redirect.clobber)?;
                         }
-                        self.set_fd_output_file(1, path.clone(), false);
-                        self.set_fd_output_file(2, path, false);
+                        self.set_fd_output_file(1, path.clone(), false, false)?;
+                        self.set_fd_output_file(2, path, false, false)?;
                         continue;
                     }
                     if self.open_persistent_output_process_substitution(fd, &target)? {
                         continue;
                     }
-                    if !is_null_device(&target) {
-                        if matches!(
-                            redirect.kind,
-                            crate::parser::RedirectKind::Append
-                                | crate::parser::RedirectKind::CombinedAppend
-                        ) {
-                            OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-                        } else {
-                            self.create_redirect_output(&target, redirect.clobber)?;
-                        }
+                    let append = matches!(
+                        redirect.kind,
+                        crate::parser::RedirectKind::Append
+                            | crate::parser::RedirectKind::CombinedAppend
+                    );
+                    if !is_null_device(&target) && !append {
+                        // noclobber/existing-file diagnostics live here;
+                        // the real handle open in set_fd_output_file follows.
+                        self.create_redirect_output(&target, redirect.clobber)?;
                     }
-                    self.set_fd_output_file(fd, target.clone(), fd >= 10);
+                    self.set_fd_output_file(fd, target.clone(), fd >= 10, append)?;
                     if matches!(
                         redirect.kind,
                         crate::parser::RedirectKind::CombinedOutput
@@ -1027,7 +1076,7 @@ impl Executor {
                     ) {
                         // &>file / &>>file: stderr follows stdout
                         // (redir.c r_err_and_out / r_append_err_and_out).
-                        self.set_fd_output_file(2, target, fd >= 10);
+                        self.set_fd_output_file(2, target, fd >= 10, append)?;
                     }
                 }
                 crate::parser::RedirectKind::DuplicateOutput => {
@@ -1054,8 +1103,8 @@ impl Executor {
                         if !is_null_device(&path) {
                             self.create_redirect_output(&path, redirect.clobber)?;
                         }
-                        self.set_fd_output_file(1, path.clone(), false);
-                        self.set_fd_output_file(2, path, false);
+                        self.set_fd_output_file(1, path.clone(), false, false)?;
+                        self.set_fd_output_file(2, path, false, false)?;
                         continue;
                     }
                     // Other non-numeric dup targets stay AMBIGUOUS_REDIRECT
@@ -1113,27 +1162,20 @@ impl Executor {
                         continue;
                     }
 
-                    let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
-                    if redirect.append {
-                        // [N]<> opens the file for reading and writing
-                        // (redir.c r_input_output, O_RDWR).
-                        let _ = OpenOptions::new()
-                            .create(true)
-                            .read(true)
-                            .write(true)
-                            .open(&path)
-                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
-                    }
-                    let input = std::fs::read(&path)
-                        .map_err(|e| crate::posix_errors::path_error(&target, e))?;
-                    self.set_fd_input_bytes(fd, input, fd != 0);
                     // The operator token keeps any numeric redirector prefix
                     // (`exec 6<>file` lexes as `6<>`), so match on the
                     // suffix (redir.tests: `exec 6<>$TMPDIR/bash-c` then
-                    // `echo to c 1>&6`).
+                    // `echo to c 1>&6`). Real handle on the slot: [N]<> is a
+                    // single O_RDWR open file description (redir.c
+                    // r_input_output) shared by both directions.
                     if redirect.operator.ends_with("<>") {
-                        self.fd_table
-                            .open_output(fd, FdWriteEndpoint::File(path), fd >= 10);
+                        self.set_fd_readwrite_file(fd, &target, fd != 0)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                    } else {
+                        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                        let file = FileFd::open_read(path)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                        self.set_fd_input_file(fd, file, fd != 0);
                     }
                 }
                 crate::parser::RedirectKind::CloseInput => {
@@ -1144,11 +1186,23 @@ impl Executor {
                 crate::parser::RedirectKind::DuplicateInput => {
                     let fd = redirect.fd.unwrap_or(0);
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
-                        if self.fd_table.is_open_for_read(source_fd) {
+                        if self.fd_table.is_open(source_fd) {
                             self.copy_persistent_input_fd(fd, source_fd);
                             if move_source {
-                                self.close_persistent_input_fd(source_fd);
+                                // `N<&M-` moves the descriptor wholesale:
+                                // both directions of M close (redir.c
+                                // dup_redirects move case).
+                                let _ = self.close_persistent_fd(source_fd);
                             }
+                        } else {
+                            self.shell_state.env_vars
+                                .insert(fd_closed_key(fd), "1".to_string());
+                            let _ = self.write_default_stderr(
+                                format!("{}{}: Bad file descriptor
+", self.diagnostic_prefix(), fd)
+                                    .as_bytes(),
+                            );
+                            self.exit_code = 1;
                         }
                     }
                 }
@@ -1224,14 +1278,82 @@ impl Executor {
             // re-opening/truncating — the compound's own open already
             // created and truncated the file (niubash#118: a fresh
             // create here erased earlier group output).
-            self.set_fd_output_file(target_fd, target.clone(), target_fd >= 10);
+            if self.fd_table.dup_output(target_fd, current).is_err() {
+                let path = shell_path_to_windows(target, &self.shell_state.env_vars);
+                if let Ok(file) = FileFd::open_write(path, true, false) {
+                    self.fd_table.open_output(
+                        target_fd,
+                        FdWriteEndpoint::File(file),
+                        target_fd >= 10,
+                    );
+                    self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                    self.shell_state
+                        .env_vars
+                        .insert(fd_output_key(target_fd), target.clone());
+                }
+            }
             return;
         }
         self.copy_persistent_output_fd(target_fd, current);
     }
 
+    /// Writes the `__RUBASH_FD_*` write-side ledger for `fd` from whatever
+    /// write endpoint is installed (or clears it). Used after dup/open.
+    fn record_output_fd_ledger(&mut self, target_fd: u32) {
+        match self.fd_table.output_endpoint(target_fd) {
+            Some(FdWriteEndpoint::Stdout) => {
+                self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                self.shell_state.env_vars
+                    .insert(fd_output_key(target_fd), FD_STDOUT_TARGET.to_string());
+                self.shell_state.env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
+            }
+            Some(FdWriteEndpoint::Stderr) => {
+                self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                self.shell_state.env_vars
+                    .insert(fd_output_key(target_fd), FD_STDERR_TARGET.to_string());
+                self.shell_state.env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
+            }
+            Some(FdWriteEndpoint::File(file_fd)) => {
+                self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                self.shell_state.env_vars.insert(
+                    fd_output_key(target_fd),
+                    shell_display_path(&file_fd.path.to_string_lossy()),
+                );
+                self.shell_state.env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
+            }
+            Some(FdWriteEndpoint::CoprocStdin(pid)) => {
+                self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                self.shell_state.env_vars.insert(
+                    fd_output_key(target_fd),
+                    format!("{FD_COPROC_STDIN_TARGET_PREFIX}{pid}"),
+                );
+                self.shell_state.env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
+            }
+            Some(FdWriteEndpoint::ProcessSubstitution { path, command }) => {
+                self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                self.shell_state.env_vars.insert(
+                    fd_output_key(target_fd),
+                    shell_display_path(&path.to_string_lossy()),
+                );
+                self.shell_state.env_vars
+                    .insert(fd_output_process_substitution_key(target_fd), command);
+            }
+            None => {
+                self.shell_state.env_vars.remove(&fd_output_key(target_fd));
+                self.shell_state.env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
+            }
+        }
+    }
+
     fn copy_persistent_output_fd(&mut self, target_fd: u32, source_fd: u32) {
-        if self.fd_table.is_open_for_write(source_fd) {
+        // GNU dup2 semantics: `N>&M` copies the whole descriptor — a
+        // read-only source (`exec 0>&3`) also installs the read side.
+        if self.fd_table.is_open(source_fd) {
             let source_endpoint = self.fd_table.write_endpoint(source_fd);
             let target_endpoint = self.fd_table.write_endpoint(target_fd);
             if target_fd != source_fd
@@ -1243,50 +1365,8 @@ impl Executor {
                 let _ = self.close_persistent_output_fd(target_fd);
             }
             if self.fd_table.dup_output(target_fd, source_fd).is_ok() {
-                match self.fd_table.output_endpoint(target_fd) {
-                    Some(FdWriteEndpoint::Stdout) => {
-                        self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
-                        self.shell_state.env_vars
-                            .insert(fd_output_key(target_fd), FD_STDOUT_TARGET.to_string());
-                        self.shell_state.env_vars
-                            .remove(&fd_output_process_substitution_key(target_fd));
-                    }
-                    Some(FdWriteEndpoint::Stderr) => {
-                        self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
-                        self.shell_state.env_vars
-                            .insert(fd_output_key(target_fd), FD_STDERR_TARGET.to_string());
-                        self.shell_state.env_vars
-                            .remove(&fd_output_process_substitution_key(target_fd));
-                    }
-                    Some(FdWriteEndpoint::File(path)) => {
-                        self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
-                        self.shell_state.env_vars.insert(
-                            fd_output_key(target_fd),
-                            shell_display_path(&path.to_string_lossy()),
-                        );
-                        self.shell_state.env_vars
-                            .remove(&fd_output_process_substitution_key(target_fd));
-                    }
-                    Some(FdWriteEndpoint::CoprocStdin(pid)) => {
-                        self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
-                        self.shell_state.env_vars.insert(
-                            fd_output_key(target_fd),
-                            format!("{FD_COPROC_STDIN_TARGET_PREFIX}{pid}"),
-                        );
-                        self.shell_state.env_vars
-                            .remove(&fd_output_process_substitution_key(target_fd));
-                    }
-                    Some(FdWriteEndpoint::ProcessSubstitution { path, command }) => {
-                        self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
-                        self.shell_state.env_vars.insert(
-                            fd_output_key(target_fd),
-                            shell_display_path(&path.to_string_lossy()),
-                        );
-                        self.shell_state.env_vars
-                            .insert(fd_output_process_substitution_key(target_fd), command);
-                    }
-                    None => {}
-                }
+                self.record_output_fd_ledger(target_fd);
+                self.record_input_fd_ledger(target_fd);
             } else {
                 let _ = self.close_persistent_output_fd(target_fd);
                 self.shell_state.env_vars
@@ -1620,15 +1700,12 @@ impl Executor {
             }
 
             let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
-            if redirect.append {
-                let _ = OpenOptions::new()
-                    .create(true)
-                    .read(true)
-                    .write(true)
-                    .open(&path)?;
+            let file = if redirect.operator.ends_with("<>") {
+                FileFd::open_readwrite(path)
+            } else {
+                FileFd::open_read(path)
             }
-            let input = crate::executor::substitution_metadata::read_shell_input_file(path)
-                .map_err(|io| crate::posix_errors::path_error(&target, io))?;
+            .map_err(|io| crate::posix_errors::path_error(&target, io))?;
             let Some(fd) = self.allocate_dynamic_fd() else {
                 self.report_fd_dup_error(&target);
                 return Ok(Some(1));
@@ -1641,10 +1718,16 @@ impl Executor {
                 self.report_fd_assignment_failure(name);
                 return Ok(Some(1));
             }
-            self.set_fd_input_text(fd, input, true);
-            // Same `6<>` suffix rule as the exec path above.
+            self.set_fd_input_file(fd, file.clone(), true);
+            // Same `6<>` suffix rule as the exec path above: one O_RDWR
+            // open file description feeds both directions.
             if redirect.operator.ends_with("<>") {
-                self.set_fd_output_file(fd, target, true);
+                self.fd_table
+                    .open_output(fd, FdWriteEndpoint::File(file), true);
+                self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                self.shell_state
+                    .env_vars
+                    .insert(fd_output_key(fd), target.clone());
             }
             return Ok(Some(0));
         }
@@ -1701,7 +1784,7 @@ impl Executor {
                 self.report_fd_assignment_failure(name);
                 return Ok(Some(1));
             }
-            self.set_fd_output_file(fd, target, true);
+            self.set_fd_output_file(fd, target, true, false)?;
             return Ok(Some(0));
         }
 
@@ -1726,10 +1809,6 @@ impl Executor {
                 }
                 return Ok(Some(0));
             }
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             if readonly_blocked {
                 self.report_readonly_fd_assignment(name);
                 return Ok(Some(1));
@@ -1738,7 +1817,7 @@ impl Executor {
                 self.report_fd_assignment_failure(name);
                 return Ok(Some(1));
             }
-            self.set_fd_output_file(fd, target, true);
+            self.set_fd_output_file(fd, target, true, true)?;
             return Ok(Some(0));
         }
 
@@ -1883,7 +1962,9 @@ impl Executor {
                         );
                         self.set_fd_input_text(fd, input, true);
                         if redirect.kind == crate::parser::RedirectKind::ReadWrite {
-                            self.set_fd_output_file(fd, target.clone(), true);
+                            // `<(...)` has no openable path; ledger-only
+                            // companion is best-effort.
+                            let _ = self.set_fd_output_file(fd, target.clone(), true, true);
                         }
                         if !self.set_dynamic_fd_variable(name, fd) {
                             return Err(ExecuteError::IoError(std::io::Error::new(
@@ -1897,20 +1978,26 @@ impl Executor {
                 }
 
                 let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
-                let input = if is_null_device(&target) {
-                    String::new()
+                let file = if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+                    FileFd::open_readwrite(path)
                 } else {
-                    crate::executor::substitution_metadata::read_shell_input_file(&path)?
-                };
+                    FileFd::open_read(path)
+                }
+                .map_err(|io| crate::posix_errors::path_error(&target, io))?;
                 let Some(fd) = self.allocate_dynamic_fd() else {
                     return Err(ExecuteError::IoError(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         self.fd_dup_error_payload(&target),
                     )));
                 };
-                self.set_fd_input_text(fd, input, true);
+                self.set_fd_input_file(fd, file.clone(), true);
                 if redirect.kind == crate::parser::RedirectKind::ReadWrite {
-                    self.set_fd_output_file(fd, target.clone(), true);
+                    self.fd_table
+                        .open_output(fd, FdWriteEndpoint::File(file), true);
+                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                    self.shell_state
+                        .env_vars
+                        .insert(fd_output_key(fd), target.clone());
                 }
                 if !self.set_dynamic_fd_variable(name, fd) {
                     return Err(ExecuteError::IoError(std::io::Error::new(
@@ -1946,15 +2033,15 @@ impl Executor {
                     }
                     let _ = source;
                 }
-                if redirect.kind == crate::parser::RedirectKind::Append {
-                    OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-                } else {
+                if redirect.kind != crate::parser::RedirectKind::Append {
                     self.create_redirect_output(&target, redirect.clobber)?;
                 }
-                self.set_fd_output_file(fd, target, true);
+                self.set_fd_output_file(
+                    fd,
+                    target,
+                    true,
+                    redirect.kind == crate::parser::RedirectKind::Append,
+                )?;
                 if !self.set_dynamic_fd_variable(name, fd) {
                     return Err(ExecuteError::IoError(std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -1970,15 +2057,15 @@ impl Executor {
         Ok(true)
     }
 
-    fn copy_persistent_input_fd(&mut self, target_fd: u32, source_fd: u32) {
-        if self.fd_table.is_open_for_read(source_fd) {
-            if self.fd_table.dup_input(target_fd, source_fd).is_ok() {
-                match self
-                    .fd_table
-                    .entries
-                    .get(&target_fd)
-                    .and_then(|entry| entry.read.clone())
-                {
+    /// Writes the `__RUBASH_FD_*` read-side ledger for `fd` from whatever
+    /// read endpoint is installed (or clears it). Used after dup/open.
+    fn record_input_fd_ledger(&mut self, target_fd: u32) {
+        match self
+            .fd_table
+            .entries
+            .get(&target_fd)
+            .and_then(|entry| entry.read.clone())
+        {
                     Some(FdReadEndpoint::InheritedProcessStdin) => {
                         self.shell_state.env_vars
                             .insert(fd_stdin_key(target_fd), FD_PROCESS_STDIN_TARGET.to_string());
@@ -1995,10 +2082,10 @@ impl Executor {
                                 .insert(fd_dynamic_input_key(target_fd), "1".to_string());
                         }
                     }
-                    Some(FdReadEndpoint::File(path)) => {
+                    Some(FdReadEndpoint::File(file_fd)) => {
                         self.shell_state.env_vars.insert(
                             fd_stdin_key(target_fd),
-                            shell_display_path(&path.to_string_lossy()),
+                            shell_display_path(&file_fd.path.to_string_lossy()),
                         );
                         self.shell_state.env_vars.remove(&fd_stdin_offset_key(target_fd));
                         self.shell_state.env_vars.remove(&fd_dynamic_input_key(target_fd));
@@ -2011,8 +2098,23 @@ impl Executor {
                         self.shell_state.env_vars.remove(&fd_stdin_offset_key(target_fd));
                         self.shell_state.env_vars.remove(&fd_dynamic_input_key(target_fd));
                     }
-                    None => {}
+                    None => {
+                        self.shell_state.env_vars.remove(&fd_stdin_key(target_fd));
+                        self.shell_state.env_vars.remove(&fd_stdin_offset_key(target_fd));
+                        self.shell_state.env_vars.remove(&fd_dynamic_input_key(target_fd));
+                    }
                 }
+    }
+
+    fn copy_persistent_input_fd(&mut self, target_fd: u32, source_fd: u32) {
+        // GNU dup2 semantics (redir.c dup_redirects): `N<&M` copies the whole
+        // descriptor — the `<`/`>` letter only picks the default fd number.
+        // A write-only source (e.g. `exec 8<&1`) still installs fd 8's write
+        // side, which is what makes `echo >&8` work.
+        if self.fd_table.is_open(source_fd) {
+            if self.fd_table.dup_input(target_fd, source_fd).is_ok() {
+                self.record_input_fd_ledger(target_fd);
+                self.record_output_fd_ledger(target_fd);
                 self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
             } else {
                 self.close_persistent_input_fd(target_fd);

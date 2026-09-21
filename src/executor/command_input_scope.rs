@@ -83,48 +83,37 @@ impl Executor {
     ) -> Result<Vec<SavedNumberedFd>, ExecuteError> {
         let mut saved: Vec<SavedNumberedFd> = Vec::new();
         for redirect in &cmd.redirects {
-            let Some(fd) = redirect.fd else {
-                continue;
-            };
-            if fd == 0 || redirect.fd_var.is_some() {
+            // The fd before the operator defaults like GNU: input-side
+            // redirects without an explicit number target fd 0
+            // (`{ list; } <&3` dups fd 3 onto the group's stdin).
+            let fd = redirect.fd.unwrap_or(0);
+            if redirect.fd_var.is_some() {
                 continue;
             }
             if !matches!(
                 redirect.kind,
-                crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+                crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::ReadWrite
+                    | crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::CloseInput
             ) {
                 continue;
             }
-            let target = self.expand_word(&redirect.target);
-            if is_closed_redirect_target(&target) {
+            // fd 0 `<file` stays on the FUNCTION_STDIN text channel for
+            // external-children compatibility, but `0<&N`/`0<&-` are real
+            // descriptor operations — dup_entry gives the group's fd 0 the
+            // source's open file description (shared offset) for both
+            // builtins and spawned children.
+            if fd == 0
+                && !matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::CloseInput
+                )
+            {
                 continue;
             }
-            let input = if is_null_device(&target) {
-                Vec::new()
-            } else if let Some(source) = target
-                .strip_prefix("<(")
-                .and_then(|target| target.strip_suffix(')'))
-            {
-                let Some(output) = self.process_substitution_output(source) else {
-                    continue;
-                };
-                output.into_bytes()
-            } else {
-                let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
-                if redirect.append {
-                    // Mirrors the exec path (trap_exec.rs): [N]<> opens the
-                    // file for reading and writing (redir.c r_input_output,
-                    // O_RDWR).
-                    let _ = OpenOptions::new()
-                        .create(true)
-                        .read(true)
-                        .write(true)
-                        .open(&path)
-                        .map_err(|error| crate::posix_errors::path_error(&target, error))?;
-                }
-                std::fs::read(&path)
-                    .map_err(|error| crate::posix_errors::path_error(&target, error))?
-            };
+            let target = self.expand_word(&redirect.target);
             if !saved.iter().any(|saved| saved.fd == fd) {
                 saved.push(SavedNumberedFd {
                     fd,
@@ -135,9 +124,67 @@ impl Executor {
                     fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
                 });
             }
-            self.set_fd_input_bytes(fd, input, true);
+            match redirect.kind {
+                // `{ cmd; } N<&-` / `N>&-` — scoped close (redir.c
+                // do_redirection_internal r_close_input).
+                crate::parser::RedirectKind::CloseInput => {
+                    self.fd_table.close_input(fd);
+                    self.shell_state
+                        .env_vars
+                        .insert(fd_closed_key(fd), "1".to_string());
+                    continue;
+                }
+                // `{ cmd; } N<&M` — dup2 the source descriptor into the
+                // scoped slot (e.g. `4<&0` saves stdin for the group).
+                crate::parser::RedirectKind::DuplicateInput => {
+                    if let Some((source_fd, move_source)) =
+                        redirect_target_fd_and_move(&target)
+                    {
+                        let _ = self.fd_table.dup_input(fd, source_fd);
+                        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        if move_source {
+                            self.fd_table.close(source_fd);
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            if is_closed_redirect_target(&target) {
+                continue;
+            }
+            if is_null_device(&target) {
+                self.set_fd_input_bytes(fd, Vec::new(), true);
+                if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+                    self.set_fd_readwrite_file(fd, &target, true)
+                        .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                }
+                continue;
+            }
+            if let Some(source) = target
+                .strip_prefix("<(")
+                .and_then(|target| target.strip_suffix(')'))
+            {
+                let Some(output) = self.process_substitution_output(source) else {
+                    continue;
+                };
+                self.set_fd_input_bytes(fd, output.into_bytes(), true);
+                if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+                    self.set_fd_readwrite_file(fd, &target, true)
+                        .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                }
+                continue;
+            }
+            // Real handle on the slot: [N]<> is a single O_RDWR open file
+            // description (redir.c r_input_output), otherwise O_RDONLY.
             if redirect.kind == crate::parser::RedirectKind::ReadWrite {
-                self.set_fd_output_file(fd, target, true);
+                self.set_fd_readwrite_file(fd, &target, true)
+                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+            } else {
+                let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                let file = FileFd::open_read(path)
+                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                self.set_fd_input_file(fd, file, true);
             }
         }
         Ok(saved)

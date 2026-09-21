@@ -16,21 +16,60 @@ pub(crate) struct TextInput {
     offset: usize,
 }
 
+/// A real kernel object behind a file-backed fd. `Rc`-shared across dup'd
+/// slots and fork'd (cloned) fd tables so the file offset stays shared —
+/// POSIX open file description semantics (governance doc 3.6, P6/P10).
+#[derive(Debug)]
+pub(crate) struct FileFd {
+    pub(crate) handle: crate::fd::HANDLE,
+    pub(crate) path: PathBuf,
+}
+
+impl FileFd {
+    pub(crate) fn open_read(path: PathBuf) -> std::io::Result<Rc<Self>> {
+        crate::fd::open_file_read(&path).map(|handle| {
+            Rc::new(Self { handle, path })
+        })
+    }
+
+    pub(crate) fn open_write(path: PathBuf, append: bool, create_new: bool) -> std::io::Result<Rc<Self>> {
+        let handle = if create_new {
+            crate::fd::open_file_create_new(&path)
+        } else if append {
+            crate::fd::open_file_append(&path)
+        } else {
+            crate::fd::open_file_write_trunc(&path)
+        }?;
+        Ok(Rc::new(Self { handle, path }))
+    }
+
+    pub(crate) fn open_readwrite(path: PathBuf) -> std::io::Result<Rc<Self>> {
+        crate::fd::open_file_readwrite(&path).map(|handle| {
+            Rc::new(Self { handle, path })
+        })
+    }
+}
+
+impl Drop for FileFd {
+    fn drop(&mut self) {
+        crate::fd::close_handle(self.handle);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum FdReadEndpoint {
     Text(Rc<RefCell<TextInput>>),
-    #[allow(dead_code)]
-    File(PathBuf),
+    File(Rc<FileFd>),
     InheritedProcessStdin,
     ProcessSubstitution(Rc<RefCell<TextInput>>),
     CoprocStdout(u32),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum FdWriteEndpoint {
     Stdout,
     Stderr,
-    File(PathBuf),
+    File(Rc<FileFd>),
     CoprocStdin(u32),
     ProcessSubstitution { path: PathBuf, command: String },
 }
@@ -162,40 +201,34 @@ impl FdTable {
         entry.closed = false;
     }
 
-    pub(crate) fn dup_input(&mut self, target: u32, source: u32) -> Result<(), FdError> {
-        let endpoint = self
+    /// `N<&M` / `N>&M` — POSIX dup2 semantics: the descriptor is copied
+    /// wholesale, both directions. GNU redir.c dup_redirects only uses the
+    /// operator to pick the default fd; `exec 8<&1` makes fd 8 share fd 1's
+    /// (write-only) open file description, so `echo >&8` works and
+    /// `read <&8` fails. Endpoint sharing (Rc clone) makes the kernel file
+    /// object — and its offset — common to both slots.
+    fn dup_entry(&mut self, target: u32, source: u32) -> Result<(), FdError> {
+        let (read, write) = self
             .entries
             .get(&source)
             .filter(|entry| !entry.closed)
-            .and_then(|entry| entry.read.clone())
-            .ok_or_else(|| {
-                if self.entries.contains_key(&source) {
-                    FdError::NotOpenForRead
-                } else {
-                    FdError::Closed
-                }
-            })?;
+            .filter(|entry| entry.read.is_some() || entry.write.is_some())
+            .map(|entry| (entry.read.clone(), entry.write.clone()))
+            .ok_or(FdError::Closed)?;
         let dynamic = self.is_dynamic(target);
-        self.open_input(target, endpoint, dynamic);
+        let entry = self.entry_mut(target, dynamic);
+        entry.read = read;
+        entry.write = write;
+        entry.closed = false;
         Ok(())
     }
 
+    pub(crate) fn dup_input(&mut self, target: u32, source: u32) -> Result<(), FdError> {
+        self.dup_entry(target, source)
+    }
+
     pub(crate) fn dup_output(&mut self, target: u32, source: u32) -> Result<(), FdError> {
-        let endpoint = self
-            .entries
-            .get(&source)
-            .filter(|entry| !entry.closed)
-            .and_then(|entry| entry.write.clone())
-            .ok_or_else(|| {
-                if self.entries.contains_key(&source) {
-                    FdError::NotOpenForWrite
-                } else {
-                    FdError::Closed
-                }
-            })?;
-        let dynamic = self.is_dynamic(target);
-        self.open_output(target, endpoint, dynamic);
-        Ok(())
+        self.dup_entry(target, source)
     }
 
     #[allow(dead_code)]
@@ -243,6 +276,15 @@ impl FdTable {
             .map_or(false, |entry| !entry.closed && entry.write.is_some())
     }
 
+    /// Open in either direction — POSIX descriptors are not directional.
+    pub(crate) fn is_open(&self, fd: u32) -> bool {
+        self.entries
+            .get(&fd)
+            .map_or(false, |entry| {
+                !entry.closed && (entry.read.is_some() || entry.write.is_some())
+            })
+    }
+
     pub(crate) fn is_closed(&self, fd: u32) -> bool {
         self.entries.get(&fd).map_or(false, |entry| entry.closed)
     }
@@ -288,6 +330,9 @@ impl FdTable {
         exact: bool,
     ) -> Option<Vec<u8>> {
         let endpoint = self.entries.get(&fd)?.read.clone()?;
+        if let FdReadEndpoint::File(file) = endpoint {
+            return self.read_file_bytes(file, delimiter, char_limit, exact);
+        }
         let input = match endpoint {
             FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input) => input,
             _ => return None,
@@ -333,8 +378,66 @@ impl FdTable {
             .map(|bytes| bytes_to_shell_text(&bytes))
     }
 
+    /// Byte-wise ReadFile loop for handle-backed endpoints. Reads exactly
+    /// up to the delimiter / character limit without over-consuming — the
+    /// offset is shared across every duplicate of this file object, so
+    /// prefetching would steal bytes from sibling slots (GNU zread reads
+    /// one byte at a time off unbuffered fds for the same reason).
+    fn read_file_bytes(
+        &self,
+        file: Rc<FileFd>,
+        delimiter: u8,
+        char_limit: Option<usize>,
+        exact: bool,
+    ) -> Option<Vec<u8>> {
+        if char_limit == Some(0) {
+            return Some(Vec::new());
+        }
+        let mut result = Vec::new();
+        let mut chars = 0usize;
+        let mut consumed = false;
+        loop {
+            let byte = match crate::fd::read_some(file.handle, 1) {
+                Ok(buf) if buf.is_empty() => break,          // EOF
+                Ok(buf) => buf[0],
+                Err(_) => break,
+            };
+            consumed = true;
+            let mut keep = true;
+            if !exact && byte == delimiter {
+                keep = false; // delimiter is consumed but not returned
+            }
+            if byte & 0xc0 != 0x80 {
+                chars += 1;
+            }
+            if keep {
+                result.push(byte);
+            }
+            if !keep || char_limit.is_some_and(|limit| chars >= limit) {
+                break;
+            }
+        }
+        // EOF with zero bytes read must surface as None — `read` at EOF
+        // exits 1, distinct from an empty line (delimiter consumed).
+        if !consumed {
+            return None;
+        }
+        Some(result)
+    }
+
     pub(crate) fn read_all_bytes(&mut self, fd: u32) -> Option<Vec<u8>> {
         let endpoint = self.entries.get(&fd)?.read.clone()?;
+        if let FdReadEndpoint::File(file) = endpoint {
+            let mut out = Vec::new();
+            loop {
+                match crate::fd::read_some(file.handle, 8192) {
+                    Ok(buf) if buf.is_empty() => break,
+                    Ok(buf) => out.extend_from_slice(&buf),
+                    Err(_) => break,
+                }
+            }
+            return Some(out);
+        }
         let input = match endpoint {
             FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input) => input,
             _ => return None,
@@ -347,6 +450,10 @@ impl FdTable {
 
     pub(crate) fn consume_all_text(&mut self, fd: u32) -> Option<usize> {
         let endpoint = self.entries.get(&fd)?.read.clone()?;
+        if let FdReadEndpoint::File(file) = endpoint {
+            let _ = crate::fd::seek_end(file.handle);
+            return None;
+        }
         let input = match endpoint {
             FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input) => input,
             _ => return None,
@@ -377,6 +484,30 @@ impl FdTable {
     /// (input.c bash_input). Returns `None` when the fd is not a buffered
     /// text endpoint, `Some(vec![])` at end of the buffer.
     pub(crate) fn take_buffered_input_line(&self, fd: u32) -> Option<Vec<u8>> {
+        if let Some(FdReadEndpoint::File(file)) = self
+            .entries
+            .get(&fd)
+            .filter(|entry| !entry.closed)
+            .and_then(|entry| entry.read.clone())
+        {
+            let mut line = Vec::new();
+            loop {
+                match crate::fd::read_some(file.handle, 1) {
+                    Ok(buf) if buf.is_empty() => break,
+                    Ok(buf) => {
+                        line.push(buf[0]);
+                        if buf[0] == b'\n' {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if line.is_empty() {
+                return None;
+            }
+            return Some(line);
+        }
         let input = match self
             .entries
             .get(&fd)
@@ -417,7 +548,7 @@ impl FdTable {
                         let input = input.borrow();
                         MaterializedRead::Bytes(input.data[input.offset..].to_vec())
                     }
-                    FdReadEndpoint::File(path) => MaterializedRead::File(path.clone()),
+                    FdReadEndpoint::File(file) => MaterializedRead::File(file.path.clone()),
                     FdReadEndpoint::InheritedProcessStdin => {
                         MaterializedRead::InheritedProcessStdin
                     }
@@ -426,7 +557,7 @@ impl FdTable {
                 let write = entry.write.as_ref().map(|endpoint| match endpoint {
                     FdWriteEndpoint::Stdout => MaterializedWrite::Stdout,
                     FdWriteEndpoint::Stderr => MaterializedWrite::Stderr,
-                    FdWriteEndpoint::File(path) => MaterializedWrite::File(path.clone()),
+                    FdWriteEndpoint::File(file) => MaterializedWrite::File(file.path.clone()),
                     FdWriteEndpoint::CoprocStdin(pid) => MaterializedWrite::CoprocStdin(*pid),
                     FdWriteEndpoint::ProcessSubstitution { path, command } => {
                         MaterializedWrite::ProcessSubstitution {
@@ -451,6 +582,34 @@ impl FdTable {
 
     fn occupied(entry: &FdEntry) -> bool {
         !entry.closed && (entry.read.is_some() || entry.write.is_some())
+    }
+}
+
+impl PartialEq for FdReadEndpoint {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Text(a), Self::Text(b)) => Rc::ptr_eq(a, b),
+            (Self::File(a), Self::File(b)) => Rc::ptr_eq(a, b),
+            (Self::InheritedProcessStdin, Self::InheritedProcessStdin) => true,
+            (Self::ProcessSubstitution(a), Self::ProcessSubstitution(b)) => Rc::ptr_eq(a, b),
+            (Self::CoprocStdout(a), Self::CoprocStdout(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq for FdWriteEndpoint {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stdout, Self::Stdout) | (Self::Stderr, Self::Stderr) => true,
+            (Self::File(a), Self::File(b)) => Rc::ptr_eq(a, b),
+            (Self::CoprocStdin(a), Self::CoprocStdin(b)) => a == b,
+            (
+                Self::ProcessSubstitution { path: p1, command: c1 },
+                Self::ProcessSubstitution { path: p2, command: c2 },
+            ) => p1 == p2 && c1 == c2,
+            _ => false,
+        }
     }
 }
 

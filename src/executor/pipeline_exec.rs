@@ -153,8 +153,12 @@ impl Executor {
             let mut body = brace_group.body.clone();
             self.apply_brace_group_redirects(&redirect_command, &mut body)?;
             let ast = Ast { commands: body };
-            let result =
-                self.with_command_input_redirects(command, |executor| executor.execute_ast(&ast));
+            // `{ list; } N<<EOF` keeps the numbered heredoc fd open for the
+            // whole group (redir.c do_redirection_internal applies compound
+            // redirections once), like with_loop_fd_heredocs does for loops.
+            let result = self.with_loop_fd_heredocs(command, |executor| {
+                executor.with_command_input_redirects(command, |executor| executor.execute_ast(&ast))
+            });
             // GNU Bash 5.2 (probes y1/y3, 2026-08-24): a word-expansion failure
             // inside a brace group ends only the group tail. The command
             // following the group still runs with the carried status.

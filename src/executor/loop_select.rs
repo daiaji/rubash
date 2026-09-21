@@ -237,7 +237,10 @@ impl Executor {
         // console even inside a pipeline).
         if let Some(fd) = dev_stdio_redirect_fd(&target) {
             return match self.fd_table.read_endpoint(fd) {
-                Some(FdReadEndpoint::File(path)) => fs::read_to_string(&path).ok(),
+                Some(FdReadEndpoint::File(_)) => self
+                    .fd_table
+                    .read_all_bytes(fd)
+                    .map(|bytes| bytes_to_shell_text(&bytes)),
                 Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
                     self.virtual_fd_stdin_remaining(fd)
                 }

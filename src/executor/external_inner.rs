@@ -647,8 +647,13 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         match process.spawn() {
             Ok(mut child) => {
-                if let Some(input) = self.stdin_string_for_command_mut(cmd) {
-                    if let Some(mut stdin) = child.stdin.take() {
+                // Only materialize the virtual stdin text when the child
+                // actually owns a pipe — `<&N` on a real file handle uses
+                // Stdio::from(dup) (no child.stdin to take), and draining
+                // the fd to build a dropped string would corrupt the shared
+                // offset.
+                if let Some(mut stdin) = child.stdin.take() {
+                    if let Some(input) = self.stdin_string_for_command_mut(cmd) {
                         // The input is shell text: raw-byte marker pairs
                         // (heredoc bodies, expanded bytes) must decode to
                         // real bytes for the child (GNU writes fd bytes).

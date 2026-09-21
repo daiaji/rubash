@@ -164,7 +164,11 @@ impl Executor {
         // present for external setup, but must not reset a shell read to offset 0.
         if matches!(
             self.fd_table.read_endpoint(0),
-            Some(FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_))
+            Some(
+                FdReadEndpoint::Text(_)
+                    | FdReadEndpoint::ProcessSubstitution(_)
+                    | FdReadEndpoint::File(_)
+            )
         ) {
             if let Some(line) =
                 self.read_virtual_fd_stdin(0, delimiter, char_limit, exact_char_limit)
