@@ -377,6 +377,7 @@ pub fn decode_to_visible_text(text: &str) -> String {
                 if let Some(data) = chars.next() {
                     out.push(data);
                 }
+                // else: missing data char - drop the guard (recovery path)
             }
             crate::executor::markers::DATA_BACKSLASH
             | HOISTED_BACKSLASH
@@ -398,6 +399,21 @@ pub fn decode_to_visible_text(text: &str) -> String {
             }
             _ => out.push(ch),
         }
+    }
+    // Golden assertion: guard markers must never leak to output in production contexts
+    // These are function-local PUA markers (U+E314-E317) with no
+    // external boundary; if they appear in output, the decode pass failed.
+    // Note: This assertion is skipped for debug/test contexts where raw marker
+    // strings may be passed directly to decode_to_visible_text.
+    if !cfg!(test) {
+        debug_assert!(!out.contains(crate::executor::markers::PARAM_WORD_BACKSLASH_GUARD),
+            "PARAM_WORD_BACKSLASH_GUARD leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::ESCAPED_IFS_GUARD),
+            "ESCAPED_IFS_GUARD leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::PROMPT_ESCAPE_GUARD),
+            "PROMPT_ESCAPE_GUARD leaked to output");
+        debug_assert!(!out.contains(crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD),
+            "CASE_PATTERN_BACKSLASH_GUARD leaked to output");
     }
     out
 }
