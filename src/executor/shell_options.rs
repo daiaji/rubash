@@ -862,9 +862,15 @@ impl Executor {
                 // handle — a terminal blocks, matching GNU; a null/closed
                 // stdin yields EOF.
                 if let Ok(mut file) = self.open_fd_read_endpoint(source_fd, &target) {
-                    let mut buf = String::new();
-                    let _ = file.read_to_string(&mut buf);
-                    return Some(buf);
+                    // Raw fd bytes are not necessarily UTF-8 (fd_redirects
+                    // c_external_cat_reads_raw_bytes: `exec 3<bin; cat <&3`
+                    // must stream 0xff through). Read bytes and re-encode to
+                    // shell text; callers decode on the way out.
+                    let mut buf = Vec::new();
+                    let _ = file.read_to_end(&mut buf);
+                    return Some(
+                        crate::executor::substitution_metadata::bytes_to_shell_text(&buf),
+                    );
                 }
                 return None;
             }
