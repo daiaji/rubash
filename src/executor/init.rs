@@ -98,6 +98,52 @@ impl Executor {
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or_else(std::process::id);
         env_vars.remove("__RUBASH_SHELL_PID");
+
+        // Forked-child fd table restore: a `rubash -c` background/subshell
+        // child inherits the parent's fd>=3 File endpoints through the
+        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST whitelist; the inherited handle
+        // values arrive in __RUBASH_FD_* env keys (see
+        // execute_background_ast_command). GNU execute_cmd.c
+        // execute_in_subshell: fork copies the whole fd table. Collect and
+        // strip the keys here so they never surface as shell variables.
+        let mut inherited_fd_handles: BTreeMap<
+            u32,
+            (
+                Option<crate::fd::HANDLE>,
+                Option<crate::fd::HANDLE>,
+                Option<String>,
+            ),
+        > = BTreeMap::new();
+        env_vars.retain(|key, value| {
+            let (is_write, num) = if let Some(num) = key.strip_prefix("__RUBASH_FD_HANDLE_") {
+                (false, num)
+            } else if let Some(num) = key.strip_prefix("__RUBASH_FD_WHANDLE_") {
+                (true, num)
+            } else if let Some(num) = key.strip_prefix("__RUBASH_FD_PATH_") {
+                if let Ok(fd) = num.parse::<u32>() {
+                    inherited_fd_handles.entry(fd).or_default().2 = Some(value.clone());
+                }
+                std::env::remove_var(key);
+                return false;
+            } else if let Some(num) = key.strip_prefix("__RUBASH_FD_WPATH_") {
+                std::env::remove_var(key);
+                return false;
+            } else {
+                return true;
+            };
+            if let Ok(fd) = num.parse::<u32>() {
+                let handle =
+                    isize::from_str_radix(value.trim_start_matches("0x"), 16).ok();
+                let entry = inherited_fd_handles.entry(fd).or_default();
+                if is_write {
+                    entry.1 = handle;
+                } else {
+                    entry.0 = handle;
+                }
+            }
+            std::env::remove_var(key);
+            false
+        });
         let owns_signal_mailbox =
             if env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) == Some("1") {
                 // A blocked coprocess reader cannot consume a queued TERM.
@@ -106,7 +152,7 @@ impl Executor {
                 crate::builtins::kill::register_signal_mailbox(std::process::id()).is_ok()
             };
 
-        Self {
+        let mut executor = Self {
             shell_state: ShellState {
                 variables: VariableStore::from_environment(&env_vars),
                 env_vars,
@@ -201,7 +247,39 @@ impl Executor {
             external_file_builtins_enabled: true,
             process_env_snapshot,
             history_provider: None,
+        };
+        for (fd, (read_h, write_h, path)) in inherited_fd_handles {
+            let path = PathBuf::from(path.unwrap_or_default());
+            let read_rc = read_h.map(|handle| {
+                Rc::new(FileFd {
+                    handle,
+                    path: path.clone(),
+                })
+            });
+            let write_rc = match write_h {
+                Some(handle) => match &read_rc {
+                    // Same handle value: parent's read/write endpoints
+                    // shared one open file description — keep it shared.
+                    Some(rc) if rc.handle == handle => Some(rc.clone()),
+                    _ => Some(Rc::new(FileFd {
+                        handle,
+                        path: path.clone(),
+                    })),
+                },
+                None => None,
+            };
+            if let Some(rc) = read_rc {
+                executor
+                    .fd_table
+                    .open_input(fd, FdReadEndpoint::File(rc), false);
+            }
+            if let Some(rc) = write_rc {
+                executor
+                    .fd_table
+                    .open_output(fd, FdWriteEndpoint::File(rc), false);
+            }
         }
+        executor
     }
 
     /// Finalizes an env_vars map into a fresh shell's variable environment:

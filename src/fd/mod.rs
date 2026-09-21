@@ -488,6 +488,461 @@ pub fn handle_to_file(h: HANDLE) -> std::fs::File {
     })
 }
 
+/// `N>&M` dup that also marks the duplicate inheritable — a fresh handle we
+/// own, so the shared slot handle's inherit flag is never mutated (no
+/// cross-thread spawn race).
+pub fn duplicate_handle_inheritable(h: HANDLE) -> std::io::Result<HANDLE> {
+    let mut target: HANDLE = 0;
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            h,
+            GetCurrentProcess(),
+            &mut target,
+            0,
+            1,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(target)
+}
+
+/// Our own std handle for `fd` (0/1/2). Returns INVALID_HANDLE_VALUE/0 when
+/// the process has no console std handle (GUI subsystem).
+pub fn process_std_handle(fd: u32) -> HANDLE {
+    const STD_INPUT_HANDLE: DWORD = 0xFFFF_FFF6;
+    const STD_OUTPUT_HANDLE: DWORD = 0xFFFF_FFF5;
+    const STD_ERROR_HANDLE: DWORD = 0xFFFF_FFF4;
+    extern "system" {
+        fn GetStdHandle(n: DWORD) -> HANDLE;
+    }
+    let n = match fd {
+        0 => STD_INPUT_HANDLE,
+        1 => STD_OUTPUT_HANDLE,
+        _ => STD_ERROR_HANDLE,
+    };
+    unsafe { GetStdHandle(n) }
+}
+
+/// `NUL` device handle (child stdio for a null-redirected fd).
+pub fn open_null_device() -> std::io::Result<HANDLE> {
+    let h = unsafe {
+        CreateFileW(
+            to_wide("NUL").as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            0,
+        )
+    };
+    if h == INVALID_HANDLE_VALUE || h == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(h)
+}
+
+/// Inheritable `NUL` handle — HANDLE_LIST entries must carry
+/// HANDLE_FLAG_INHERIT, which sa=null does not set.
+pub fn open_null_device_inheritable() -> std::io::Result<HANDLE> {
+    let mut sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as DWORD,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    let h = unsafe {
+        CreateFileW(
+            to_wide("NUL").as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &mut sa as *mut SECURITY_ATTRIBUTES as *const c_void,
+            OPEN_EXISTING,
+            0,
+            0,
+        )
+    };
+    if h == INVALID_HANDLE_VALUE || h == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(h)
+}
+
+// ---------------------------------------------------------------------------
+// STARTUPINFOEXW spawn (governance 3.6 step 3): pass a whitelist of
+// inheritable handles to the child via PROC_THREAD_ATTRIBUTE_HANDLE_LIST so
+// `rubash -c` children see the parent's fd table instead of inheriting every
+// inheritable handle in the process.
+// ---------------------------------------------------------------------------
+
+const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x0008_0000;
+const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
+const STARTF_USESTDHANDLES: DWORD = 0x0000_0100;
+const CREATE_UNICODE_ENVIRONMENT: DWORD = 0x0000_0400;
+
+#[repr(C)]
+struct STARTUPINFOW {
+    cb: DWORD,
+    lpReserved: *mut u16,
+    lpDesktop: *mut u16,
+    lpTitle: *mut u16,
+    dwX: DWORD,
+    dwY: DWORD,
+    dwXSize: DWORD,
+    dwYSize: DWORD,
+    dwXCountChars: DWORD,
+    dwYCountChars: DWORD,
+    dwFillAttribute: DWORD,
+    dwFlags: DWORD,
+    wShowWindow: u16,
+    cbReserved2: u16,
+    lpReserved2: *mut u8,
+    hStdInput: HANDLE,
+    hStdOutput: HANDLE,
+    hStdError: HANDLE,
+}
+
+#[repr(C)]
+struct STARTUPINFOEXW {
+    si: STARTUPINFOW,
+    attr: *mut c_void,
+}
+
+#[repr(C)]
+struct PROCESS_INFORMATION {
+    hProcess: HANDLE,
+    hThread: HANDLE,
+    dwProcessId: DWORD,
+    dwThreadId: DWORD,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateProcessW(
+        app: *const u16,
+        cmd: *mut u16,
+        pa: *const c_void,
+        ta: *const c_void,
+        inherit: BOOL,
+        flags: DWORD,
+        env: *const c_void,
+        dir: *const u16,
+        si: *const STARTUPINFOW,
+        pi: *mut PROCESS_INFORMATION,
+    ) -> BOOL;
+    fn InitializeProcThreadAttributeList(
+        list: *mut c_void,
+        count: DWORD,
+        flags: DWORD,
+        size: *mut usize,
+    ) -> BOOL;
+    fn UpdateProcThreadAttribute(
+        list: *mut c_void,
+        flags: DWORD,
+        attr: usize,
+        value: *mut c_void,
+        size: usize,
+        prev: *mut c_void,
+        ret_size: *mut usize,
+    ) -> BOOL;
+    fn DeleteProcThreadAttributeList(list: *mut c_void);
+}
+
+/// Everything needed to spawn a child whose inherited handles are exactly
+/// `std_handles` + `extra_handles`.
+pub struct WhitelistedSpawn {
+    /// Program image path (passed as lpApplicationName).
+    pub program: std::path::PathBuf,
+    /// Arguments (excluding argv[0]); joined with msvcrt quoting.
+    pub args: Vec<String>,
+    /// Complete environment block contents.
+    pub env: Vec<(String, String)>,
+    /// Child stdin/stdout/stderr (hStdInput/Output/Error).
+    pub std_handles: [HANDLE; 3],
+    /// Extra handles the child inherits at the same numeric values.
+    pub extra_handles: Vec<HANDLE>,
+}
+
+fn push_quoted_arg(cmdline: &mut Vec<u16>, arg: &str) {
+    // msvcrt argument quoting (same rules std::process::Command applies).
+    let needs_quotes =
+        arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
+    if !needs_quotes {
+        cmdline.extend(arg.encode_utf16());
+        return;
+    }
+    cmdline.push('"' as u16);
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..(backslashes * 2 + 1) {
+                    cmdline.push('\\' as u16);
+                }
+                backslashes = 0;
+                cmdline.push('"' as u16);
+            }
+            _ => {
+                for _ in 0..backslashes {
+                    cmdline.push('\\' as u16);
+                }
+                backslashes = 0;
+                cmdline.extend(c.to_string().encode_utf16());
+            }
+        }
+    }
+    for _ in 0..(backslashes * 2) {
+        cmdline.push('\\' as u16);
+    }
+    cmdline.push('"' as u16);
+}
+
+/// Spawn `spec.program` with exactly the whitelisted handles inheritable.
+/// All handles in `std_handles`/`extra_handles` must be marked inheritable
+/// (use `duplicate_handle_inheritable` / `open_null_device`); a
+/// non-inheritable entry makes CreateProcessW fail with
+/// ERROR_INVALID_PARAMETER. Ownership of the handles stays with the caller —
+/// close them after the child has spawned.
+pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChild> {
+    let mut cmdline: Vec<u16> = Vec::new();
+    push_quoted_arg(&mut cmdline, &spec.program.to_string_lossy());
+    for arg in &spec.args {
+        cmdline.push(' ' as u16);
+        push_quoted_arg(&mut cmdline, arg);
+    }
+    cmdline.push(0);
+
+    let program_w = to_wide(&spec.program.to_string_lossy());
+
+    let mut env_pairs: Vec<(String, String)> = spec.env.clone();
+    // The Unicode environment block must be sorted (case-insensitive).
+    env_pairs.sort_by(|a, b| a.0.to_uppercase().cmp(&b.0.to_uppercase()));
+    let mut env_block: Vec<u16> = Vec::new();
+    for (k, v) in &env_pairs {
+        env_block.extend(format!("{k}={v}").encode_utf16());
+        env_block.push(0);
+    }
+    env_block.push(0);
+
+    // Whitelist = std handles + extras, deduplicated.
+    let mut handles: Vec<HANDLE> = Vec::new();
+    for h in spec
+        .std_handles
+        .iter()
+        .copied()
+        .chain(spec.extra_handles.iter().copied())
+    {
+        if h == 0 || h == INVALID_HANDLE_VALUE || handles.contains(&h) {
+            continue;
+        }
+        handles.push(h);
+    }
+
+    // Raw attribute list — the HANDLE_LIST value must be a bare HANDLE[]
+    // buffer (passing a Vec's address would serialize ptr/len/cap).
+    let mut attr_size: usize = 0;
+    unsafe {
+        let _ = InitializeProcThreadAttributeList(
+            std::ptr::null_mut(),
+            1,
+            0,
+            &mut attr_size,
+        );
+    }
+    let attr_buf = unsafe {
+        std::alloc::alloc(std::alloc::Layout::from_size_align(attr_size.max(1), 16).unwrap())
+    };
+    if attr_buf.is_null() {
+        return Err(std::io::Error::new(std::io::ErrorKind::OutOfMemory, "attr list"));
+    }
+    if unsafe {
+        InitializeProcThreadAttributeList(attr_buf as _, 1, 0, &mut attr_size)
+    } == 0
+    {
+        unsafe {
+            std::alloc::dealloc(
+                attr_buf,
+                std::alloc::Layout::from_size_align(attr_size.max(1), 16).unwrap(),
+            )
+        };
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe {
+        UpdateProcThreadAttribute(
+            attr_buf as _,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            handles.as_mut_ptr() as _,
+            std::mem::size_of::<HANDLE>() * handles.len(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        unsafe {
+            DeleteProcThreadAttributeList(attr_buf as _);
+            std::alloc::dealloc(
+                attr_buf,
+                std::alloc::Layout::from_size_align(attr_size.max(1), 16).unwrap(),
+            );
+        }
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    si.si.cb = std::mem::size_of::<STARTUPINFOEXW>() as DWORD;
+    si.si.dwFlags = STARTF_USESTDHANDLES;
+    si.si.hStdInput = spec.std_handles[0];
+    si.si.hStdOutput = spec.std_handles[1];
+    si.si.hStdError = spec.std_handles[2];
+    si.attr = attr_buf as _;
+
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        CreateProcessW(
+            program_w.as_ptr(),
+            cmdline.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            env_block.as_ptr() as _,
+            std::ptr::null(),
+            &si.si,
+            &mut pi,
+        )
+    };
+    unsafe {
+        DeleteProcThreadAttributeList(attr_buf as _);
+        std::alloc::dealloc(
+            attr_buf,
+            std::alloc::Layout::from_size_align(attr_size.max(1), 16).unwrap(),
+        );
+    }
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    unsafe {
+        CloseHandle(pi.hThread);
+    }
+    use std::os::windows::io::FromRawHandle;
+    let owned = unsafe {
+        std::os::windows::io::OwnedHandle::from_raw_handle(
+            pi.hProcess as std::os::windows::io::RawHandle,
+        )
+    };
+    Ok(SpawnedChild {
+        inner: SpawnedChildInner::Whitelisted {
+            process: owned,
+            pid: pi.dwProcessId,
+        },
+    })
+}
+
+/// Process handle for a spawned child — either a std::process::Child
+/// (Command path) or a raw process handle from `spawn_whitelisted`
+/// (STARTUPINFOEXW path; stable Rust cannot wrap a raw handle in `Child`).
+#[derive(Debug)]
+pub struct SpawnedChild {
+    inner: SpawnedChildInner,
+}
+
+#[derive(Debug)]
+enum SpawnedChildInner {
+    Std(std::process::Child),
+    Whitelisted {
+        process: std::os::windows::io::OwnedHandle,
+        pid: u32,
+    },
+}
+
+impl SpawnedChild {
+    pub fn id(&self) -> u32 {
+        match &self.inner {
+            SpawnedChildInner::Std(child) => child.id(),
+            SpawnedChildInner::Whitelisted { pid, .. } => *pid,
+        }
+    }
+
+    fn whitelisted_status(
+        process: &std::os::windows::io::OwnedHandle,
+        timeout_ms: DWORD,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::ExitStatusExt;
+        extern "system" {
+            fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD;
+            fn GetExitCodeProcess(h: HANDLE, code: *mut DWORD) -> BOOL;
+        }
+        const WAIT_OBJECT_0: DWORD = 0;
+        const WAIT_TIMEOUT: DWORD = 0x102;
+        let raw = process.as_raw_handle() as HANDLE;
+        let r = unsafe { WaitForSingleObject(raw, timeout_ms) };
+        match r {
+            WAIT_OBJECT_0 => {
+                let mut code: DWORD = 0;
+                if unsafe { GetExitCodeProcess(raw, &mut code) } == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(Some(std::process::ExitStatus::from_raw(code)))
+            }
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match &mut self.inner {
+            SpawnedChildInner::Std(child) => child.try_wait(),
+            SpawnedChildInner::Whitelisted { process, .. } => {
+                Self::whitelisted_status(process, 0)
+            }
+        }
+    }
+
+    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match &mut self.inner {
+            SpawnedChildInner::Std(child) => child.wait(),
+            SpawnedChildInner::Whitelisted { process, .. } => {
+                Ok(Self::whitelisted_status(process, 0xFFFF_FFFF)?
+                    .unwrap_or_else(|| {
+                        use std::os::windows::process::ExitStatusExt;
+                        std::process::ExitStatus::from_raw(1)
+                    }))
+            }
+        }
+    }
+
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        match &mut self.inner {
+            SpawnedChildInner::Std(child) => child.kill(),
+            SpawnedChildInner::Whitelisted { process, .. } => {
+                use std::os::windows::io::AsRawHandle;
+                extern "system" {
+                    fn TerminateProcess(h: HANDLE, code: DWORD) -> BOOL;
+                }
+                let raw = process.as_raw_handle() as HANDLE;
+                if unsafe { TerminateProcess(raw, 1) } == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl From<std::process::Child> for SpawnedChild {
+    fn from(child: std::process::Child) -> Self {
+        Self {
+            inner: SpawnedChildInner::Std(child),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -84,62 +84,9 @@ impl Clone for BackgroundStdio {
     }
 }
 
-/// Spawn `command` with this process's std handles made non-inheritable for
-/// every fd whose child disposition is not "inherit" (see the niubash#122
-/// comment at the call site). On non-Windows hosts Command already passes
-/// only the configured stdio through fork+exec, so this is a plain spawn.
-#[cfg(windows)]
-fn spawn_with_isolated_std_handles(
-    command: &mut Command,
-    keep_std_handle: [bool; 3],
-) -> io::Result<std::process::Child> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::{
-        GetHandleInformation, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
-        INVALID_HANDLE_VALUE,
-    };
 
-    let std_handles: [HANDLE; 3] = [
-        std::io::stdin().as_raw_handle() as HANDLE,
-        std::io::stdout().as_raw_handle() as HANDLE,
-        std::io::stderr().as_raw_handle() as HANDLE,
-    ];
-    let mut toggled: Vec<(HANDLE, u32)> = Vec::new();
-    for (index, handle) in std_handles.iter().copied().enumerate() {
-        if keep_std_handle[index] || handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            continue;
-        }
-        let mut flags = 0u32;
-        // SAFETY: handle is one of this process's live std handles;
-        // GetHandleInformation/SetHandleInformation only touch this
-        // process's handle table.
-        unsafe {
-            if GetHandleInformation(handle, &mut flags) == 0 || flags & HANDLE_FLAG_INHERIT == 0 {
-                continue;
-            }
-            if SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) == 0 {
-                continue;
-            }
-        }
-        toggled.push((handle, flags));
-    }
-    let result = command.spawn();
-    for (handle, flags) in toggled {
-        // SAFETY: restoring the flag set observed before the spawn.
-        unsafe {
-            SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags & HANDLE_FLAG_INHERIT);
-        }
-    }
-    result
-}
 
-#[cfg(not(windows))]
-fn spawn_with_isolated_std_handles(
-    command: &mut Command,
-    _keep_std_handle: [bool; 3],
-) -> io::Result<std::process::Child> {
-    command.spawn()
-}
+
 
 /// Drop redirections already consumed as spawn-time stdio from the command
 /// that gets serialized into the background child's `-c` source — GNU's
@@ -287,10 +234,13 @@ impl Executor {
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
         let display_source = bash_command_source_text(&background_command.command);
-        let mut child = Command::new(&exe);
+        // Environment block for the child: process env merged with the
+        // shell's env_vars (same filter the old Command::env loop applied).
+        let mut env_map: std::collections::BTreeMap<String, String> =
+            std::env::vars().collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
-                child.env(key, value);
+                env_map.insert(key.clone(), value.clone());
             }
         }
         // POSIX 2.11 (Signals and Error Handling): caught traps reset to
@@ -304,13 +254,17 @@ impl Executor {
         // original_signals -> SIG_HARD_IGNORE), so __RUBASH_TRAP_ORIG_IGN is
         // forwarded above and must survive this reset filter.
         for key in self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .keys()
             .filter(|key| key.starts_with("__RUBASH_TRAP") && *key != "__RUBASH_TRAP_ORIG_IGN")
         {
-            child.env_remove(key);
+            env_map.remove(key);
         }
-        child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
+        env_map.insert(
+            "__RUBASH_SHELL_PID".to_string(),
+            self.shell_pid.to_string(),
+        );
 
         // GNU execute_cmd.c:5884 (execute_disk_command) / :1761-1763
         // (execute_in_subshell): the forked async subshell runs
@@ -329,44 +283,102 @@ impl Executor {
         let mut child_command = background_command.command.clone();
         strip_consumed_redirects(&mut child_command, &consumed);
         let source = self.background_command_source(&child_command);
-        child.arg("-c").arg(&source);
-        let keep_std_handle = [
-            matches!(stdio[0], BackgroundStdio::Inherit),
-            matches!(stdio[1], BackgroundStdio::Inherit),
-            matches!(stdio[2], BackgroundStdio::Inherit),
-        ];
-        for (fd, resolved) in stdio.into_iter().enumerate() {
-            let stdio = match resolved {
-                BackgroundStdio::Inherit => Stdio::inherit(),
-                BackgroundStdio::Null => Stdio::null(),
-                BackgroundStdio::File(file) => Stdio::from(file),
+
+        // GNU forks the async subshell: the child's fd table is a copy of the
+        // parent's. std::process::Command cannot express a per-spawn handle
+        // allowlist (its anonymous inherit-everything spawn leaked this
+        // shell's pipe write ends — niubash#122 — and the flag-flip
+        // workaround both raced other spawns and could not carry fd>=3
+        // across), so resolve each stdio disposition to an owned inheritable
+        // HANDLE and spawn through STARTUPINFOEXW +
+        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST (src/fd::spawn_whitelisted).
+        use std::os::windows::io::AsRawHandle;
+        let mut owned_handles: Vec<crate::fd::HANDLE> = Vec::new();
+        let mut std_handles = [0isize; 3];
+        for (fd, resolved) in stdio.iter().enumerate() {
+            let h = match resolved {
+                BackgroundStdio::Inherit => {
+                    let src = crate::fd::process_std_handle(fd as u32);
+                    if src == 0 || src == -1 {
+                        crate::fd::open_null_device_inheritable()?
+                    } else {
+                        crate::fd::duplicate_handle_inheritable(src)?
+                    }
+                }
+                BackgroundStdio::Null => crate::fd::open_null_device_inheritable()?,
+                BackgroundStdio::File(file) => crate::fd::duplicate_handle_inheritable(
+                    file.as_raw_handle() as crate::fd::HANDLE,
+                )?,
             };
-            match fd {
-                0 => {
-                    child.stdin(stdio);
-                }
-                1 => {
-                    child.stdout(stdio);
-                }
-                _ => {
-                    child.stderr(stdio);
-                }
+            owned_handles.push(h);
+            std_handles[fd] = h;
+        }
+
+        // fd>=3 File endpoints ride the whitelist too: each is duplicated to
+        // a fresh inheritable handle (the shared slot handle's inherit flag
+        // is never touched, so concurrent spawns cannot race) and the child
+        // learns the fd->handle binding through __RUBASH_FD_* env keys.
+        let mut extra_handles: Vec<crate::fd::HANDLE> = Vec::new();
+        let mut fd_shared_dups: HashMap<usize, crate::fd::HANDLE> = HashMap::new();
+        for (fd, entry) in &self.fd_table.entries {
+            if *fd < 3 || entry.closed {
+                continue;
+            }
+            if let Some(FdReadEndpoint::File(f)) = &entry.read {
+                let key = Rc::as_ptr(f) as usize;
+                let dup = match fd_shared_dups.get(&key) {
+                    Some(&h) => h,
+                    None => {
+                        let dup = crate::fd::duplicate_handle_inheritable(f.handle)?;
+                        fd_shared_dups.insert(key, dup);
+                        extra_handles.push(dup);
+                        owned_handles.push(dup);
+                        dup
+                    }
+                };
+                env_map.insert(
+                    format!("__RUBASH_FD_HANDLE_{fd}"),
+                    format!("{:#x}", dup),
+                );
+                env_map.insert(
+                    format!("__RUBASH_FD_PATH_{fd}"),
+                    f.path.to_string_lossy().into_owned(),
+                );
+            }
+            if let Some(FdWriteEndpoint::File(f)) = &entry.write {
+                let key = Rc::as_ptr(f) as usize;
+                let dup = match fd_shared_dups.get(&key) {
+                    Some(&h) => h,
+                    None => {
+                        let dup = crate::fd::duplicate_handle_inheritable(f.handle)?;
+                        fd_shared_dups.insert(key, dup);
+                        extra_handles.push(dup);
+                        owned_handles.push(dup);
+                        dup
+                    }
+                };
+                env_map.insert(
+                    format!("__RUBASH_FD_WHANDLE_{fd}"),
+                    format!("{:#x}", dup),
+                );
+                env_map.insert(
+                    format!("__RUBASH_FD_WPATH_{fd}"),
+                    f.path.to_string_lossy().into_owned(),
+                );
             }
         }
 
-        // std::process::Command on Windows spawns with bInheritHandles=TRUE
-        // and no PROC_THREAD_ATTRIBUTE_HANDLE_LIST (stable std has no API for
-        // one), so the child anonymously inherits EVERY inheritable handle in
-        // this process — including this shell's own stdout/stderr pipe write
-        // ends, which it would then hold open for its whole lifetime even when
-        // its fd1/fd2 are redirected to /dev/null (niubash#122: the caller's
-        // pipe reader blocks until the async job exits). GNU's subshell has
-        // its descriptors already redirected — nothing else to hold. Clear
-        // HANDLE_FLAG_INHERIT on each parent std handle whose resolved child
-        // fd is not Inherit for the duration of the spawn; all process spawns
-        // in this process run on the executor thread, so the flag flip cannot
-        // race a concurrent CreateProcess here.
-        let child = spawn_with_isolated_std_handles(&mut child, keep_std_handle)?;
+        let spawn_result = crate::fd::spawn_whitelisted(&crate::fd::WhitelistedSpawn {
+            program: exe.clone(),
+            args: vec!["-c".to_string(), source.clone()],
+            env: env_map.into_iter().collect(),
+            std_handles,
+            extra_handles,
+        });
+        for h in owned_handles {
+            crate::fd::close_handle(h);
+        }
+        let child = spawn_result?;
         let pid = child.id();
         self.background_children.insert(pid, child);
         self.job_table
@@ -1373,7 +1385,7 @@ impl Executor {
                             self.coproc_stderr_forwarders.insert(pid, forwarder);
                         }
                     }
-                    self.background_children.insert(pid, child_proc);
+                    self.background_children.insert(pid, crate::fd::SpawnedChild::from(child_proc));
                     let job_id =
                         self.job_table
                             .register_process(pid, bash_command_source_text(cmd), true);
