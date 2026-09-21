@@ -290,6 +290,17 @@ impl Executor {
                 other => output.push(other),
             }
         }
+        // Golden assertion: PATSUB markers must never leak to output
+        // These are function-local PUA markers (U+E310-E313) with no
+        // external boundary; if they appear in output, the decode pass failed.
+        debug_assert!(!output.contains(PATSUB_QUOTED_VALUE_START),
+            "PATSUB_QUOTED_VALUE_START leaked to patsub output");
+        debug_assert!(!output.contains(PATSUB_QUOTED_VALUE_END),
+            "PATSUB_QUOTED_VALUE_END leaked to patsub output");
+        debug_assert!(!output.contains(PATSUB_QUOTED_AMP),
+            "PATSUB_QUOTED_AMP leaked to patsub output");
+        debug_assert!(!output.contains(PATSUB_QUOTED_BACKSLASH),
+            "PATSUB_QUOTED_BACKSLASH leaked to patsub output");
         output
     }
 
