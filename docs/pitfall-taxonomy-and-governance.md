@@ -294,7 +294,7 @@ git log 交叉核对。按"反复出问题"频次排序。
 | # | 热点主题 | issue/PR 证据 | 家族 | 套件 | 主要源文件 |
 |---|---|---|---|---|---|
 | 1 | 词层 fast path / comsub 捷径漏语义（黑名单守卫不断被打穿） | #68 #69 #70 #116 #117、PR#101/102/116；niubash#119 | S1+S5 | 全套 | command_substitution*.rs、parameter_core.rs |
-| 2 | 数组/关联数组复合赋值、下标、declare 回显 | #24 #77(open) #79 #109 #111；niubash#72 #78 | S2 | assoc/array/quotearray | builtins/declare*、arrays |
+| 2 | 数组/关联数组复合赋值、下标、declare 回显 | #24 #77(已解决待关) #79 #109 #111；niubash#72 #78 | S2 | assoc/array/quotearray——**三套件已全部 0 差（2026-09-21 true-baseline），区域已收敛** | builtins/declare*、arrays |
 | 3 | 载体字节泄漏到用户可见层 | #64 #95 #96 #97 #109、PR#104/114；niubash#92 #103 #124 | M 类 | quotearray/posixexp/varenv | lexer/quotes.rs、eval_source_for_reparse |
 | 4 | comsub 捕获/重解析 | #69 #70、PR#6/7/9/102/104/115；niubash#76 #120 | S5 | heredoc/comsub、bashdb | command_substitution.rs |
 | 5 | varenv/nameref/tempenv | #24 #78 #86；audit C2–C15 批次 | S7 | nameref11/varenv | varenv、nameref |
@@ -318,8 +318,8 @@ git log 交叉核对。按"反复出问题"频次排序。
 
 ## 八、未关闭与映射缺口（需复核）
 
-**open：** #62（gnu-baseline 归因账本）、#77（declare -A/-ai 回显，assoc.tests 409/361）、
-#117（词级捷径白名单化母 issue）。niubash#104（winget，特性请求）。
+**open：** #62（gnu-baseline 归因账本）、#77（declare -A/-ai 回显——**已解决待关单**：assoc/array/quotearray 全零差；修复=assoc/declare 批次 27fa0076/4883ad0b/802f8382/1caa7246 等 + 复验 3dae1658，关单须补映射评论）、
+#117（词级捷径白名单化母 issue；症状族已由 cfaa9125/ab811d04/64579580 修复验证，但白名单谓词未落地——command_substitution.rs 黑名单守卫（现 215/218/240/272 行）与 `command_substitution_quotes_are_semantic`（:889/:257）仍在，保持 open）。niubash#104（winget，特性请求）。
 
 **issue→提交映射缺口（建议复验）：**
 - **#66 嵌套花括号展开**：已关闭但找不到修复提交——最明确缺口，需复验是否真修。
