@@ -854,7 +854,7 @@ impl Executor {
             // syntax (e.g. `v=${IFS+'}'z}` stores `}z`).
             let stripped = if !compound_paren_value
                 && expanded_value.contains(['\'', '"'])
-                && hoisted_value.contains(['\'', '"'])
+                && word_level_quote_syntax(&hoisted_value)
                 && !contains_command_substitution_payload(&expanded_value)
             {
                 crate::lexer::remove_shell_quotes(&expanded_value)
@@ -1849,4 +1849,56 @@ fn dequote_ctlesc(value: &str) -> String {
         }
     }
     output
+}
+
+/// True when `word` still carries quote syntax at the WORD level. Raw
+/// `'`/`"` characters inside `${...}`, `$(...)`, `$'...'`, or backtick
+/// bodies belong to that expansion (the lexer keeps those bodies verbatim)
+/// and do not count - GNU dequote_word only strips quote syntax the parser
+/// placed on the original word.
+fn word_level_quote_syntax(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 1,
+            b'\'' | b'"' => return true,
+            b'`' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'`' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'$' => match bytes.get(index + 1) {
+                Some(b'{') => match matching_parameter_brace(&word[index + 2..]) {
+                    Some(close) => index += 2 + close,
+                    None => index += 1,
+                },
+                Some(b'(') => {
+                    let mut depth = 1usize;
+                    index += 2;
+                    while index < bytes.len() && depth > 0 {
+                        match bytes[index] {
+                            b'\\' => index += 1,
+                            b'(' => depth += 1,
+                            b')' => depth -= 1,
+                            _ => {}
+                        }
+                        index += 1;
+                    }
+                    continue;
+                }
+                Some(b'\'') => {
+                    index += 2;
+                    while index < bytes.len() && bytes[index] != b'\'' {
+                        index += if bytes[index] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
