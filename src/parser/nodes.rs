@@ -1,5 +1,27 @@
 use crate::lexer::TokenKind;
 
+/// Typed carrier for stdin body that may be pre-expanded.
+/// Replaces the in-band PREEXPANDED_STDIN_BODY (\u{5}) sentinel with a
+/// structured enum field, eliminating M-class collision risk from user 0x05
+/// bytes at heredoc body start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StdinBody {
+    /// Body was already expanded once; return verbatim.
+    Preexpanded(String),
+    /// Body needs expansion (default case).
+    NeedsExpansion(String),
+}
+
+impl StdinBody {
+    /// Returns the string content for storage in the legacy body field.
+    pub fn to_string(&self) -> String {
+        match self {
+            StdinBody::Preexpanded(s) => s.clone(),
+            StdinBody::NeedsExpansion(s) => s.clone(),
+        }
+    }
+}
+
 /// Represents a redirect specification
 #[derive(Debug, Clone, PartialEq)]
 pub struct Redirect {
@@ -45,6 +67,11 @@ pub struct HereDocRedirect {
     pub quoted_delimiter: bool,
     pub here_string: bool,
     pub body: Option<String>,
+    /// Typed carrier for body preexpanded state (replaces PREEXPANDED_STDIN_BODY
+    /// sentinel). Commands share the heredoc body between `heredoc` and
+    /// `heredoc_redirects`; both need the typed carrier to avoid the in-band
+    /// sentinel.
+    pub body_carrier: Option<StdinBody>,
     /// Physical line where this heredoc's body scan began — the `line_number`
     /// GNU passes to make_here_document from gather_here_documents
     /// (parse.y:3130): the line on which the logical command line ended, plus
@@ -1054,12 +1081,20 @@ pub struct CommandNode {
     pub redirect_err_append: Option<Redirect>,
     /// Here-document stdin body
     pub heredoc: Option<String>,
+    /// Here-document stdin body with preexpanded flag (typed carrier for
+    /// PREEXPANDED_STDIN_BODY sentinel). Replaces the in-band \u{5} prefix
+    /// with a structured enum field, eliminating M-class collision risk.
+    pub heredoc_body: Option<StdinBody>,
     /// Here-document delimiter word, used when reprinting functions.
     pub heredoc_delimiter: Option<String>,
     /// All here-document redirections in parse order.
     pub heredoc_redirects: Vec<HereDocRedirect>,
     /// Here-string stdin word
     pub here_string: Option<String>,
+    /// Typed carrier for here-string preexpanded state (replaces PREEXPANDED_STDIN_BODY
+    /// sentinel). Here-strings are stored in the word field; the carrier captures
+    /// whether expansion was already performed.
+    pub here_string_carrier: Option<StdinBody>,
     /// Pipe to next command
     pub pipe: Option<usize>,
     /// Background execution (&)
@@ -1159,9 +1194,11 @@ impl CommandNode {
             redirect_err: None,
             redirect_err_append: None,
             heredoc: None,
+            heredoc_body: None,
             heredoc_delimiter: None,
             heredoc_redirects: Vec::new(),
             here_string: None,
+            here_string_carrier: None,
             pipe: None,
             background: false,
             and_or: None,

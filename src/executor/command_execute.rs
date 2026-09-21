@@ -642,8 +642,8 @@ impl Executor {
     /// Expand here-document bodies and the here-string word of a simple
     /// command at the GNU do_redirections point (after word expansion,
     /// before the command runs). The expanded text is stored back with the
-    /// PREEXPANDED_STDIN_BODY marker so the stdin paths return it verbatim
-    /// instead of expanding — and re-running embedded substitutions — a
+    /// StdinBody::Preexpanded typed carrier so the stdin paths return it
+    /// verbatim instead of expanding — and re-running embedded substitutions — a
     /// second time. Quoted-delimiter bodies and `\x1d` ANSI-C bodies are
     /// left untouched: they take their own verbatim/decode paths.
     fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) {
@@ -654,36 +654,38 @@ impl Executor {
         // twice (comsub23.sub `after here-doc: 1`).
         let shared_raw = cmd.heredoc.clone();
         if let Some(body) = cmd.heredoc.take() {
-            cmd.heredoc = Some(if Self::stdin_body_needs_expansion(&body) {
-                format!(
-                    "{PREEXPANDED_STDIN_BODY}{}",
-                    self.expand_heredoc_body_mut(&body)
-                )
+            let carrier = if Self::stdin_body_needs_expansion(&body) {
+                let expanded = self.expand_heredoc_body_mut(&body);
+                crate::parser::StdinBody::Preexpanded(expanded)
             } else {
-                body
-            });
+                crate::parser::StdinBody::NeedsExpansion(body)
+            };
+            cmd.heredoc = Some(carrier.to_string());
+            cmd.heredoc_body = Some(carrier);
         }
         for redirect in &mut cmd.heredoc_redirects {
             if let Some(body) = redirect.body.take() {
                 if redirect.fd.is_none() && shared_raw.as_deref() == Some(body.as_str()) {
                     redirect.body = cmd.heredoc.clone();
+                    redirect.body_carrier = cmd.heredoc_body.clone();
                     continue;
                 }
-                redirect.body = Some(if Self::stdin_body_needs_expansion(&body) {
-                    format!(
-                        "{PREEXPANDED_STDIN_BODY}{}",
-                        self.expand_heredoc_body_mut(&body)
-                    )
+                let carrier = if Self::stdin_body_needs_expansion(&body) {
+                    let expanded = self.expand_heredoc_body_mut(&body);
+                    crate::parser::StdinBody::Preexpanded(expanded)
                 } else {
-                    body
-                });
+                    crate::parser::StdinBody::NeedsExpansion(body)
+                };
+                redirect.body = Some(carrier.to_string());
+                redirect.body_carrier = Some(carrier);
             }
         }
         if let Some(word) = cmd.here_string.take() {
-            cmd.here_string = Some(format!(
-                "{PREEXPANDED_STDIN_BODY}{}",
+            let carrier = crate::parser::StdinBody::Preexpanded(
                 self.expand_here_string_mut(&word)
-            ));
+            );
+            cmd.here_string = Some(carrier.to_string());
+            cmd.here_string_carrier = Some(carrier);
         }
     }
 

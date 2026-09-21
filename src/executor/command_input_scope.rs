@@ -276,6 +276,23 @@ impl Executor {
         ))
     }
 
+    /// Expands a heredoc body from a typed carrier. Returns the body verbatim
+    /// if preexpanded; otherwise performs expansion.
+    pub(in crate::executor) fn expand_heredoc_body_mut_from_carrier(
+        &mut self,
+        carrier: &Option<crate::parser::StdinBody>,
+    ) -> String {
+        match carrier {
+            Some(crate::parser::StdinBody::Preexpanded(text)) => {
+                decode_stdin_body_enq(text)
+            }
+            Some(crate::parser::StdinBody::NeedsExpansion(body)) => {
+                self.expand_heredoc_body_mut(body)
+            }
+            None => String::new(),
+        }
+    }
+
     pub(in crate::executor) fn expand_heredoc_body_readback(
         &self,
         body: &str,

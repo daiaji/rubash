@@ -1233,7 +1233,21 @@ impl Executor {
             .find(|redirect| redirect.fd.is_some() && redirect.body.is_some())?;
         let fd = redirect.fd?;
         let body = redirect.body.as_deref()?;
-        let input = if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
+        let input = if let Some(carrier) = &redirect.body_carrier {
+            if let crate::parser::StdinBody::Preexpanded(text) = carrier {
+                text.clone()
+            } else {
+                // NeedsExpansion case: fall through to legacy checks
+                if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
+                    let mut input =
+                        decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
+                    input.push('\n');
+                    input
+                } else {
+                    strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
+                }
+            }
+        } else if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
             let mut input =
                 decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
             input.push('\n');

@@ -140,6 +140,23 @@ impl Executor {
         )
     }
 
+    /// Expands a here-string from a typed carrier. Returns the preexpanded
+    /// text if present; otherwise performs expansion.
+    pub(in crate::executor) fn expand_here_string_mut_from_carrier(
+        &mut self,
+        carrier: &Option<crate::parser::StdinBody>,
+    ) -> String {
+        match carrier {
+            Some(crate::parser::StdinBody::Preexpanded(text)) => {
+                crate::executor::execution_misc::decode_stdin_body_enq(text)
+            }
+            Some(crate::parser::StdinBody::NeedsExpansion(word)) => {
+                self.expand_here_string_mut(word)
+            }
+            None => String::new(),
+        }
+    }
+
     fn expand_embedded_parameters_mut_inner(
         &mut self,
         word: &str,

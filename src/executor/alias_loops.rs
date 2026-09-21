@@ -72,7 +72,18 @@ impl Executor {
             let (Some(fd), Some(body)) = (redirect.fd, redirect.body.clone()) else {
                 continue;
             };
-            let body = if let Some(pre) = preexpanded_stdin_body(&body) {
+            let body = if let Some(carrier) = &redirect.body_carrier {
+                if let crate::parser::StdinBody::Preexpanded(text) = carrier {
+                    text.clone()
+                } else {
+                    // NeedsExpansion case: fall through to legacy checks
+                    if let Some(pre) = preexpanded_stdin_body(&body) {
+                        pre.to_string()
+                    } else {
+                        strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&body)).to_string()
+                    }
+                }
+            } else if let Some(pre) = preexpanded_stdin_body(&body) {
                 pre.to_string()
             } else {
                 strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&body)).to_string()

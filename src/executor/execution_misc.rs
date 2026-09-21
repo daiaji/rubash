@@ -277,19 +277,30 @@ pub(in crate::executor) fn strip_quoted_heredoc_marker(body: &str) -> &str {
 /// Marks a here-document body or here-string word already expanded by the
 /// command dispatch (execute_command). GNU expands them inside
 /// do_redirections — after word expansion, before the command runs — so
-/// the executor expands them at the same point and stores the result with
-/// this prefix; the stdin paths return it verbatim instead of re-running
-/// embedded substitutions a second time. A raw 0x05 CAN appear at the start
-/// of a user heredoc body or here-string word (script files are arbitrary
-/// byte streams), so the parser encodes such bytes as raw-byte marker pairs
-/// at collection time (parser/redirections.rs encode_stdin_body_enq) and the
-/// expand/emit boundary decodes them back (decode_stdin_body_enq).
+/// the executor expands them at the same point and stores the result with the
+/// StdinBody::Preexpanded typed carrier; the stdin paths return it verbatim
+/// instead of re-running embedded substitutions a second time. A raw 0x05 CAN
+/// appear at the start of a user heredoc body or here-string word (script
+/// files are arbitrary byte streams), so the parser encodes such bytes as
+/// raw-byte marker pairs at collection time (parser/redirections.rs
+/// encode_stdin_body_enq) and the expand/emit boundary decodes them back
+/// (decode_stdin_body_enq).
 pub(in crate::executor) const PREEXPANDED_STDIN_BODY: char = crate::executor::markers::PREEXPANDED_STDIN_BODY;
 
 /// Returns the pre-expanded text when `body` carries
-/// PREEXPANDED_STDIN_BODY.
+/// PREEXPANDED_STDIN_BODY (legacy sentinel check for parser/compat paths).
+/// New code should use StdinBody::Preexpanded typed carrier instead.
 pub(in crate::executor) fn preexpanded_stdin_body(body: &str) -> Option<&str> {
     body.strip_prefix(PREEXPANDED_STDIN_BODY)
+}
+
+/// Returns the pre-expanded text from a StdinBody typed carrier.
+pub(in crate::executor) fn stdin_body_carrier_to_text(carrier: &Option<crate::parser::StdinBody>) -> Option<String> {
+    match carrier {
+        Some(crate::parser::StdinBody::Preexpanded(text)) => Some(text.clone()),
+        Some(crate::parser::StdinBody::NeedsExpansion(_)) => None,
+        None => None,
+    }
 }
 
 /// Inverse of parser encode_stdin_body_enq: once stdin text leaves the

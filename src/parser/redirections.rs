@@ -282,6 +282,7 @@ pub(super) fn assign_here_string_redirect_raw(
             quoted_delimiter: false,
             here_string: true,
             body: Some(format!("{STORAGE_WORD_PREFIX_STR}{target}")),
+            body_carrier: None,
             gather_line: None,
         });
     } else {
@@ -709,6 +710,7 @@ pub(super) fn heredoc_redirect(
             .any(|ch| matches!(ch, '\'' | '"' | '\\')),
         here_string: false,
         body: None,
+        body_carrier: None,
         gather_line: None,
     }
 }

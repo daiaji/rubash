@@ -63,13 +63,24 @@ impl Executor {
         char_limit: Option<usize>,
         exact_char_limit: bool,
     ) -> Option<String> {
-        let body = cmd
+        let redirect = cmd
             .heredoc_redirects
             .iter()
             .rev()
-            .find(|redirect| redirect.fd == Some(fd))?
-            .body
-            .as_deref()?;
+            .find(|redirect| redirect.fd == Some(fd))?;
+        let body = redirect.body.as_deref()?;
+        if let Some(carrier) = &redirect.body_carrier {
+            if let crate::parser::StdinBody::Preexpanded(text) = carrier {
+                let mut input = text.clone();
+                input.push('\n');
+                return Some(trim_read_input(
+                    input,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                ));
+            }
+        }
         if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
             let mut input =
                 decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));

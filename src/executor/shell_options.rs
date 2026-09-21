@@ -790,7 +790,15 @@ impl Executor {
                 }
                 // Unnumbered `<<<` keeps its word in cmd.here_string; it is
                 // handled at the bottom of this function.
-                return cmd.here_string.as_ref().map(|word| {
+                return cmd.here_string.as_ref().and_then(|word| {
+                    if let Some(carrier) = &cmd.here_string_carrier {
+                        if let crate::parser::StdinBody::Preexpanded(text) = carrier {
+                            let mut input = text.clone();
+                            input.push('\n');
+                            return Some(input);
+                        }
+                    }
+                    // Legacy fallback (should not be reached with typed carrier)
                     let mut input = if let Some(pre) = preexpanded_stdin_body(word) {
                         pre.to_string()
                     } else {
@@ -799,7 +807,7 @@ impl Executor {
                         })
                     };
                     input.push('\n');
-                    input
+                    Some(input)
                 });
             }
             // A later `< file` / `<&N` / `<>` outranks stdin bodies.
@@ -807,7 +815,7 @@ impl Executor {
             // No ordered redirect info (synthesized commands): legacy
             // body-first behavior.
             None => {
-                if let Some(body) = cmd
+                if let Some(redirect) = cmd
                     .heredoc_redirects
                     .iter()
                     .rev()
@@ -815,17 +823,32 @@ impl Executor {
                         !redirect.here_string
                             && (redirect.fd.is_none() || redirect.fd == Some(0))
                     })
-                    .and_then(|redirect| redirect.body.as_deref())
                 {
-                    if let Some(word) = body.strip_prefix('\u{1d}') {
-                        let mut input = decode_ansi_c_quoted_word(word)
-                            .unwrap_or_else(|| self.expand_word(word));
+                    if let Some(carrier) = &redirect.body_carrier {
+                        if let crate::parser::StdinBody::Preexpanded(text) = carrier {
+                            let mut input = text.clone();
+                            input.push('\n');
+                            return Some(input);
+                        }
+                    }
+                    if let Some(body) = redirect.body.as_deref() {
+                        if let Some(word) = body.strip_prefix('\u{1d}') {
+                            let mut input = decode_ansi_c_quoted_word(word)
+                                .unwrap_or_else(|| self.expand_word(word));
+                            input.push('\n');
+                            return Some(input);
+                        }
+                        return Some(
+                            self.expand_heredoc_body_readback(body).text_lossy(),
+                        );
+                    }
+                }
+                if let Some(carrier) = &cmd.heredoc_body {
+                    if let crate::parser::StdinBody::Preexpanded(text) = carrier {
+                        let mut input = text.clone();
                         input.push('\n');
                         return Some(input);
                     }
-                    return Some(
-                        self.expand_heredoc_body_readback(body).text_lossy(),
-                    );
                 }
                 if let Some(body) = &cmd.heredoc {
                     return Some(
@@ -895,6 +918,14 @@ impl Executor {
         }
 
         let word = cmd.here_string.as_ref()?;
+        if let Some(carrier) = &cmd.here_string_carrier {
+            if let crate::parser::StdinBody::Preexpanded(text) = carrier {
+                let mut input = text.clone();
+                input.push('\n');
+                return Some(input);
+            }
+        }
+        // Legacy fallback (should not be reached with typed carrier)
         let mut input = if let Some(pre) = preexpanded_stdin_body(word) {
             pre.to_string()
         } else {
