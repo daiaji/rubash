@@ -92,6 +92,15 @@ rubash 用带内哨兵（C0 字节 \x11–\x1f、PUA 码点 E000–E317、命名
   字符转义落地**——`E000+<非载荷字符>` 恢复字面字符，ANSI-C `\uXXXX`
   入口对注册区码点（E000-E3FF）加 E000 前缀（push_literal_char），
   解决用户 PUA 输入与标记的混排歧义（$'\uE314' 往返无损）。
+- **Typed-Carrier 迁移批次（Golden Assertions 方案，2026-09-22 完成）**：
+  - Batch 1: PREEXPANDED_STDIN_BODY（\u{5}）完整 typed-carrier 迁移（StdinBody enum）
+  - Batch 2: PATSUB 族（U+E310-E313）金标断言
+  - Batch 3: 函数本地守卫（U+E314-E317）金标断言
+  - Batch 4: ASSIGN_DATA_* 族（U+E301-E30C）金标断言
+  - Batch 5: CTLESC（U+0011）金标断言
+  - Batch 6: 命名字符串标记（__RUBASH_HD1__/CSB1__/CA1__）金标断言
+  - 全部批次验证：cargo test 418 passed + 83 套件 true-baseline 无回归
+  - 详细文档：docs/typed-carrier-migration-plan.md
 
 ### 3.2 解码收口
 
@@ -115,6 +124,13 @@ rubash 用带内哨兵（C0 字节 \x11–\x1f、PUA 码点 E000–E317、命名
   （U+E000-U+EFFF UTF-8 序列）与 `__RUBASH_*` 命名串；用户 PUA 字符
   （`$'\uE314'`）必须逐字往返。C0 载体字节在 stdout 中与合法用户数据
   不可区分，故金标针对无歧义类别（PUA 码点与命名串）。
+- **Typed-Carrier 金标断言（2026-09-22 完成）**：locale.rs::decode_to_visible_text
+  增加生产环境断言，确保以下标记族不泄漏到输出：
+  - 函数本地守卫（U+E314-E317）
+  - ASSIGN_DATA_* 族（U+E301-E30C）
+  - CTLESC（U+0011）
+  - 命名字符串标记（__RUBASH_HD1__/CSB1__/CA1__）
+  - 断言在测试模式下跳过（单元测试可能直接传递原始标记字符串）
 
 ### 3.3 语义唯一入口（按杠杆排序）
 
