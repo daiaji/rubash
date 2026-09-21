@@ -16,7 +16,6 @@ Rubash is a from-scratch reimplementation of GNU Bash in Rust — lexer, parser,
 
 **Paths are first-class, not converted**: the MSYS model *guesses* which arguments look like paths and rewrites them — which is why every AI agent and script has to set `MSYS_NO_PATHCONV=1` to stop `/flags` from becoming `C:/Program Files/Git/flags`. Rubash inverts the model: Windows paths are the native currency. POSIX-style and WSL-style paths are accepted as input and resolved to real Windows paths, so what a native Windows program receives is always a valid Win32 path — no conversion heuristics, no `MSYS_NO_PATHCONV`, no surprises at the process boundary.
 
-**Current status**: 49 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 848 lines, down from 3427 on Sep 9 (−75%). (The previously reported `intl`=1209 was missing-locale environment noise; the harness now generates `en_US.UTF-8`, and `intl` measures 8 lines.) Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
 **Current status**: 57 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 733 lines, down from 3427 on Sep 9 (−79%). (The previously reported `intl`=1209 was missing-locale environment noise; the harness now generates `en_US.UTF-8`, and `intl` measures 8 lines.) Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
 
 ## Compatibility at a Glance

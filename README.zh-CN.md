@@ -16,7 +16,6 @@ Rubash 是用 Rust 从零实现的 GNU Bash —— 词法分析、解析器、�
 
 **路径是一等公民，不是转换对象**：MSYS 的模型是*猜*哪些参数像路径然后改写——这就是为什么每个 AI agent 和脚本都得设置 `MSYS_NO_PATHCONV=1`，防止 `/flag` 被改成 `C:/Program Files/Git/flag`。Rubash 把模型反过来：Windows 路径是原生货币。POSIX 风格和 WSL 风格的路径都接受输入、解析成真实的 Windows 路径，原生 Windows 程序拿到的永远是合法的 Win32 路径——没有转换启发式、不需要 `MSYS_NO_PATHCONV`、进程边界零意外。
 
-**当前状态**：83 个 GNU Bash 上游测试套件中 49 个零差异通过。全部 83 套件总差异 848 行，11 天内从 3427 行下降 75%。（此前报告的 `intl`=1209 为缺 locale 的环境噪音；harness 现在自动生成 `en_US.UTF-8`，`intl` 实测为 8 行。）完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
 **当前状态**：83 个 GNU Bash 上游测试套件中 57 个零差异通过。全部 83 套件总差异 733 行，12 天内从 3427 行下降 79%。（此前报告的 `intl`=1209 为缺 locale 的环境噪音；harness 现在自动生成 `en_US.UTF-8`，`intl` 实测为 8 行。）完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
 
 ## 兼容性一览
