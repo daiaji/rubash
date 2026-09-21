@@ -19,11 +19,11 @@ pub(in crate::executor) enum SubstitutionQuoteContext {
     HereDocument,
 }
 /// Sentinel introducing a raw-byte marker pair.
-pub(crate) const RAW_BYTE_MARKER_ESCAPE: u32 = 0xe000;
+pub(crate) use crate::executor::markers::RAW_BYTE_MARKER_ESCAPE;
 /// First marker payload char, encoding raw byte 0x00.
-pub(crate) const RAW_BYTE_MARKER_FIRST: u32 = 0xe001;
+pub(crate) use crate::executor::markers::RAW_BYTE_MARKER_FIRST;
 /// Last marker payload char, encoding raw byte 0xff.
-pub(crate) const RAW_BYTE_MARKER_LAST: u32 = 0xe100;
+pub(crate) use crate::executor::markers::RAW_BYTE_MARKER_LAST;
 
 /// Build the two-char raw-byte marker (sentinel + payload char) for a byte.
 pub(crate) fn encode_raw_byte_marker(byte: u8) -> String {

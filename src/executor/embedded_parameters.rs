@@ -593,9 +593,9 @@ impl Executor {
         &self,
         word: &str,
     ) -> String {
-        const PROTECTED_ESCAPED_SINGLE_QUOTE: char = '\x16';
-        const PROTECTED_LITERAL_BACKSLASH: char = '\x19';
-        const PROTECTED_LITERAL_DOLLAR: char = '\x12';
+        const PROTECTED_ESCAPED_SINGLE_QUOTE: char = crate::executor::markers::PROTECTED_ESCAPED_SQUOTE;
+        const PROTECTED_LITERAL_BACKSLASH: char = crate::executor::markers::PROTECTED_LITERAL_BACKSLASH;
+        const PROTECTED_LITERAL_DOLLAR: char = crate::executor::markers::PROTECTED_LITERAL_DOLLAR;
         let mut escaped_dollar_protected = String::with_capacity(word.len());
         let mut chars = word.chars().peekable();
         while let Some(ch) = chars.next() {

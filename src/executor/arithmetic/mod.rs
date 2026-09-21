@@ -1493,7 +1493,7 @@ fn assoc_skip_substitution(bytes: &[u8], start: usize) -> usize {
 /// both pass it through unchanged, and it cannot appear in ordinary shell
 /// source, so a subscript that starts with it is unambiguously a pre-expanded
 /// key rather than user text.
-pub(super) const ARITH_ASSOC_KEY_MARKER: char = '\u{1e}';
+pub(super) const ARITH_ASSOC_KEY_MARKER: char = crate::executor::markers::SUBSCRIPT_CARRIER;
 
 /// Encode an expanded associative-subscript key so the arithmetic parser can
 /// read it back verbatim. Hex digits keep the payload free of `$`, quotes,

@@ -1141,7 +1141,7 @@ fn synthetic_dot_names(pattern: &str, globskipdots: bool) -> Vec<String> {
 
 /// Rubash's in-word quote marker (bash CTLESC): the next character is quoted
 /// data, not a pattern character.
-const CTLESC: char = '\x11';
+const CTLESC: char = crate::executor::markers::CTLESC;
 
 /// Port of pathexp.c unquoted_glob_pattern_p (pathexp.c:66-134): the shell-side
 /// decision of whether a word is a pathname pattern. Implements POSIX 2.13.3:

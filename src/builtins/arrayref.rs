@@ -23,7 +23,7 @@ use std::collections::HashMap;
 /// The byte travels inside the word string so it survives word splitting
 /// the same way GNU copies word->flags to each expanded output word; every
 /// consumer strips it before use.
-pub(crate) const ARRAYREF_FLAG: char = '\x02';
+pub(crate) const ARRAYREF_FLAG: char = crate::executor::markers::ARRAYREF_FLAG;
 
 /// Split a possibly-marked operand word into (w_arrayref, text).
 pub(crate) fn take_arrayref_flag(word: &str) -> (bool, &str) {

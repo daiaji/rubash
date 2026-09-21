@@ -163,7 +163,11 @@ impl Executor {
                     if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "emacs")
                         || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "vi")
                     {
-                        output.push(if marker == '[' { '\x01' } else { '\x02' });
+                        output.push(if marker == '[' {
+                            crate::executor::markers::PROMPT_IGNORE_START
+                        } else {
+                            crate::executor::markers::PROMPT_IGNORE_END
+                        });
                     }
                 }
                 Some(octal @ '0'..='7') => {

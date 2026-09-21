@@ -283,7 +283,7 @@ pub(in crate::executor) fn strip_quoted_heredoc_marker(body: &str) -> &str {
 /// byte streams), so the parser encodes such bytes as raw-byte marker pairs
 /// at collection time (parser/redirections.rs encode_stdin_body_enq) and the
 /// expand/emit boundary decodes them back (decode_stdin_body_enq).
-pub(in crate::executor) const PREEXPANDED_STDIN_BODY: char = '\x05';
+pub(in crate::executor) const PREEXPANDED_STDIN_BODY: char = crate::executor::markers::PREEXPANDED_STDIN_BODY;
 
 /// Returns the pre-expanded text when `body` carries
 /// PREEXPANDED_STDIN_BODY.
@@ -298,7 +298,7 @@ pub(in crate::executor) fn preexpanded_stdin_body(body: &str) -> Option<&str> {
 /// (carriers, >=0x80 bytes) must stay encoded, so only the 0x05 pair is
 /// touched.
 pub(in crate::executor) fn decode_stdin_body_enq(text: &str) -> String {
-    if !text.contains('\u{e000}') {
+    if !text.contains(char::from_u32(crate::executor::markers::RAW_BYTE_MARKER_ESCAPE).expect("sentinel is valid")) {
         return text.to_string();
     }
     let pair = [
@@ -726,7 +726,7 @@ pub(in crate::executor) fn command_substitution_word_split(value: &str) -> Strin
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-const COMMAND_SUBSTITUTION_PAYLOAD_PREFIX: &str = "__RUBASH_CSB1_";
+const COMMAND_SUBSTITUTION_PAYLOAD_PREFIX: &str = crate::executor::markers::COMSUB_PAYLOAD_PREFIX;
 
 pub(in crate::executor) fn contains_command_substitution_payload(value: &str) -> bool {
     value.contains(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX)

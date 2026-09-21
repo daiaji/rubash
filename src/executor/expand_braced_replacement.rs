@@ -3,10 +3,10 @@ use super::*;
 // Private markers used by the patsub replacement pipeline. They survive
 // expand_embedded_parameters untouched and are resolved by
 // finish_patsub_replacement into the final replacement text.
-const PATSUB_QUOTED_VALUE_START: char = '\x0b';
-const PATSUB_QUOTED_VALUE_END: char = '\x0c';
-const PATSUB_QUOTED_AMP: char = '\x0e';
-const PATSUB_QUOTED_BACKSLASH: char = '\x0f';
+const PATSUB_QUOTED_VALUE_START: char = crate::executor::markers::PATSUB_QUOTED_VALUE_START;
+const PATSUB_QUOTED_VALUE_END: char = crate::executor::markers::PATSUB_QUOTED_VALUE_END;
+const PATSUB_QUOTED_AMP: char = crate::executor::markers::PATSUB_QUOTED_AMP;
+const PATSUB_QUOTED_BACKSLASH: char = crate::executor::markers::PATSUB_QUOTED_BACKSLASH;
 
 // Mirrors GNU's expand_no_split_dollar_star (subst.c:237) for the `=`/`:=`
 // operator context: when set, unquoted `$*` with null IFS joins with IFS[0]

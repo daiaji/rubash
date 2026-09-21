@@ -37,7 +37,7 @@ pub(crate) use quotes::{
 };
 pub use token::{Token, TokenKind};
 
-pub(crate) const QUOTED_HEREDOC_MARKER: &str = "__RUBASH_HD1__";
+pub(crate) const QUOTED_HEREDOC_MARKER: &str = crate::executor::markers::QUOTED_HEREDOC_MARKER;
 
 /// Set when a command carries more than `HEREDOC_MAX` (16) here-documents.
 /// GNU treats that as a fatal parse error: it reports

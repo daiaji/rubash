@@ -338,7 +338,7 @@ pub(in crate::executor) fn short_set_flag_option(flag: char) -> Option<&'static 
 /// resolve aliases against marked entries without persisting them.
 /// `operator_metadata.raw` is never consulted at execution time, so it is
 /// a safe carrier.
-pub(in crate::executor) const GROUP_REDIRECT_INJECTED_MARK: &str = "\x1egroup-redirect";
+pub(in crate::executor) const GROUP_REDIRECT_INJECTED_MARK: &str = crate::executor::markers::GROUP_REDIRECT_INJECTED_MARK;
 
 pub(in crate::executor) fn injected_group_redirect(redirect: &Redirect) -> Redirect {
     let mut cloned = redirect.clone();

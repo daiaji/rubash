@@ -43,14 +43,14 @@ pub const FD_PROCESS_STDIN_TARGET: &str = "__RUBASH_FD_PROCESS_STDIN";
 pub const INHERIT_PROCESS_STDIN: &str = "__RUBASH_INHERIT_PROCESS_STDIN";
 pub const LOCAL_EXPORT_ENV: &str = "__RUBASH_LOCAL_EXPORT_ENV";
 pub const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
-pub const COMPOUND_ASSIGNMENT_MARKER: &str = "__RUBASH_CA1__";
+pub const COMPOUND_ASSIGNMENT_MARKER: &str = crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER;
 /// Lead-in byte inside a `( ... )` compound-assignment body marking it as a
 /// whole-single-quoted declare operand whose expansion GNU defers to the
 /// builtin (arrayfunc.c:557 expand_compound_array_assignment). The lexer
 /// carriers in the body (\x1f, \x18, \x1a, \x14, \x17) stand for the
 /// ORIGINAL syntax characters there — real `$`, `"`, backtick, `\`, `'` —
 /// unlike escape-produced carriers elsewhere in an operand, which are data.
-pub const DEFERRED_COMPOUND_BODY: char = '\u{3}';
+pub const DEFERRED_COMPOUND_BODY: char = crate::executor::markers::DEFERRED_COMPOUND_BODY;
 /// GNU declare.def:988-1011: an operand subscript whose evaluation already
 /// failed (diagnostic printed by the subscript evaluator) is carried to the
 /// declare-family builtin under this sentinel so it binds the variable with
@@ -62,5 +62,5 @@ pub const DEFERRED_COMPOUND_BODY: char = '\u{3}';
 /// pattern.rs). E10A specifically collided with SQ_DOLLAR_DATA
 /// (assignment_expansion.rs), which let restore_sq_content_markers decode
 /// the sentinel into a literal `$` and vice versa.
-pub const FAILED_SUBSCRIPT_SENTINEL: &str = "\u{E200}";
-pub const ARRAY_FIELD_SPLIT_MARKER: char = '';
+pub const FAILED_SUBSCRIPT_SENTINEL: &str = crate::executor::markers::FAILED_SUBSCRIPT_SENTINEL;
+pub const ARRAY_FIELD_SPLIT_MARKER: char = crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER;

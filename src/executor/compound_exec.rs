@@ -1716,7 +1716,7 @@ impl Executor {
     }
 
     fn expand_case_pattern(&mut self, pattern: &crate::parser::CasePattern) -> String {
-        const PROTECTED_CASE_PATTERN_BACKSLASH: char = '\x15';
+        const PROTECTED_CASE_PATTERN_BACKSLASH: char = crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD;
 
         if !case_pattern_raw_has_quotes(&pattern.raw_text) {
             // Backslashes in a case pattern are escape characters, not quote

@@ -8,7 +8,7 @@ use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceS
 /// dequote_escapes keeps CTLESC-escaped quotes as data). The embedded
 /// walker still tracks DATA_DOUBLE_QUOTE as a "..." region boundary for
 /// its in_double state so `$'` inside it stays literal (issue #109).
-pub(in crate::executor) const DATA_DOUBLE_QUOTE: &str = "\u{E102}";
+pub(in crate::executor) const DATA_DOUBLE_QUOTE: &'static str = crate::executor::markers::ASSIGN_DATA_DQUOTE_STR;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::executor) struct AssignmentExpansionResult {
@@ -179,9 +179,9 @@ pub(in crate::executor) fn hoist_data_double_quotes(value: &str, marker: &str) -
 /// Sentinels for expansion-trigger characters inside a hoisted `'...'`
 /// span (GNU W_QUOTED - the span content never expands). Restored by the
 /// same callers that restore the quote `marker`.
-pub(in crate::executor) const SQ_DOLLAR_DATA: &str = "\u{E10A}";
-pub(in crate::executor) const SQ_BACKTICK_DATA: &str = "\u{E10B}";
-pub(in crate::executor) const SQ_BACKSLASH_DATA: &str = "\u{E10C}";
+pub(in crate::executor) const SQ_DOLLAR_DATA: &'static str = crate::executor::markers::ASSIGN_SQ_DOLLAR_STR;
+pub(in crate::executor) const SQ_BACKTICK_DATA: &'static str = crate::executor::markers::ASSIGN_SQ_BACKTICK_STR;
+pub(in crate::executor) const SQ_BACKSLASH_DATA: &'static str = crate::executor::markers::ASSIGN_SQ_BACKSLASH_STR;
 
 pub(in crate::executor) fn restore_sq_content_markers(value: String) -> String {
     value
@@ -373,11 +373,11 @@ impl Executor {
         {
             return self.expand_assignment_value_inner(name, value);
         }
-        const DQ_DATA: &str = "\u{E102}";
-        // NOTE: \u{E103}/\u{E104} are already taken below by DATA_BACKTICK /
+        const DQ_DATA: &'static str = crate::executor::markers::ASSIGN_DATA_DQUOTE_STR;
+        // NOTE: \u{E303}/\u{E304} are already taken below by DATA_BACKTICK /
         // DATA_ESCAPED_DQUOTE; these sentinels must use free codepoints.
-        const SQ_DATA: &str = "\u{E107}";
-        const BS_DATA: &str = "\u{E108}";
+        const SQ_DATA: &'static str = crate::executor::markers::ASSIGN_HOISTED_SQUOTE_STR;
+        const BS_DATA: &'static str = crate::executor::markers::ASSIGN_HOISTED_BACKSLASH_STR;
         // GNU arrayfunc.c:581 parse_string_to_word_list preserves the
         // W_QUOTED flag on each compound-assignment word; the expansion pass
         // expands words individually. Rubash expands the whole body as one
@@ -443,7 +443,7 @@ impl Executor {
     }
 
     fn expand_compound_element_tilde(&self, token: &str, expand_after_colon: bool) -> String {
-        const DQ_DATA: &str = "\u{E102}";
+        const DQ_DATA: &'static str = crate::executor::markers::ASSIGN_DATA_DQUOTE_STR;
         let (prefix, element) = if token.starts_with('[') {
             match token.find("]=") {
                 Some(offset) => {
@@ -460,12 +460,12 @@ impl Executor {
             (String::new(), token.to_string())
         };
         let element = element.as_str();
-        // E107 is the hoisted single-quote sentinel (SQ_DATA) — a hoisted
+        // E307 is the hoisted single-quote sentinel (SQ_DATA) — a hoisted
         // quoted element is literal like a `'`/`"`-quoted one.
         if element.starts_with('\'')
             || element.starts_with('"')
             || element.starts_with(DQ_DATA)
-            || element.starts_with('\u{E107}')
+            || element.starts_with('\u{E307}')
         {
             return token.to_string();
         }
@@ -798,7 +798,7 @@ impl Executor {
             // removal into the stored value (`x=a\'b` stores `a'b`). Hoist the
             // markers out of the quote-removal pass so the data quotes they
             // become are not re-stripped as syntax, then restore them.
-            const DATA_SINGLE_QUOTE: &str = "\u{E101}";
+            const DATA_SINGLE_QUOTE: &'static str = crate::executor::markers::ASSIGN_DATA_SQUOTE_STR;
             // GNU parse.y/arrayfunc.c: a compound array assignment preserves
             // the raw parenthesized text so split_storage_words sees the
             // original quoting. The embedded parameter walker treats a bare
@@ -808,10 +808,10 @@ impl Executor {
             // backslash before `"`) out of the walker for compound
             // assignments so they survive as literal element text.
             let compound_paren_value = value.starts_with('(') && value.ends_with(')');
-            const DATA_BACKTICK: &str = "\u{E103}";
-            const DATA_ESCAPED_DQUOTE: &str = "\u{E104}";
-            const DATA_ESCAPED_SQUOTE: &str = "\u{E105}";
-            const DATA_ESCAPED_BACKSLASH: &str = "\u{E106}";
+            const DATA_BACKTICK: &'static str = crate::executor::markers::ASSIGN_DATA_BACKTICK_STR;
+            const DATA_ESCAPED_DQUOTE: &'static str = crate::executor::markers::ASSIGN_ESCAPED_DQUOTE_STR;
+            const DATA_ESCAPED_SQUOTE: &'static str = crate::executor::markers::ASSIGN_ESCAPED_SQUOTE_STR;
+            const DATA_ESCAPED_BACKSLASH: &'static str = crate::executor::markers::ASSIGN_ESCAPED_BACKSLASH_STR;
             // In preserve mode the walker emits escape pairs verbatim with
             // quote-context awareness, so hoisting `\X` here is both
             // redundant and wrong: a context-blind `.replace("\\'", ..)`
@@ -1144,8 +1144,8 @@ impl Executor {
             // GNU subst.c string_list_dollar_at: "$@" expands to one word
             // per positional parameter. The compound-assignment hoist
             // delivers "$@" either as a bare `$@` (split-form path) or as
-            // \u{E102}$@\u{E102} (atomic lexer path, DQ_DATA markers).
-            let token_stripped = token.trim_matches('\u{E102}');
+            // \u{E302}$@\u{E302} (atomic lexer path, DQ_DATA markers).
+            let token_stripped = token.trim_matches('\u{E302}');
             if token_stripped == "$@" || token.strip_prefix('\x1d') == Some("${@}") {
                 changed = true;
                 values.extend(self.shell_state.positional_params.iter().map(|value| store!(value)));
@@ -1157,12 +1157,12 @@ impl Executor {
                     // The atomic lexer path (skip_word_at) preserves the
                     // element's wrapping quotes as raw text, so the hoist
                     // pass delivers `"${a[@]}"` as
-                    // \u{E102}${a[@]}\u{E102} with no \x1d quoted-RHS
+                    // \u{E302}${a[@]}\u{E302} with no \x1d quoted-RHS
                     // marker; the [@] list must still fan out per element
                     // (array.tests: local v=("${foo[@]}") keeps 'b c' one
                     // element).
                     token
-                        .trim_matches('\u{E102}')
+                        .trim_matches('\u{E302}')
                         .strip_prefix("${")
                         .and_then(|token| token.strip_suffix("[@]}"))
                 })
@@ -1182,15 +1182,15 @@ impl Executor {
                     // The atomic lexer path (skip_word_at) preserves the
                     // element's wrapping quotes as raw text, so the hoist
                     // pass delivers `"${!ref}"` as
-                    // \u{E102}${!ref}\u{E102} with no \x1d quoted-RHS
+                    // \u{E302}${!ref}\u{E302} with no \x1d quoted-RHS
                     // marker; the indirect reference must still fan out
                     // per element (new-exp4.sub Case08 `"${!xx}"` with
-                    // xx=arrayA[@]). Only match when \u{E102} wrapping is
+                    // xx=arrayA[@]). Only match when \u{E302} wrapping is
                     // actually present so unquoted `${!ref}` falls through
                     // to the unquoted indirect branch below.
-                    if token.starts_with('\u{E102}') && token.ends_with('\u{E102}') {
+                    if token.starts_with('\u{E302}') && token.ends_with('\u{E302}') {
                         token
-                            .trim_matches('\u{E102}')
+                            .trim_matches('\u{E302}')
                             .strip_prefix("${")
                             .and_then(|token| token.strip_suffix('}'))
                             .and_then(|name| name.strip_prefix('!'))
@@ -1230,7 +1230,7 @@ impl Executor {
             } else if let Some((var_name, pattern, replacement, global)) = {
                 // The hoist pass carries the element's wrapping quotes as
                 // DQ_DATA markers; strip them before matching the patsub
-                // shape (`\u{E102}${a[@]/#/"q"}\u{E102}`). Parse the RAW
+                // shape (`\u{E302}${a[@]/#/"q"}\u{E302}`). Parse the RAW
                 // token rather than `token`: unquote_storage_value already
                 // decoded `\'`/`\"` escapes to bare quotes, which
                 // mark_patsub_replacement_quotes then re-reads as quote
@@ -1238,7 +1238,7 @@ impl Executor {
                 // keep \' as escaped-quote data entering
                 // expand_patsub_replacement_text, GNU subst.c
                 // parameter_brace_patsub's own quote pass).
-                let core = token_raw.trim_matches('\u{E102}');
+                let core = token_raw.trim_matches('\u{E302}');
                 let core = core
                     .strip_prefix("\\\"")
                     .and_then(|inner| inner.strip_suffix("\\\""))
@@ -1293,10 +1293,10 @@ impl Executor {
                     // elements -iname 'abc -iname 'def, not two quoted
                     // pairs); a quoted element stays one word.
                     let element_quoted = {
-                        let core = token_raw.trim_matches('\u{E102}');
+                        let core = token_raw.trim_matches('\u{E302}');
                         core.starts_with("\\\"")
                             || core.starts_with('"')
-                            || token_raw.starts_with('\u{E102}')
+                            || token_raw.starts_with('\u{E302}')
                     };
                     let split_fields = |text: String| -> Vec<String> {
                         if element_quoted {
@@ -1348,14 +1348,14 @@ impl Executor {
                     // The atomic lexer path (skip_word_at) wraps the
                     // element's quotes in DQ_DATA markers instead of the
                     // \x1d quoted-RHS marker: `"${a[@]:2}"` arrives as
-                    // \u{E102}${a[@]:2}\u{E102}. The [@]:off[:len] slice
+                    // \u{E302}${a[@]:2}\u{E302}. The [@]:off[:len] slice
                     // must still fan out per element (GNU arrayfunc.c:557
                     // expand_compound_array_assignment expands each word
                     // through the real expander — new-exp5.sub
                     // `b=("${a[@]:2}")` stores C and D as two elements).
-                    if token_raw.starts_with('\u{E102}') && token_raw.ends_with('\u{E102}') {
+                    if token_raw.starts_with('\u{E302}') && token_raw.ends_with('\u{E302}') {
                         token_raw
-                            .trim_matches('\u{E102}')
+                            .trim_matches('\u{E302}')
                             .strip_prefix("${")
                             .and_then(|token| token.strip_suffix('}'))
                     } else if token_raw.starts_with('"') {
@@ -1416,7 +1416,7 @@ impl Executor {
                 // single_unquoted_parameter_name rejects digit names, so
                 // handle them here. The token may be `[N]=$0` (subscript
                 // form) or bare `$0`.
-                let core = token.trim_matches('\u{E102}');
+                let core = token.trim_matches('\u{E302}');
                 let (prefix, param) = match core.split_once('=') {
                     Some((p, v)) => (Some(p), v),
                     None => (None, core),
@@ -1428,10 +1428,10 @@ impl Executor {
                     // stores `$0`, not the script path). token_raw keeps
                     // the backslash; check it before expanding.
                     let raw_param = token_raw
-                        .trim_matches('\u{E102}')
+                        .trim_matches('\u{E302}')
                         .split_once('=')
                         .map(|(_, v)| v)
-                        .unwrap_or(token_raw.trim_matches('\u{E102}'));
+                        .unwrap_or(token_raw.trim_matches('\u{E302}'));
                     if raw_param.starts_with("\\$") {
                         values.push(token_raw.clone());
                         continue;
@@ -1669,15 +1669,15 @@ impl Executor {
 
 /// Split a compound assignment body into element tokens, treating single
 /// quotes, double quotes and the hoisted DQ_DATA marker as quoting, so a
-/// quoted space (`("a b"` hoisted to `(\u{E102}a b\u{E102}`) stays inside its
+/// quoted space (`("a b"` hoisted to `(\u{E302}a b\u{E302}`) stays inside its
 /// token. Tokens keep every character verbatim; only unquoted whitespace
 /// separates elements.
 pub(in crate::executor) fn split_compound_element_words(value: &str) -> Vec<String> {
-    const DQ_DATA: char = '\u{E102}';
+    const DQ_DATA: char = crate::executor::markers::ASSIGN_DATA_DQUOTE;
     // The hoisted single-quote sentinel (expand_assignment_value_hoisting):
-    // `'q k'` arrives as E107 q k E107 and must still count as ONE element
+    // `'q k'` arrives as E307 q k E307 and must still count as ONE element
     // or the kv-pair key/value parity in the assoc tilde pass shifts.
-    const SQ_DATA: char = '\u{E107}';
+    const SQ_DATA: char = crate::executor::markers::ASSIGN_HOISTED_SQUOTE;
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut single = false;
@@ -1772,7 +1772,7 @@ pub(in crate::executor) fn split_compound_element_words(value: &str) -> Vec<Stri
 }
 
 fn preserve_prompt_escapes(value: &str) -> String {
-    const PROTECTED_PROMPT_ESCAPE: char = '\x15';
+    const PROTECTED_PROMPT_ESCAPE: char = crate::executor::markers::PROMPT_ESCAPE_GUARD;
     let mut preserved = String::with_capacity(value.len());
     let mut chars = value.chars().peekable();
     while let Some(ch) = chars.next() {

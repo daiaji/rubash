@@ -81,11 +81,11 @@ pub(in crate::executor) enum IndexedSubscript {
 
 /// Legacy single-byte data markers shared with the lexer and the
 /// embedded-parameter walker (see `executor/parameter_errors.rs`).
-const LITERAL_BACKSLASH: char = '\x14';
-const LITERAL_SINGLE_QUOTE: char = '\x17';
-const LITERAL_DOUBLE_QUOTE: char = '\x18';
-const LITERAL_BACKTICK: char = '\x1a';
-const LITERAL_DOLLAR: char = '\x1f';
+const LITERAL_BACKSLASH: char = crate::executor::markers::DATA_BACKSLASH;
+const LITERAL_SINGLE_QUOTE: char = crate::executor::markers::DATA_SQUOTE;
+const LITERAL_DOUBLE_QUOTE: char = crate::executor::markers::DATA_DQUOTE;
+const LITERAL_BACKTICK: char = crate::executor::markers::DATA_BACKTICK;
+const LITERAL_DOLLAR: char = crate::executor::markers::DATA_DOLLAR;
 
 impl Executor {
     /// One `expand_subscript_string` pass over the raw subscript text.
@@ -115,7 +115,7 @@ impl Executor {
         // `expand_word_internal` sees the same already-dequoted characters).
         let masked = mask_subscript_escapes(raw);
         let expanded = self.expand_embedded_parameters(&masked);
-        // Expansion-produced whitespace rides the \x1c/E109 data tags so the
+        // Expansion-produced whitespace rides the \x1c/E309 data tags so the
         // field/compound splitter leaves it alone; a resolved subscript is
         // cooked text only (GNU expand_subscript_string -> expand_string
         // yields plain bytes), so the tags come off here — otherwise a key
@@ -899,7 +899,7 @@ impl Executor {
     /// expand_assignment_value expects, so syntax quotes are consumed and
     /// expansion-produced `"`s stay data.
     fn expand_compound_assignment_rhs(&mut self, name: &str, raw_value: &str) -> String {
-        // The /E109 whitespace tags are CTLESC-style protection for the
+        // The /E309 whitespace tags are CTLESC-style protection for the
         // following character (embedded_mutations expansion_ws_marked):
         // re-lexing raw text would treat the space after the tag as a word
         // delimiter and drop the rest of the value (assoc12.sub: a
@@ -1206,7 +1206,7 @@ fn dequote_compound_subscript(sub: &str) -> String {
         }
     }
     // The stored subscript text already went through word expansion once, so
-    // it can carry the \x1c/E109 expansion-whitespace data tags; the resolved
+    // it can carry the \x1c/E309 expansion-whitespace data tags; the resolved
     // key is cooked text only — strip the tags the same way
     // expand_subscript_string does for its freshly-expanded result.
     out.replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
@@ -1345,7 +1345,7 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
     let mut rest = text;
     let mut saw_span = false;
     while !rest.is_empty() {
-        // '\u{E107}' is the compound-assignment hoisted single-quote
+        // '\u{E307}' is the compound-assignment hoisted single-quote
         // sentinel (SQ_DATA, assignment_expansion.rs) and '\x17' is the
         // embedded-parameter walker's literal-single-quote data marker —
         // arithmetic input arrives with `'` already converted to `\x17`
@@ -1354,8 +1354,8 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
         // carry the same "no expansion inside" guarantee as a literal `'`.
         let (inner, close) = if let Some(inner) = rest.strip_prefix('\'') {
             (inner, '\'')
-        } else if let Some(inner) = rest.strip_prefix('\u{E107}') {
-            (inner, '\u{E107}')
+        } else if let Some(inner) = rest.strip_prefix('\u{E307}') {
+            (inner, '\u{E307}')
         } else if let Some(inner) = rest.strip_prefix('\x17') {
             (inner, '\x17')
         } else {

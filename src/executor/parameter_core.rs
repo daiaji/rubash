@@ -134,7 +134,7 @@ impl Executor {
             // assignment-storage path, or an argument word shaped
             // `echo K='a"b'` loses the quote when this re-scan re-reads the
             // bare quote as a delimiter.
-            const DQ_DATA: &str = "\u{E102}";
+            const DQ_DATA: &'static str = crate::executor::markers::ASSIGN_DATA_DQUOTE_STR;
             // GNU arrayfunc.c:581 parse_string_to_word_list preserves the
             // W_QUOTED flag on each compound-assignment word; the expansion
             // pass expands words individually. Rubash expands the whole body
@@ -143,9 +143,9 @@ impl Executor {
             // would lose the `'a b'` boundary). Hoist `'` to a sentinel
             // before expansion and restore after, exactly as DQ_DATA does
             // for `"`.
-            // \u{E103} is DATA_BACKTICK in assignment_expansion.rs; use a
+            // \u{E303} is DATA_BACKTICK in assignment_expansion.rs; use a
             // free codepoint or the sentinel decodes as a backtick.
-            const SQ_DATA: &str = "\u{E107}";
+            const SQ_DATA: &'static str = crate::executor::markers::ASSIGN_HOISTED_SQUOTE_STR;
             // Quotes inside a `$(...)`/backtick body are syntax for the
             // nested parse (subst.c:7143 command_substitute re-parses the
             // body; parse.y parse_comsub PST_NOEXPAND keeps them out of the

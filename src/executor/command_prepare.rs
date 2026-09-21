@@ -2570,7 +2570,7 @@ fn strip_ifs_protection_markers(value: &str) -> String {
 }
 
 fn field_split_escaped_ifs(value: &str, ifs: Option<&str>) -> Vec<String> {
-    const PROTECTED_IFS: char = '\u{1e}';
+    const PROTECTED_IFS: char = crate::executor::markers::ESCAPED_IFS_GUARD;
     let ifs = ifs.unwrap_or(" \t\n");
     let mut protected = String::with_capacity(value.len());
     let chars = value.chars().collect::<Vec<_>>();

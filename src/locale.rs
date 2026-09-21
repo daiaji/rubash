@@ -290,9 +290,9 @@ pub fn init_locale() {
 /// | `U+E010`/`U+E011` | ANSI-C `$'...'` decoded `'`/`"` data | `'`/`"` |
 /// | `U+E000` + `U+E0xx` | raw-byte marker pair | byte `xx` as char |
 /// | `U+E000` + `U+E000` | escaped literal U+E000 | `U+E000` |
-/// | `U+E101`..=`U+E108` | assignment DATA_* sentinels (quote/backtick/backslash data) | the data char |
-/// | `U+E109` | COMPOUND_EXPANSION_WS_TAG (field-splitting glue) | nothing |
-/// | `U+E100`, `U+E10A`..=`U+E1FF` | conditional-pattern byte-chars | byte `(cp - E100)` as char |
+/// | `U+E301`..=`U+E308` | assignment DATA_* sentinels (quote/backtick/backslash data) | the data char |
+/// | `U+E309` | COMPOUND_EXPANSION_WS_TAG (field-splitting glue) | nothing |
+/// | `U+E100`..=`U+E1FF` | conditional-pattern byte-chars | byte `(cp - E100)` as char |
 ///
 /// Ordering follows the storage-boundary contract documented in
 /// assignment_expansion.rs: carriers are restored while raw-byte marker
@@ -300,10 +300,11 @@ pub fn init_locale() {
 /// appended directly and never rescanned, so a pair carrying byte 0x11
 /// cannot be mistaken for CTLESC.
 ///
-/// Note: `U+E101`..=`U+E109` sit inside the BYTE_CHAR_BASE byte-char range
-/// (U+E100..=U+E1FF) — the same collision class as the retired E10A
-/// FAILED_SUBSCRIPT_SENTINEL. The DATA_* interpretation wins here because
-/// byte-chars for bytes 0x01-0x09 do not occur in token text.
+/// The DATA_* sentinels live in the registry block U+E301..=U+E30C —
+/// they were moved out of U+E101..=U+E10C, which sits inside the
+/// BYTE_CHAR_BASE byte-char range (U+E100..=U+E1FF) and collided with
+/// pattern byte-chars 0x01-0x0C (same bug class as the retired E10A
+/// FAILED_SUBSCRIPT_SENTINEL split).
 pub fn decode_to_visible_text(text: &str) -> String {
     use crate::executor::conditional::pattern::BYTE_CHAR_BASE;
     use crate::executor::embedded_mutations::{COMPOUND_EXPANSION_WS_TAG, QUOTED_NULL_MARKER};
@@ -313,17 +314,17 @@ pub fn decode_to_visible_text(text: &str) -> String {
     use crate::executor::types::DEFERRED_COMPOUND_BODY;
     use crate::lexer::{ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER};
 
-    const CTLESC: char = '\u{11}';
+    const CTLESC: char = crate::executor::markers::CTLESC;
     // DATA_* sentinels owned by assignment_expansion.rs (declared as
     // fn-local consts there): data quote/backtick/backslash carriers.
-    const DATA_SINGLE_QUOTE: char = '\u{E101}';
-    const DATA_DOUBLE_QUOTE: char = '\u{E102}';
-    const DATA_BACKTICK: char = '\u{E103}';
-    const DATA_ESCAPED_DQUOTE: char = '\u{E104}';
-    const DATA_ESCAPED_SQUOTE: char = '\u{E105}';
-    const DATA_ESCAPED_BACKSLASH: char = '\u{E106}';
-    const HOISTED_SINGLE_QUOTE: char = '\u{E107}';
-    const HOISTED_BACKSLASH: char = '\u{E108}';
+    const DATA_SINGLE_QUOTE: char = crate::executor::markers::ASSIGN_DATA_SQUOTE;
+    const DATA_DOUBLE_QUOTE: char = crate::executor::markers::ASSIGN_DATA_DQUOTE;
+    const DATA_BACKTICK: char = crate::executor::markers::ASSIGN_DATA_BACKTICK;
+    const DATA_ESCAPED_DQUOTE: char = crate::executor::markers::ASSIGN_ESCAPED_DQUOTE;
+    const DATA_ESCAPED_SQUOTE: char = crate::executor::markers::ASSIGN_ESCAPED_SQUOTE;
+    const DATA_ESCAPED_BACKSLASH: char = crate::executor::markers::ASSIGN_ESCAPED_BACKSLASH;
+    const HOISTED_SINGLE_QUOTE: char = crate::executor::markers::ASSIGN_HOISTED_SQUOTE;
+    const HOISTED_BACKSLASH: char = crate::executor::markers::ASSIGN_HOISTED_BACKSLASH;
 
     let byte_char = |code: u32| char::from_u32(code).expect("byte-char code point is valid");
 
@@ -353,17 +354,24 @@ pub fn decode_to_visible_text(text: &str) -> String {
             | PARAM_NAME_END_MARKER
             | QUOTED_NULL_MARKER
             | COMPOUND_EXPANSION_WS_TAG
-            | '\u{1b}'
-            | '\u{1c}'
-            | '\u{1d}' => {}
-            '\u{14}' | HOISTED_BACKSLASH | DATA_ESCAPED_BACKSLASH => out.push('\\'),
-            '\u{16}' | '\u{17}' | ANSI_C_QUOTE_MARKER | DATA_SINGLE_QUOTE | DATA_ESCAPED_SQUOTE
+            | crate::executor::markers::QUOTED_WORD_PREFIX
+            | crate::executor::markers::IFS_GLUE
+            | crate::executor::markers::STORAGE_WORD_PREFIX => {}
+            crate::executor::markers::DATA_BACKSLASH
+            | HOISTED_BACKSLASH
+            | DATA_ESCAPED_BACKSLASH => out.push('\\'),
+            crate::executor::markers::PROTECTED_ESCAPED_SQUOTE
+            | crate::executor::markers::DATA_SQUOTE
+            | ANSI_C_QUOTE_MARKER
+            | DATA_SINGLE_QUOTE
+            | DATA_ESCAPED_SQUOTE
             | HOISTED_SINGLE_QUOTE => out.push('\''),
-            '\u{18}' | ANSI_C_DQUOTE_MARKER | DATA_DOUBLE_QUOTE | DATA_ESCAPED_DQUOTE => {
-                out.push('"')
-            }
-            '\u{1a}' | DATA_BACKTICK => out.push('`'),
-            '\u{1f}' => out.push('$'),
+            crate::executor::markers::DATA_DQUOTE
+            | ANSI_C_DQUOTE_MARKER
+            | DATA_DOUBLE_QUOTE
+            | DATA_ESCAPED_DQUOTE => out.push('"'),
+            crate::executor::markers::DATA_BACKTICK | DATA_BACKTICK => out.push('`'),
+            crate::executor::markers::DATA_DOLLAR => out.push('$'),
             c if (BYTE_CHAR_BASE..BYTE_CHAR_BASE + 0x100).contains(&(c as u32)) => {
                 out.push(byte_char(c as u32 - BYTE_CHAR_BASE));
             }
@@ -414,7 +422,7 @@ mod tests {
         assert_eq!(super::decode_to_visible_text("\u{1d}(a b)"), "(a b)");
         assert_eq!(super::decode_to_visible_text("a\u{13}b"), "ab");
         assert_eq!(super::decode_to_visible_text("a\u{e002}b"), "ab");
-        assert_eq!(super::decode_to_visible_text("a\u{e109}b"), "ab");
+        assert_eq!(super::decode_to_visible_text("a\u{E309}b"), "ab");
         assert_eq!(super::decode_to_visible_text("a\u{3}b"), "ab");
     }
 
@@ -422,15 +430,19 @@ mod tests {
     fn decode_to_visible_text_restores_pua_quote_markers() {
         assert_eq!(super::decode_to_visible_text("a\u{e010}b"), "a'b");
         assert_eq!(super::decode_to_visible_text("a\u{e011}b"), "a\"b");
-        // Assignment DATA_* sentinels.
-        assert_eq!(super::decode_to_visible_text("a\u{e101}b"), "a'b");
-        assert_eq!(super::decode_to_visible_text("a\u{e102}b"), "a\"b");
-        assert_eq!(super::decode_to_visible_text("a\u{e103}b"), "a`b");
-        assert_eq!(super::decode_to_visible_text("a\u{e104}b"), "a\"b");
-        assert_eq!(super::decode_to_visible_text("a\u{e105}b"), "a'b");
-        assert_eq!(super::decode_to_visible_text("a\u{e106}b"), "a\\b");
-        assert_eq!(super::decode_to_visible_text("a\u{e107}b"), "a'b");
-        assert_eq!(super::decode_to_visible_text("a\u{e108}b"), "a\\b");
+        // Assignment DATA_* sentinels (registry block E301-E308; the old
+        // E101-E108 codepoints were inside the BYTE_CHAR_BASE byte-char
+        // range and collided with pattern byte-chars 0x01-0x08).
+        assert_eq!(super::decode_to_visible_text("a\u{E301}b"), "a'b");
+        assert_eq!(super::decode_to_visible_text("a\u{E302}b"), "a\"b");
+        assert_eq!(super::decode_to_visible_text("a\u{E303}b"), "a`b");
+        assert_eq!(super::decode_to_visible_text("a\u{E304}b"), "a\"b");
+        assert_eq!(super::decode_to_visible_text("a\u{E305}b"), "a'b");
+        assert_eq!(super::decode_to_visible_text("a\u{E306}b"), "a\\b");
+        assert_eq!(super::decode_to_visible_text("a\u{E307}b"), "a'b");
+        assert_eq!(super::decode_to_visible_text("a\u{E308}b"), "a\\b");
+        // Old DATA_* codepoints are plain byte-chars now: E101 = byte 0x01.
+        assert_eq!(super::decode_to_visible_text("a\u{e101}b"), "a\u{1}b");
     }
 
     #[test]

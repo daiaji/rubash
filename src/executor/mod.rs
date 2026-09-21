@@ -87,6 +87,7 @@ mod lookup_paths;
 mod loop_select;
 mod mapfile_builtin;
 mod mapfile_helpers;
+pub(crate) mod markers;
 mod option_builtins;
 mod parameter_core;
 mod parameter_errors;

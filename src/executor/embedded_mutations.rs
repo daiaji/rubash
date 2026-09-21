@@ -8,7 +8,7 @@ use crate::executor::parameter_core::word_contains_current_shell_command_substit
 // to the word text at 11940-11944 / 11841-11847, and list_string:3181-3186
 // keeps a QUOTED_NULL field as an empty argv entry). U+E000/U+E001 are
 // taken by the raw-byte and assignment data-quote sentinels; U+E002 free.
-pub(crate) const QUOTED_NULL_MARKER: char = '\u{E002}';
+pub(crate) const QUOTED_NULL_MARKER: char = crate::executor::markers::QUOTED_NULL_MARKER;
 
 // Whitespace that an expansion produced inside a quoted region of an
 // alternate word must survive field splitting (GNU carries CTLESC on
@@ -39,10 +39,10 @@ fn expansion_ws_marked(alternate: bool, preserve_quotes: bool, in_double: bool) 
 // The compound tag must NOT be \x1c: that byte is the IFS-protection
 // sentinel (command_prepare.rs mark_literal_ifs_chars /
 // strip_ifs_protection_markers), and the assignment-builtin boundary
-// strips it before the value reaches storage. U+E109 is disjoint from the
-// DATA_* quote sentinels (E101-E108) and survives to split_storage_words,
+// strips it before the value reaches storage. U+E309 is disjoint from the
+// DATA_* quote sentinels (E301-E308) and survives to split_storage_words,
 // where it glues its whitespace into the element word.
-pub(crate) const COMPOUND_EXPANSION_WS_TAG: char = '\u{E109}';
+pub(crate) const COMPOUND_EXPANSION_WS_TAG: char = crate::executor::markers::COMPOUND_EXPANSION_WS_TAG;
 
 pub(in crate::executor) fn mark_expansion_whitespace(value: &str, preserve_quotes: bool) -> String {
     if !preserve_quotes {
@@ -252,13 +252,13 @@ impl Executor {
                 // Compound RHS: emit the data-double-quote carrier the
                 // storage tokenizer recognizes instead of a bare quote
                 // that would reopen a quoted span during the re-split.
-                output.push(if preserve_quotes { '\u{e102}' } else { '"' });
+                output.push(if preserve_quotes { '\u{E302}' } else { '"' });
                 continue;
             }
 
-            if ch == '\u{e102}' {
+            if ch == '\u{E302}' {
                 // DATA_DOUBLE_QUOTE (assignment_expansion.rs): the compound
-                // hoist encodes the lexer's \x18 quote sentinels as E102 so
+                // hoist encodes the lexer's \x18 quote sentinels as E302 so
                 // they pass through untouched. They still delimit a "..."
                 // region for quote-state tracking (GNU parse.y:5305
                 // read_token_word keeps the dquote bit on the word), which

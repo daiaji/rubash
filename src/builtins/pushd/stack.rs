@@ -3,7 +3,7 @@ use crate::executor::path::shell_path_to_windows;
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-const SEP: char = '\x1f';
+const SEP: char = crate::executor::markers::DIR_STACK_FIELD_SEP;
 
 pub(super) fn strip_double_dash<'a>(args: &'a [&str]) -> &'a [&'a str] {
     if args.first().copied() == Some("--") {

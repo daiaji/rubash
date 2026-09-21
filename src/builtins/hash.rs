@@ -347,8 +347,8 @@ fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, (String, u3
                 .split('\x1f')
                 .filter_map(|entry| {
                     let (name, rest) = entry.split_once('=')?;
-                    let (path, tail) = rest.split_once('\x1e').unwrap_or((rest, "0"));
-                    let (hits, seq) = tail.split_once('\x1e').unwrap_or((tail, "0"));
+                    let (path, tail) = rest.split_once(crate::executor::markers::HASH_ENV_FIELD_SEP).unwrap_or((rest, "0"));
+                    let (hits, seq) = tail.split_once(crate::executor::markers::HASH_ENV_FIELD_SEP).unwrap_or((tail, "0"));
                     Some((
                         name.to_string(),
                         (
@@ -368,7 +368,7 @@ fn store_hash_table(env_vars: &mut HashMap<String, String>, table: &HashMap<Stri
         HASH_TABLE.to_string(),
         table
             .iter()
-            .map(|(name, (path, hits, seq))| format!("{name}={path}\x1e{hits}\x1e{seq}"))
+            .map(|(name, (path, hits, seq))| format!("{name}={path}{s}{hits}{s}{seq}", s = crate::executor::markers::HASH_ENV_FIELD_SEP))
             .collect::<Vec<_>>()
             .join("\x1f"),
     );

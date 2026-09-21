@@ -795,7 +795,7 @@ impl Executor {
         // 0x0e is unused by every other sentinel layer (the lexer's
         // PARAM_NAME_END_MARKER is 0x13); protect/restore is local to this
         // function, so the two never interact.
-        const PROTECTED_LITERAL_BACKSLASH: char = '\x0e';
+        const PROTECTED_LITERAL_BACKSLASH: char = crate::executor::markers::PARAM_WORD_BACKSLASH_GUARD;
         let chars: Vec<char> = value.chars().collect();
         let mut protected = String::with_capacity(value.len());
         let mut index = 0usize;

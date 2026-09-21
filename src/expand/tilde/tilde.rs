@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-pub const QUOTED_ASSIGNMENT_VALUE: char = '\x1c';
+pub const QUOTED_ASSIGNMENT_VALUE: char = crate::executor::markers::QUOTED_WORD_VALUE_PREFIX;
 
 pub fn home_value(env_vars: &HashMap<String, String>) -> String {
     // Bash's tilde expansion follows HOME when it is set. USERPROFILE is

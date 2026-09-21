@@ -10,7 +10,7 @@
 
 ### 甲类：标记/载体字节（带内哨兵机制）
 
-rubash 用带内哨兵（C0 字节 \x11–\x1f、PUA 码点 E000–E10C、命名串
+rubash 用带内哨兵（C0 字节 \x11–\x1f、PUA 码点 E000–E317、命名串
 `__RUBASH_CA1__`/`__RUBASH_HD1__`/`__RUBASH_CSB1__`）在词展开管线里承载
 引号/来源信息，对标 GNU 的 CTLESC/CTLNUL。
 
@@ -58,16 +58,28 @@ rubash 用带内哨兵（C0 字节 \x11–\x1f、PUA 码点 E000–E10C、命名
 
 ## 三、治理机制（新代码必须遵守）
 
-### 3.1 标记注册表（markers.rs，待建）
+### 3.1 标记注册表（markers.rs，已建 — M1 落地 2026-09-22）
 
 - 所有哨兵字节/PUA 码点/命名标记串**只允许**在 `src/executor/markers.rs`
   声明一次；业务代码禁止裸写 `\x14`、`E10A` 等字面量，一律 `use markers::*`。
 - 每个标记声明必须包含：字节值、含义、**编码函数**、**解码函数**（同文件相邻、
-  成对导出）、消费者边界清单（输出/存储/重解析三类边界各写明谁负责还原）。
+  成对导出）、消费者边界清单（输出/存储/重解析三类边界各写明谁负责还原）、
+  **用户可达性**（`user_reachable`：用户同字节入口必须在同点编码，
+  否则字面量字节被误当标记——B1 \x05 教训）。
 - 新增标记 = 新增一对 encode/decode + 一条"标记值不得出现在 stdout、
   `declare -p`、xtrace 输出"的金标断言测试。
-- **立即项**：拆分 E10A 双占用（FAILED_SUBSCRIPT_SENTINEL 换空闲码点），
-  这是现存碰撞，一行改动，优先级最高。
+- **E10A 双占用已拆**（前置已落地）：FAILED_SUBSCRIPT_SENTINEL = U+E200。
+- **E1xx/UTF-8 混排歧义已解（M1）**：DATA_* 哨兵族与
+  COMPOUND_EXPANSION_WS_TAG 从 E101-E10C 迁入专属注册块
+  **U+E301..=U+E30C**（原码点落在 BYTE_CHAR_BASE 动态字节字符区
+  E100-E1FF 内，与模式字节字符 0x01-0x0C 同值碰撞）；PATSUB 族
+  （\x0b/\x0c/\x0e/\x0f）与四个函数级保护哨兵（parameter_words \x0e、
+  command_prepare \x1e、preserve_prompt_escapes \x15、case-pattern \x15）
+  迁入 **U+E310..=U+E317**，彻底脱离用户可达字节域。
+- M1 已完成：注册表 + 全部具名 const 别名化 + 碰撞区重编号 + 注册表
+  自洽测试（无 E1xx 内哨兵、PUA 唯一性、char/_STR 一致性、pair roundtrip）。
+  待办：M2/M3 裸字面量迁移（\x1f/\x1d 高频优先）、M4 三边界收口、
+  M5 金标断言 + 全量基线。
 
 ### 3.2 解码收口
 

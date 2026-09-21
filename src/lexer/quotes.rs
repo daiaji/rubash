@@ -7,7 +7,7 @@ use super::dolbrace::{scan_braced_parameter, BraceContext, DolbraceState};
 /// `xb` (bash keeps the name boundary in the word's quote structure,
 /// subst.c param_expand). The marker is a non-name character: name
 /// collection stops at it, and the expansion walkers drop it from output.
-pub(crate) const PARAM_NAME_END_MARKER: char = '\u{13}';
+pub(crate) const PARAM_NAME_END_MARKER: char = crate::executor::markers::PARAM_NAME_END_MARKER;
 
 /// Quote markers emitted by `escape_decoded_ansi_c_quotes` for quote
 /// characters produced by ANSI-C decoding of a `$'...'` word. They travel
@@ -24,13 +24,13 @@ pub(crate) const PARAM_NAME_END_MARKER: char = '\u{13}';
 /// (EE 80 82) whose bytes all pass the `>= ' '` check, so it printed raw
 /// instead of as the `^W` that U+0017 produces. Start at U+E010 to keep a
 /// margin between the two marker families.
-pub(crate) const ANSI_C_QUOTE_MARKER: char = '\u{E010}';
-pub(crate) const ANSI_C_DQUOTE_MARKER: char = '\u{E011}';
+pub(crate) const ANSI_C_QUOTE_MARKER: char = crate::executor::markers::ANSI_C_QUOTE_MARKER;
+pub(crate) const ANSI_C_DQUOTE_MARKER: char = crate::executor::markers::ANSI_C_DQUOTE_MARKER;
 
 /// `&str` forms for the `.replace(...)` restore sites, whose receivers are
 /// already `String` and therefore require `&str` arguments.
-pub(crate) const ANSI_C_QUOTE_MARKER_STR: &str = "\u{E010}";
-pub(crate) const ANSI_C_DQUOTE_MARKER_STR: &str = "\u{E011}";
+pub(crate) const ANSI_C_QUOTE_MARKER_STR: &'static str = crate::executor::markers::ANSI_C_QUOTE_MARKER_STR;
+pub(crate) const ANSI_C_DQUOTE_MARKER_STR: &'static str = crate::executor::markers::ANSI_C_DQUOTE_MARKER_STR;
 
 pub(crate) fn remove_shell_quotes(raw: &str) -> String {
     remove_shell_quotes_with_posix(raw, false)
