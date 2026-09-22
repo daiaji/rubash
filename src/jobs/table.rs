@@ -45,7 +45,6 @@ pub struct JobTable {
     pub completed_statuses: HashMap<u32, i32>,
     current_job: Option<JobId>,
     previous_job: Option<JobId>,
-    next_job_id: JobId,
 }
 
 impl JobTable {
@@ -64,8 +63,20 @@ impl JobTable {
         command: impl Into<String>,
         background: bool,
     ) -> JobId {
-        let id = self.next_job_id.max(1);
-        self.next_job_id = id.saturating_add(1);
+        // GNU jobs.c:586-614 alloc_job_entry: a non-interactive shell scans
+        // forward from js.j_lastj and takes the first free slot — the job
+        // number is the slot index, which keeps holes open for jobs that
+        // were reaped earlier and is only lowered again when the tail of
+        // the table is freed (delete_job/cleanup_dead_jobs recompute
+        // j_lastj, jobs.c:1270-1292). The next id is therefore
+        // highest-occupied-id + 1, NOT a monotonic counter and NOT the
+        // lowest free slot: with {1,3} live, the next job is %4; once %3
+        // is removed the next is %2.
+        let id = self
+            .jobs
+            .keys()
+            .next_back()
+            .map_or(1, |highest| highest.saturating_add(1));
         let processes = pids
             .iter()
             .copied()
@@ -137,10 +148,91 @@ impl JobTable {
         self.previous_job
     }
 
+    /// GNU jobs.c:3668 most_recent_job_in_state: newest job with an id
+    /// below `below` in the requested state.
+    fn most_recent_in_state(&self, below: JobId, state: ProcessState) -> Option<JobId> {
+        self.jobs
+            .range(..below)
+            .rev()
+            .find(|(_, job)| job.state == state)
+            .map(|(id, _)| *id)
+    }
+
+    /// GNU jobs.c:3705-3757 set_current_job: JOB becomes current; previous
+    /// is (1) the old current if still a stopped job, (2) the newest
+    /// stopped job older than current when current is stopped, (3) the
+    /// newest running job older than current (or newest overall when
+    /// current is stopped), (4) current itself when it is the only job.
     pub fn set_current_job(&mut self, id: JobId) {
         if self.current_job != Some(id) {
             self.previous_job = self.current_job;
             self.current_job = Some(id);
+        }
+        let Some(current) = self.current_job else {
+            return;
+        };
+        if self.previous_job != Some(current)
+            && self
+                .previous_job
+                .and_then(|prev| self.jobs.get(&prev))
+                .is_some_and(|job| job.state == ProcessState::Stopped)
+        {
+            return;
+        }
+        let current_stopped = self
+            .jobs
+            .get(&current)
+            .is_some_and(|job| job.state == ProcessState::Stopped);
+        if current_stopped {
+            if let Some(candidate) = self.most_recent_in_state(current, ProcessState::Stopped) {
+                self.previous_job = Some(candidate);
+                return;
+            }
+        }
+        let running_candidate = if !current_stopped {
+            self.most_recent_in_state(current, ProcessState::Running)
+        } else {
+            self.jobs
+                .iter()
+                .rev()
+                .find(|(_, job)| job.state == ProcessState::Running)
+                .map(|(id, _)| *id)
+        };
+        match running_candidate {
+            Some(candidate) => self.previous_job = Some(candidate),
+            None => self.previous_job = Some(current),
+        }
+    }
+
+    /// GNU jobs.c:3759-3797 reset_current: recompute current/previous after
+    /// jobs die or are deleted — current stays if it is a stopped job, else
+    /// the stopped previous, else the newest stopped, else the newest
+    /// running job; NO_JOB when the table is empty.
+    pub fn reset_current(&mut self) {
+        let current_stopped = self
+            .current_job
+            .and_then(|id| self.jobs.get(&id))
+            .is_some_and(|job| job.state == ProcessState::Stopped);
+        let candidate = if current_stopped {
+            self.current_job
+        } else {
+            let previous_stopped = self
+                .previous_job
+                .and_then(|id| self.jobs.get(&id))
+                .is_some_and(|job| job.state == ProcessState::Stopped);
+            if previous_stopped {
+                self.previous_job
+            } else {
+                self.most_recent_in_state(JobId::MAX, ProcessState::Stopped)
+                    .or_else(|| self.most_recent_in_state(JobId::MAX, ProcessState::Running))
+            }
+        };
+        match candidate {
+            Some(id) => self.set_current_job(id),
+            None => {
+                self.current_job = None;
+                self.previous_job = None;
+            }
         }
     }
 
@@ -194,6 +286,9 @@ impl JobTable {
             job.notified = false;
         }
         self.recompute_job(job_id);
+        // GNU jobs.c waitchld: a job that has just stopped becomes the
+        // current job.
+        self.set_current_job(job_id);
     }
 
     pub fn mark_running(&mut self, pid: u32) {
@@ -204,9 +299,10 @@ impl JobTable {
             if let Some(process) = job.processes.get_mut(&pid) {
                 process.state = ProcessState::Running;
             }
-            job.foreground = true;
         }
-        self.set_current_job(job_id);
+        // jobs.c start_job/set_job_running: a Running transition does not
+        // pick the job as current. Callers decide: fg -> set_current_job,
+        // bg -> reset_current.
         self.recompute_job(job_id);
     }
 
@@ -248,18 +344,21 @@ impl JobTable {
             .filter(|(_, job)| job.state == ProcessState::Completed && job.notified)
             .map(|(job_id, _)| *job_id)
             .collect();
+        let mut removed_current_or_previous = false;
         for job_id in dead_notified {
+            removed_current_or_previous |=
+                Some(job_id) == self.current_job || Some(job_id) == self.previous_job;
             if let Some(job) = self.jobs.remove(&job_id) {
                 for pid in &job.pids {
                     self.pid_to_job.remove(pid);
                 }
             }
-            if self.current_job == Some(job_id) {
-                self.current_job = self.previous_job;
-            }
-            if self.previous_job == Some(job_id) {
-                self.previous_job = None;
-            }
+        }
+        // GNU delete_job (jobs.c:1535-1543): current/previous are reset only
+        // when the deleted job held one of the markers; deleting any other
+        // job leaves them alone.
+        if removed_current_or_previous {
+            self.reset_current();
         }
     }
 
@@ -337,11 +436,10 @@ impl JobTable {
             self.pid_to_job.remove(pid);
             self.completed_statuses.remove(pid);
         }
-        if self.current_job == Some(job_id) {
-            self.current_job = self.previous_job;
-        }
-        if self.previous_job == Some(job_id) {
-            self.previous_job = None;
+        // jobs.c:1541-1543 delete_job: reset_current only when the removed
+        // job held the current or previous marker.
+        if Some(job_id) == self.current_job || Some(job_id) == self.previous_job {
+            self.reset_current();
         }
         true
     }
@@ -363,11 +461,8 @@ impl JobTable {
         for candidate in &job.pids {
             self.pid_to_job.remove(candidate);
         }
-        if self.current_job == Some(job_id) {
-            self.current_job = self.previous_job;
-        }
-        if self.previous_job == Some(job_id) {
-            self.previous_job = None;
+        if Some(job_id) == self.current_job || Some(job_id) == self.previous_job {
+            self.reset_current();
         }
         true
     }

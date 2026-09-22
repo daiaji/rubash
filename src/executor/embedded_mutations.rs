@@ -1487,6 +1487,7 @@ impl Executor {
         self.shell_state
             .subshell_depth
             .set(saved_state.subshell_depth.get() + 1);
+        self.shell_state.in_command_substitution.set(true);
 
         let saved_capture = self.stdout_capture.take();
         self.stdout_capture = Some(Vec::new());

@@ -108,6 +108,9 @@ impl Executor {
         self.shell_state
             .subshell_depth
             .set(saved_state.subshell_depth() + 1);
+        // execute_cmd.c:1576 execute_in_subshell marks SUBSHELL_COMSUB —
+        // start_job (jobs.c:3837) refuses fg/bg inside it.
+        self.shell_state.in_command_substitution.set(true);
         self.shell_state.parameter_bad_substitution.set(false);
         // Bash evaluates BASH_COMMAND in a command substitution against the
         // substitution's own command source, rather than the outer word.
@@ -656,6 +659,7 @@ impl Executor {
         shell_state
             .subshell_depth
             .set(self.shell_state.subshell_depth.get() + 1);
+        shell_state.in_command_substitution.set(true);
         // Mid-expansion error latches belong to the parent's in-flight word
         // expansion; the forked child starts with a clean slate (same as a
         // real fork, where no such rubash-internal latch exists).

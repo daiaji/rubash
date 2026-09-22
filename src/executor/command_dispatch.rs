@@ -147,6 +147,19 @@ impl Executor {
         let Some(word) = cmd.words.first() else {
             return Ok(());
         };
+        // GNU execute_cmd.c:4750-4757: a simple command whose first word
+        // starts with `%` is a job spec — dispatch to fg (bg when async)
+        // before builtin/function/PATH lookup, with the `%` word itself as
+        // the jobspec operand (fg_bg.def get_job_spec sees it in word[0]).
+        // The fg builtin itself reports "no job control" when the monitor
+        // option is off.
+        if word.starts_with('%') {
+            let mut fg_cmd = cmd.clone();
+            fg_cmd.words.insert(0, "fg".to_string());
+            self.exit_code =
+                self.execute_fg_bg(&fg_cmd, crate::builtins::fg_bg::JobControlBuiltin::Fg)?;
+            return Ok(());
+        }
         if let Some(message) = self.restricted_command_error(cmd, word) {
             self.write_default_stderr(message.as_bytes())?;
             self.exit_code = 1;

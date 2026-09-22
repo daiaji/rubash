@@ -2481,7 +2481,7 @@ impl Executor {
     }
 }
 
-fn signal_trap_name(signal: i32) -> Option<String> {
+pub(crate) fn signal_trap_name(signal: i32) -> Option<String> {
     if signal <= 0 {
         return None;
     }

@@ -44,7 +44,13 @@ where
                 stderr,
                 "{diagnostic_prefix}{name}: -{option}: invalid option"
             )?;
-            writeln!(stderr, "{name}: usage: {name} [job_spec ...]")?;
+            // GNU fg_bg.def $SHORT_DOC: `fg [job_spec]` (single job),
+            // `bg [job_spec ...]` (multiple).
+            let usage = match builtin {
+                JobControlBuiltin::Fg => "fg: usage: fg [job_spec]",
+                JobControlBuiltin::Bg => "bg: usage: bg [job_spec ...]",
+            };
+            writeln!(stderr, "{usage}")?;
             return Ok(FgBgAction::Complete(EX_USAGE));
         }
     }

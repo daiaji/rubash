@@ -323,6 +323,13 @@ pub fn process_exists(pid: u32) -> bool {
     pid == std::process::id() || signal_process(pid, 0).is_ok_or_permission_denied()
 }
 
+/// jobs.c:3926-3928 continue_job: fg/bg resume a stopped job by signalling
+/// SIGCONT to the process group; per-pid delivery is the rubash equivalent
+/// of killpg over the job's process list.
+pub fn send_signal(pid: u32, signal: i32) -> Result<(), &'static str> {
+    signal_process(pid, signal)
+}
+
 pub fn register_signal_mailbox(pid: u32) -> io::Result<()> {
     let dir = signal_mailbox_dir();
     std::fs::create_dir_all(&dir)?;
@@ -389,6 +396,32 @@ pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
         signals = take_file_signals(pid)?;
     }
     Ok(signals)
+}
+
+/// Unthrottled variant of take_pending_signals: always scans the
+/// per-delivery file mailbox. Used where delivery latency is observable —
+/// `wait`'s interruptible poll (wait.def:170-206) and the in-process
+/// ${THIS_SH} child boundary that must drain the emulated child's queue.
+pub fn take_pending_signals_now(pid: u32) -> io::Result<Vec<i32>> {
+    let mut signals = take_self_signals();
+    signals.extend(take_file_signals(pid)?);
+    Ok(signals)
+}
+
+/// Push drained signals back to the front of this process's pending queue
+/// (preserving order). `wait` re-queues what it peeked so the command
+/// boundary's run_pending_signal_traps still dispatches the trap actions
+/// (wait.def:174 — "the trap associated with that signal shall be taken"
+/// AFTER wait returns >128), and the in-process ${THIS_SH} child boundary
+/// restores signals that were pending for the parent before it started.
+pub fn requeue_pending_signals(signals: Vec<i32>) {
+    if signals.is_empty() {
+        return;
+    }
+    let mut queue = SELF_SIGNALS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    queue.splice(..0, signals);
 }
 
 fn take_file_signals(pid: u32) -> io::Result<Vec<i32>> {

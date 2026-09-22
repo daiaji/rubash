@@ -177,6 +177,7 @@ impl Executor {
                 dollar_vars_changed_by_set: false,
                 random_state: RandomGen::seeded(),
                 subshell_depth: Cell::new(0),
+                in_command_substitution: Cell::new(false),
                 job_table: crate::jobs::table::JobTable::default(),
                 last_background_pid: None,
                 coproc_names: HashMap::new(),

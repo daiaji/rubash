@@ -344,6 +344,30 @@ impl Executor {
             self.shell_state.job_table.clone()
         };
         let saved_background_children = std::mem::take(&mut self.background_children);
+        // The fd table is a process boundary too: a child's persistent
+        // `exec 2>/dev/null` (redir.c do_redirection_internal without undo)
+        // dies with the real child process, but the in-process emulation
+        // would leak it into the parent's table and silence every later
+        // diagnostic (jobs1.sub's trailing `exec 2>/dev/null` ate all
+        // parent stderr). Restore the parent's table; the child's entries
+        // drop — and close — like a real exit.
+        let saved_fd_table = self.fd_table.clone();
+        // A ${THIS_SH} child is a process boundary for signal delivery too:
+        // the pending-signal mailbox is keyed by process id, which the
+        // in-process child shares with the parent, so signals queued for
+        // the parent would otherwise be consumed by the child's
+        // run_pending_signal_traps. Park the parent's queue for the run;
+        // signals delivered while the child lives belong to the emulated
+        // child process and are discarded at restore below (GNU: the real
+        // child's pending queue dies with its pid — a signal like
+        // jobs9.sub's `kill -USR1 $$` must never leak into the parent and
+        // kill it at a later command boundary).
+        let saved_pending_signals = if this_shell_invocation {
+            crate::builtins::kill::take_pending_signals_now(std::process::id())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         self.set_env("__RUBASH_SCRIPT_NAME", script);
         // When this_shell_invocation is true, cmd.words[0] is the shell
         // command (e.g. ${THIS_SH}) and cmd.words[1] is the script path;
@@ -431,6 +455,15 @@ impl Executor {
         self.shell_state.last_background_pid = saved_last_background_pid;
         self.shell_state.job_table = saved_job_table;
         self.background_children = saved_background_children;
+        self.fd_table = saved_fd_table;
+        if this_shell_invocation {
+            // Discard signals that arrived while the emulated child was
+            // alive — GNU's real child exits with its queue — then hand the
+            // parent's parked queue back so nothing addressed to this
+            // process is lost.
+            let _ = crate::builtins::kill::take_pending_signals_now(std::process::id());
+            crate::builtins::kill::requeue_pending_signals(saved_pending_signals);
+        }
         self.parse_error_occurred = saved_parse_error;
         self.last_command_substitution_parse_error
             .set(saved_comsub_parse_error);

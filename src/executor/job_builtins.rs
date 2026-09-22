@@ -1,6 +1,16 @@
 use super::*;
 use std::io::Write;
 
+/// Result of waiting for one background pid. `Interrupted` carries the
+/// 128+signal status GNU's wait_intr_flag longjmp produces
+/// (wait.def:181-191): the job stays live and the signal is re-queued so
+/// the trap action still runs at the next command boundary.
+enum WaitPidOutcome {
+    NotFound,
+    Status(i32),
+    Interrupted(i32),
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_times(
         &mut self,
@@ -192,6 +202,13 @@ impl Executor {
                 self.shell_state.env_vars.remove(&name);
             }
         }
+        // GNU wait.def:193-206 first_pending_trap: a trapped signal already
+        // pending makes `wait` return 128+sig without waiting at all (the
+        // trap action runs at the next command boundary).
+        if let Some(interrupt) = self.wait_pending_signal_status()? {
+            self.write_buffered_builtin_output(cmd, &[], &[])?;
+            return Ok(interrupt);
+        }
         if let Some(request) = wait_any_request(&cmd.words[1..]) {
             // GNU builtins/wait.def:209-246 + jobs.c:3456 wait_for_any_job:
             // `wait -n` returns the first unnotified dead job in slot order,
@@ -221,6 +238,12 @@ impl Executor {
 
             loop {
                 self.refresh_background_jobs()?;
+                // wait.def:328-331: the -n wait loop is interruptible by a
+                // trapped signal just like the operand form.
+                if let Some(interrupt) = self.wait_pending_signal_status()? {
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    return Ok(interrupt);
+                }
                 if let Some((pid, status)) = self.first_completed_wait_candidate(&candidates) {
                     self.join_coproc_stderr_forwarder(pid)?;
                     // wait -n consumes the job (delete_job); the status stays
@@ -270,7 +293,15 @@ impl Executor {
                 .flat_map(|job| job.pids.iter().copied())
                 .collect::<Vec<_>>();
             for pid in pids {
-                let _ = self.wait_for_background_pid(pid, false)?;
+                // wait.def:238-245 wait_for_any_job + :328-331: a trapped
+                // signal interrupts the no-operand wait too, returning
+                // 128+sig.
+                if let WaitPidOutcome::Interrupted(interrupt) =
+                    self.wait_for_background_pid(pid, false)?
+                {
+                    self.write_buffered_builtin_output(cmd, &[], &[])?;
+                    return Ok(interrupt);
+                }
             }
             self.write_buffered_builtin_output(cmd, &[], &[])?;
             // Bash's no-operand wait reports success after waiting for all
@@ -299,14 +330,22 @@ impl Executor {
 
         if cmd.words.len() == 2 {
             if let Some(pid) = self.resolve_background_job(&cmd.words[1]) {
-                if let Some(status) = self.wait_for_background_pid(pid, true)? {
-                    self.write_buffered_builtin_output(cmd, &[], &[])?;
-                    return Ok(status);
+                match self.wait_for_background_pid(pid, true)? {
+                    WaitPidOutcome::Status(status)
+                    | WaitPidOutcome::Interrupted(status) => {
+                        self.write_buffered_builtin_output(cmd, &[], &[])?;
+                        return Ok(status);
+                    }
+                    WaitPidOutcome::NotFound => {}
                 }
             } else if let Ok(pid) = cmd.words[1].parse::<u32>() {
-                if let Some(status) = self.wait_for_background_pid(pid, true)? {
-                    self.write_buffered_builtin_output(cmd, &[], &[])?;
-                    return Ok(status);
+                match self.wait_for_background_pid(pid, true)? {
+                    WaitPidOutcome::Status(status)
+                    | WaitPidOutcome::Interrupted(status) => {
+                        self.write_buffered_builtin_output(cmd, &[], &[])?;
+                        return Ok(status);
+                    }
+                    WaitPidOutcome::NotFound => {}
                 }
             }
         }
@@ -410,13 +449,20 @@ impl Executor {
                 last_pid = None;
                 continue;
             };
-            if let Some(wait_status) = self.wait_for_background_pid(pid, true)? {
-                status = wait_status;
-                last_pid = Some(pid);
-            } else {
-                status =
-                    write_wait_operand_error(&operand, &self.diagnostic_prefix(), &mut stderr)?;
-                last_pid = None;
+            match self.wait_for_background_pid(pid, true)? {
+                WaitPidOutcome::Interrupted(interrupt_status) => {
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    return Ok(interrupt_status);
+                }
+                WaitPidOutcome::Status(wait_status) => {
+                    status = wait_status;
+                    last_pid = Some(pid);
+                }
+                WaitPidOutcome::NotFound => {
+                    status =
+                        write_wait_operand_error(&operand, &self.diagnostic_prefix(), &mut stderr)?;
+                    last_pid = None;
+                }
             }
         }
 
@@ -639,19 +685,34 @@ impl Executor {
         &mut self,
         pid: u32,
         _retain_for_explicit_wait: bool,
-    ) -> Result<Option<i32>, ExecuteError> {
+    ) -> Result<WaitPidOutcome, ExecuteError> {
         if let Some(status) = self.shell_state.job_table.completed_statuses.get(&pid).copied() {
             self.join_coproc_stderr_forwarder(pid)?;
             // Waiting consumes the jobs-table entry, but the completed status
             // remains available for a later explicit wait of the same PID.
             self.shell_state.job_table.remove_job_by_pid_preserve_status(pid);
             self.forget_background_runtime(pid);
-            return Ok(Some(status));
+            return Ok(WaitPidOutcome::Status(status));
         }
         let Some(mut child) = self.background_children.remove(&pid) else {
-            return Ok(None);
+            return Ok(WaitPidOutcome::NotFound);
         };
-        let status = child.wait()?.code().unwrap_or(1);
+        // GNU jobs.c:3064 wait_for + wait.def:178-191 wait_intr_flag: the
+        // blocking waitpid is interruptible — a trapped signal longjmps out
+        // and wait returns 128+sig while the job stays live. The mailbox
+        // emulation cannot interrupt WaitForSingleObject, so poll the child
+        // and drain pending signals between polls; on interruption put the
+        // handle back so the job remains waitable and reportable.
+        let status = loop {
+            if let Some(done) = child.try_wait()? {
+                break done.code().unwrap_or(1);
+            }
+            if let Some(interrupt) = self.wait_pending_signal_status()? {
+                self.background_children.insert(pid, child);
+                return Ok(WaitPidOutcome::Interrupted(interrupt));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
         self.join_coproc_stderr_forwarder(pid)?;
         self.shell_state.job_table.mark_completed(pid, status);
         self.run_sigchld_trap_for_reaped_child()?;
@@ -659,7 +720,49 @@ impl Executor {
         // status for repeated explicit PID waits.
         self.shell_state.job_table.remove_job_by_pid_preserve_status(pid);
         self.forget_background_runtime(pid);
-        Ok(Some(status))
+        Ok(WaitPidOutcome::Status(status))
+    }
+
+    /// GNU wait.def:193-206 + :328-331: drain this process's pending-signal
+    /// mailbox while waiting. An untrapped non-SIGCHLD signal aborts the
+    /// shell with 128+sig (ExecuteError::ExitCode); a trapped signal makes
+    /// `wait` return 128+sig immediately — SIGCHLD is exempt outside posix
+    /// mode (wait.def:195-199). Everything drained is re-queued so the
+    /// command boundary's run_pending_signal_traps still runs the trap
+    /// actions after wait returns ("the trap associated with that signal
+    /// shall be taken").
+    fn wait_pending_signal_status(&mut self) -> Result<Option<i32>, ExecuteError> {
+        let signals =
+            crate::builtins::kill::take_pending_signals_now(std::process::id()).unwrap_or_default();
+        if signals.is_empty() {
+            return Ok(None);
+        }
+        let posixly =
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "posix");
+        let mut interrupt = None;
+        for &signal in &signals {
+            // SIGCHLD only breaks out of `wait` under posixly_correct.
+            if signal == 17 && !posixly {
+                continue;
+            }
+            let Some(name) = super::trap_exec::signal_trap_name(signal) else {
+                continue;
+            };
+            match crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, &name) {
+                Some(action) if !action.is_empty() => {
+                    interrupt = Some(signal);
+                    break;
+                }
+                // Explicitly ignored (trap '' USR1) or SIGCHLD under posix:
+                // not fatal, not interrupting.
+                Some(_) => continue,
+                None => return Err(ExecuteError::ExitCode(128 + signal)),
+                // signals delivered but never named (signal_trap_name
+                // gives None for out-of-range) are dropped with the rest.
+            }
+        }
+        crate::builtins::kill::requeue_pending_signals(signals);
+        Ok(interrupt.map(|signal| 128 + signal))
     }
 
     fn background_jobs_output(
@@ -715,16 +818,19 @@ impl Executor {
     }
 
     fn ordered_background_jobs(&self) -> Vec<(usize, u32, String)> {
+        // GNU jobs.c: the printed job number is the job's slot index
+        // (alloc_job_entry), stable across removals — holes stay open, so
+        // with jobs %1 and %3 the list shows `[1] [3]`, never a renumbered
+        // `[1] [2]`.
         self.shell_state.job_table
             .jobs
             .values()
             .filter(|job| job.background)
-            .enumerate()
-            .filter_map(|(index, job)| {
+            .filter_map(|job| {
                 job.pids
                     .last()
                     .copied()
-                    .map(|pid| (index + 1, pid, job.command.clone()))
+                    .map(|pid| (job.id as usize, pid, job.command.clone()))
             })
             .collect()
     }
@@ -867,6 +973,17 @@ impl Executor {
                         self.fd_table.close(pid);
                         self.shell_state.job_table.remove_job_by_pid(pid);
                     } else {
+                        // GNU jobs.def:283-289 disown_builtin: non-numeric
+                        // operands go through get_job_spec, which warns when
+                        // the spec lacks a leading `%` (common.c:705-710)
+                        // before failing with "no such job".
+                        if !job.starts_with('%') && job.parse::<u32>().is_err() {
+                            writeln!(
+                                stderr,
+                                "{}disown: warning: {job}: job specification requires leading `%'",
+                                self.diagnostic_prefix()
+                            )?;
+                        }
                         writeln!(
                             stderr,
                             "{}disown: {job}: no such job",
@@ -911,16 +1028,12 @@ impl Executor {
     }
 
     fn background_job_number(&self, pid: u32) -> usize {
+        // Same slot-index numbering as ordered_background_jobs — the
+        // printed `%N` must resolve to the same job `wait %N` sees.
         self.shell_state.job_table
             .pid_to_job
             .get(&pid)
-            .and_then(|job_id| {
-                self.shell_state.job_table
-                    .jobs
-                    .keys()
-                    .position(|candidate| candidate == job_id)
-            })
-            .map(|index| index + 1)
+            .map(|job_id| *job_id as usize)
             .unwrap_or(1)
     }
 
@@ -929,6 +1042,7 @@ impl Executor {
         cmd: &CommandNode,
         builtin: crate::builtins::fg_bg::JobControlBuiltin,
     ) -> Result<i32, ExecuteError> {
+        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let action = crate::builtins::fg_bg::execute_with_io(
             builtin,
@@ -967,22 +1081,23 @@ impl Executor {
                 } else {
                     match builtin {
                         crate::builtins::fg_bg::JobControlBuiltin::Fg => {
-                            self.execute_fg_jobs(jobs, &mut stderr)?
+                            self.execute_fg_jobs(jobs, &mut stdout, &mut stderr)?
                         }
                         crate::builtins::fg_bg::JobControlBuiltin::Bg => {
-                            self.execute_bg_jobs(jobs, &mut stderr)?
+                            self.execute_bg_jobs(jobs, &mut stdout, &mut stderr)?
                         }
                     }
                 }
             }
         };
-        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
 
     fn execute_fg_jobs(
         &mut self,
         jobs: Vec<String>,
+        stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
     ) -> Result<i32, ExecuteError> {
         let job = jobs.first().map(String::as_str);
@@ -1004,26 +1119,64 @@ impl Executor {
             )?;
             return Ok(1);
         }
-
-        let Some(mut child) = self.background_children.remove(&pid) else {
-            self.close_coproc_endpoints(pid);
-            self.fd_table.close(pid);
+        let Some(job_id) = self.shell_state.job_table.job_id_for_pid(pid) else {
             self.write_job_not_found("fg", job, stderr)?;
             return Ok(1);
         };
-        self.close_coproc_endpoints(pid);
-        self.fd_table.close(pid);
-        let status = child.wait()?.code().unwrap_or(1);
-        self.shell_state.job_table.mark_completed(pid, status);
-        self.run_sigchld_trap_for_reaped_child()?;
-        let status = self.shell_state.job_table.wait_pid(pid).unwrap_or(status);
-        self.shell_state.job_table.remove_job_by_pid(pid);
-        Ok(status)
+        // GNU jobs.c:3837-3843 start_job: a command substitution child
+        // sharing the shell's process group cannot take terminal control —
+        // fg/bg inside `$( )` reports "no current jobs". This gate precedes
+        // the DEADJOB/live-child checks, just like GNU.
+        if self.shell_state.in_command_substitution.get() {
+            writeln!(stderr, "{}fg: no current jobs", self.diagnostic_prefix())?;
+            return Ok(1);
+        }
+
+        if !self.background_children.contains_key(&pid)
+            && !self
+                .shell_state
+                .job_table
+                .completed_statuses
+                .contains_key(&pid)
+        {
+            self.write_job_not_found("fg", job, stderr)?;
+            return Ok(1);
+        }
+
+        // GNU jobs.c:3826 start_job(foreground=1): the job becomes current
+        // and foreground, its command text is printed (jobs.c:3880-3895),
+        // SIGCONT resumes a stopped process group (jobs.c:3926-3928), then
+        // wait_for blocks — interruptibly — on the last pid.
+        self.shell_state.job_table.set_current_job(job_id);
+        let (command, pids) = self
+            .shell_state
+            .job_table
+            .jobs
+            .get(&job_id)
+            .map(|entry| (entry.command.clone(), entry.pids.clone()))
+            .unwrap_or_default();
+        writeln!(stdout, "{command}")?;
+        for member in &pids {
+            let _ = crate::builtins::kill::send_signal(*member, 18);
+        }
+        self.shell_state.job_table.mark_running(pid);
+        if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
+            entry.foreground = true;
+            entry.background = false;
+        }
+        match self.wait_for_background_pid(pid, false)? {
+            WaitPidOutcome::Status(status) | WaitPidOutcome::Interrupted(status) => Ok(status),
+            WaitPidOutcome::NotFound => {
+                self.write_job_not_found("fg", job, stderr)?;
+                Ok(1)
+            }
+        }
     }
 
     fn execute_bg_jobs(
         &mut self,
         jobs: Vec<String>,
+        stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
     ) -> Result<i32, ExecuteError> {
         let requested = if jobs.is_empty() {
@@ -1033,6 +1186,8 @@ impl Executor {
                 .map(|job| Some(job.as_str()))
                 .collect::<Vec<_>>()
         };
+        let posixly =
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "posix");
 
         let mut status = 0;
         for job in requested {
@@ -1048,13 +1203,65 @@ impl Executor {
                     status = 1;
                     continue;
                 }
-                self.shell_state.job_table.mark_running(pid);
-                if let Some(job_id) = self.shell_state.job_table.pid_to_job.get(&pid).copied() {
-                    if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
-                        entry.background = true;
-                        entry.foreground = false;
-                    }
+                let Some(job_id) = self.shell_state.job_table.job_id_for_pid(pid) else {
+                    self.write_job_not_found("bg", job, stderr)?;
+                    status = 1;
+                    continue;
+                };
+                // GNU jobs.c:3837-3843 start_job: same comsub gate as fg.
+                if self.shell_state.in_command_substitution.get() {
+                    writeln!(stderr, "{}bg: no current jobs", self.diagnostic_prefix())?;
+                    status = 1;
+                    continue;
                 }
+                // GNU jobs.c:3849-3855 start_job: `bg` on an already-running
+                // job is a diagnostic but NOT an error under XPG6/SUSv3 —
+                // the message prints and status stays 0.
+                let already_running = self
+                    .shell_state
+                    .job_table
+                    .jobs
+                    .get(&job_id)
+                    .is_some_and(|entry| entry.state == crate::jobs::ProcessState::Running);
+                if already_running {
+                    writeln!(
+                        stderr,
+                        "{}bg: job {} already in background",
+                        self.diagnostic_prefix(),
+                        job_id
+                    )?;
+                    continue;
+                }
+                // GNU jobs.c:3826 start_job(foreground=0): print the
+                // "[N]± command &" line with the pre-reset +/− marker
+                // (jobs.c:3872-3899), SIGCONT the process group
+                // (jobs.c:3926-3928), then reset_current (jobs.c:3949).
+                let marker = if posixly {
+                    " "
+                } else if self.shell_state.job_table.current_job() == Some(job_id) {
+                    "+ "
+                } else if self.shell_state.job_table.previous_job() == Some(job_id) {
+                    "- "
+                } else {
+                    " "
+                };
+                let (command, pids) = self
+                    .shell_state
+                    .job_table
+                    .jobs
+                    .get(&job_id)
+                    .map(|entry| (entry.command.clone(), entry.pids.clone()))
+                    .unwrap_or_default();
+                writeln!(stdout, "[{job_id}]{marker}{command} &")?;
+                for member in &pids {
+                    let _ = crate::builtins::kill::send_signal(*member, 18);
+                }
+                self.shell_state.job_table.mark_running(pid);
+                if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
+                    entry.background = true;
+                    entry.foreground = false;
+                }
+                self.shell_state.job_table.reset_current();
             } else {
                 self.write_job_not_found("bg", job, stderr)?;
                 status = 1;

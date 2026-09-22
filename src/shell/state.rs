@@ -75,6 +75,10 @@ pub struct ShellState {
     pub(crate) random_state: RandomGen,
     /// execute_cmd.c subshell_level.
     pub(crate) subshell_depth: Cell<usize>,
+    /// execute_cmd.c subshell_environment & SUBSHELL_COMSUB — set while a
+    /// `$( )`/backtick body runs (shared-executor and cloned-executor
+    /// paths). jobs.c:3837-3843 start_job refuses fg/bg inside it.
+    pub(crate) in_command_substitution: Cell<bool>,
     /// jobs.c bookkeeping — the job registry (jobs.c `jobs` array /
     /// `job_table`): bash-observable job identity, pipeline pids, states,
     /// and notification bits. Process handles are Executor resources and
@@ -125,6 +129,7 @@ pub struct ShellState {
 #[derive(Debug)]
 pub(crate) struct InteriorSnapshot {
     subshell_depth: usize,
+    in_command_substitution: bool,
     arithmetic_expansion_error: bool,
     arithmetic_nonfatal_error: bool,
     arithmetic_fatal_error: bool,
@@ -150,6 +155,7 @@ impl ShellState {
     pub(crate) fn snapshot_interior(&self) -> InteriorSnapshot {
         InteriorSnapshot {
             subshell_depth: self.subshell_depth.get(),
+            in_command_substitution: self.in_command_substitution.get(),
             arithmetic_expansion_error: self.arithmetic_expansion_error.get(),
             arithmetic_nonfatal_error: self.arithmetic_nonfatal_error.get(),
             arithmetic_fatal_error: self.arithmetic_fatal_error.get(),
@@ -163,6 +169,8 @@ impl ShellState {
     /// Restore a snapshot taken by `snapshot_interior`.
     pub(crate) fn restore_interior(&self, snapshot: &InteriorSnapshot) {
         self.subshell_depth.set(snapshot.subshell_depth);
+        self.in_command_substitution
+            .set(snapshot.in_command_substitution);
         self.arithmetic_expansion_error
             .set(snapshot.arithmetic_expansion_error);
         self.arithmetic_nonfatal_error
@@ -204,6 +212,7 @@ impl Clone for ShellState {
             dollar_vars_changed_by_set: self.dollar_vars_changed_by_set,
             random_state: self.random_state.clone_state(),
             subshell_depth: Cell::new(self.subshell_depth.get()),
+            in_command_substitution: Cell::new(self.in_command_substitution.get()),
             job_table: self.job_table.clone(),
             last_background_pid: self.last_background_pid,
             coproc_names: self.coproc_names.clone(),
