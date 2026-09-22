@@ -3420,3 +3420,34 @@ echo \"[$BASHOPTS]\"";
         .split(':')
         .any(|name| name == "assoc_expand_once" || name == "array_expand_once"));
 }
+
+#[test]
+fn this_sh_child_script_runs_history_expansion() {
+    // GNU bashhist.c pre_process_line: a fresh `bash script` child expands
+    // history per input line before parsing, so an in-process ${THIS_SH}
+    // child must take the same grouped reader path as the file-script
+    // entry point. Verified against GNU bash 5.3.0 output.
+    let dir = std::env::temp_dir().join(format!("rubash-thissh-hist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create fixture dir");
+    let child = dir.join("child.sub");
+    std::fs::write(
+        &child,
+        "set -o history\nset -o histexpand\necho a\necho $(echo !!)\necho \"!!\" \"$(echo !!)\"\n",
+    )
+    .expect("write child script");
+    let parent = dir.join("parent.sh");
+    std::fs::write(&parent, format!("${{THIS_SH}} {}\n", shell_test_path(&child)))
+        .expect("write parent script");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&parent)
+        .output()
+        .expect("run rubash");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a\necho a\necho echo a echo echo a\n"
+    );
+}

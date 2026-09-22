@@ -25,6 +25,7 @@ pub mod lexer;
 pub mod locale;
 pub mod parser;
 pub mod posix_errors;
+pub mod script_driver;
 pub mod shell;
 
 // Re-export commonly used types

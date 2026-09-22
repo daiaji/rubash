@@ -127,21 +127,34 @@ impl Executor {
         script_path: &std::path::Path,
     ) -> Result<(), ExecuteError> {
         let source = fs::read_to_string(script_path)?;
-        let tokens = crate::lexer::tokenize(&source);
-        // GNU parse.y push_heredoc -> report_syntax_error + exit_shell
-        // (EX_BADUSAGE): more than HEREDOC_MAX (16) here-documents is fatal.
-        // This in-process child path mirrors the same check in
-        // main.rs run_source_with_line_offset.
-        if let Some(line) = crate::lexer::heredoc_overflow_line() {
-            let mut stderr = Vec::new();
-            let _ = writeln!(
-                &mut stderr,
-                "{script}: line {line}: maximum here-document count exceeded"
-            );
-            self.finish_external_error(cmd, &stderr, 2)?;
-            return Ok(());
-        }
-        let mut ast = crate::parser::parse(&tokens);
+        // bashhist.c pre_process_line: a fresh `bash script` child expands
+        // history per input line, so an in-process THIS_SH child whose
+        // script enables history must run the grouped history driver rather
+        // than one whole-file parse. Gate on the exec-model child only: a
+        // fork-model script child inherits the parent's history list, which
+        // the driver's fresh session would discard.
+        let uses_history_driver = crate::script_driver::script_uses_history(&source);
+        let mut ast = if uses_history_driver {
+            crate::parser::Ast {
+                commands: Vec::new(),
+            }
+        } else {
+            let tokens = crate::lexer::tokenize(&source);
+            // GNU parse.y push_heredoc -> report_syntax_error + exit_shell
+            // (EX_BADUSAGE): more than HEREDOC_MAX (16) here-documents is fatal.
+            // This in-process child path mirrors the same check in
+            // script_driver::run_source_with_line_offset.
+            if let Some(line) = crate::lexer::heredoc_overflow_line() {
+                let mut stderr = Vec::new();
+                let _ = writeln!(
+                    &mut stderr,
+                    "{script}: line {line}: maximum here-document count exceeded"
+                );
+                self.finish_external_error(cmd, &stderr, 2)?;
+                return Ok(());
+            }
+            crate::parser::parse(&tokens)
+        };
         self.apply_command_output_redirects(cmd, &mut ast)?;
 
         let saved_env = self.shell_state.env_vars.clone();
@@ -345,7 +358,20 @@ impl Executor {
             None
         };
 
-        let result = self.execute_ast(&ast);
+        let result = if uses_history_driver && this_shell_invocation {
+            // bashhist.c pre_process_line / shell.c reader loop: expand and
+            // record history group-by-group so `!!`/`!str` see the entries
+            // the child's earlier lines recorded. The child gets a fresh
+            // session history (exec model); the parent's session is
+            // restored afterwards.
+            let saved_session = self.get_session_history();
+            let code = crate::script_driver::run_script_with_history(self, &source, Some(cmd));
+            self.exit_code = code;
+            self.set_session_history(saved_session);
+            Ok(())
+        } else {
+            self.execute_ast(&ast)
+        };
         let mut status = self.exit_code;
         // GNU shell.c exit_shell -> run_exit_trap: a ${THIS_SH} child is a
         // fresh process, so an EXIT trap the child script installed fires
