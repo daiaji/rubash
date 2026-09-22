@@ -1,5 +1,7 @@
 //! Thin Windows-compatible bash entry point for Niubash installations.
 //!
+//! AI invoker entry — forwards to the host shell (niu/winuxsh).
+//!
 //! The shim intentionally forwards the command line and standard handles
 //! without interpreting shell syntax. It lets Unix scripts resolve
 //! `/usr/bin/bash` to the installed Niubash executable. The pre-rename
