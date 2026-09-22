@@ -15,7 +15,25 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-22 晚，master `c1d151d2`，前台进程组超时 harness）：57 零差 / 26 有 DIFF / 总 464 原始行**
+> **最新台账（2026-09-22 深夜，master `44a56d1c`，无桩 + niu-sh 夹具）：58 零差 / 25 有 DIFF / 总 407 原始行**
+> （台账 `target/issue-suites/results/true-baseline-ledger.log`；逐行审计
+> `docs/diff-audit-20260922.md`。本轮为**首份无桩引擎级台账**：
+> `__RUBASH_NO_UPSTREAM_SCRIPTS` 经 `WSLENV /w` 首次真实跨 WSL→Win32 边界
+> （此前从未到达 rubash.exe，全部历史台账均带 canned upstream 回放）；
+> `/bin/sh|/usr/bin/sh` 经 PATH 解析为挂载本工作树 rubash 的 niubash
+> （`$BASH`→niu，`$0` 注入正确），`/bin|/usr/bin/X` 经 PATH basename
+> 回退（path.rs `unix_bin_basename`）；TMPDIR 逐套件真实隔离。
+> 逐行审计结论：~390 行真语义差（jobs 作业控制族 62、LC_COLLATE 排序族
+> ~60、fd 重定向族 ~50、fc 族 32、载体字节族 ~12），~15 行环境绑定
+> （type 二进制名 6、vredir `/bin/*sh` glob 6、errors PWD 拼写 2、
+> coproc /etc/passwd 1、nquote od 版本差）。
+> 对上一版：dstack 72→0（废弃 RUBASH_ROOT 夹具根污染消除）、
+> nameref→0、histexp 零差保持、test 17→15、coproc 4→6、invocation 0→2、
+> trap 0→1（SIGCHLD 时序抖动）。51-250 桶 2 套件：glob 67 / jobs 62。）
+>
+> **上一台账（2026-09-22 晚，master `c1d151d2`，前台进程组超时 harness）：57 零差 / 26 有 DIFF / 总 464 原始行**
+> （注意：该台账 `__RUBASH_NO_UPSTREAM_SCRIPTS` 未跨边界，仍在测量
+> canned upstream 回放路径，已被上方无桩台账取代。）
 > （台账快照 `target/issue-suites/results/true-baseline-ledger-c1d151d2.log`。
 > `timeout --foreground` 消除了旧台账的 GNU 侧 40s 截断伪影：history 173→40（真实差）、
 > intl 12→8、alias 69→0、histexp 74→1、read 25→16、comsub 17→13、trap 1→0；

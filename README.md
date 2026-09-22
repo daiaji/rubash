@@ -12,37 +12,37 @@ A GNU Bash-compatible shell implementation written in Rust.
 
 Rubash is a from-scratch reimplementation of GNU Bash in Rust — lexer, parser, expansion engine, executor, builtins, and all. It targets byte-level compatibility with GNU Bash 5.3.0 and runs on Windows natively.
 
-**Why native matters**: shells billed as "bash on Windows" (Git Bash, MSYS2) ship a ported bash that rides on a POSIX emulation layer (`msys-2.0.dll`), with fork emulation and path translation that leak quirks into every script. Rubash has no such layer — one self-contained binary speaking Win32 directly. To our knowledge it is also the most thoroughly verified native Windows bash: compatibility is measured, not claimed, against GNU Bash's own 83-suite test corpus (57 suites byte-identical today, ledger below).
+**Why native matters**: shells billed as "bash on Windows" (Git Bash, MSYS2) ship a ported bash that rides on a POSIX emulation layer (`msys-2.0.dll`), with fork emulation and path translation that leak quirks into every script. Rubash has no such layer — one self-contained binary speaking Win32 directly. To our knowledge it is also the most thoroughly verified native Windows bash: compatibility is measured, not claimed, against GNU Bash's own 83-suite test corpus (58 suites byte-identical today, ledger below).
 
 **Paths are first-class, not converted**: the MSYS model *guesses* which arguments look like paths and rewrites them — which is why every AI agent and script has to set `MSYS_NO_PATHCONV=1` to stop `/flags` from becoming `C:/Program Files/Git/flags`. Rubash inverts the model: Windows paths are the native currency. POSIX-style and WSL-style paths are accepted as input and resolved to real Windows paths, so what a native Windows program receives is always a valid Win32 path — no conversion heuristics, no `MSYS_NO_PATHCONV`, no surprises at the process boundary.
 
-**Current status**: 57 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 464 raw lines (down from 3427 on Sep 9), all of it real semantic diff — the harness now runs suite timeouts in the foreground process group, so the earlier `jobs`/`history` GNU-side 40s-timeout truncation artifacts are gone. Two caveats inside that number: `jobs` (78) includes a rubash-side 120s timeout kill caused by a real job-control hang at `wait-for-job`, and `redir` (70) includes ~34 lines from an `exec 6<>` append-vs-overwrite divergence amplified by a persistent per-suite TMPDIR. (The previously reported `intl`=1209 was missing-locale environment noise; the harness now generates `en_US.UTF-8`, and `intl` measures 8 lines.) Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
+**Current status**: 58 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 407 raw lines (down from 3427 on Sep 9). This is the first ledger measured with **all upstream-script replay stubs disabled** (`__RUBASH_NO_UPSTREAM_SCRIPTS` finally crosses the WSL→Win32 boundary via `WSLENV`) and a real `/bin/sh` fixture: `/bin/sh` resolves to a niubash binary mounted on this worktree (`$BASH` → niu), `/bin|/usr/bin/X` resolves through PATH, and per-suite `TMPDIR` is isolated. Every remaining line was audited individually — ~390 are genuine engine diffs (job-control hang at `wait-for-job`, LC_COLLATE glob ordering, fd-redirection and `fc` families), ~15 are environment-bound (binary names, `/etc/passwd`, PWD spelling). Full per-line audit in [`docs/diff-audit-20260922.md`](docs/diff-audit-20260922.md), suite ledger in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
 
 ## Compatibility at a Glance
 
 ```
 GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
-(ledger: 2026-09-22 re-run on master c1d151d2 — foreground timeout
-harness; supersedes the same-day 799-line recount that still carried
-GNU-side truncation artifacts)
+(ledger: 2026-09-22 re-run on master 44a56d1c — no upstream-script
+stubs, niu-mounted /bin/sh fixture, per-suite TMPDIR, foreground
+timeout; supersedes the earlier same-day 57/464 ledger that still
+measured canned upstream replay)
 
-  PASS (0 diff):   57 suites  █████████████████████░░░░░░░░░  69%
+  PASS (0 diff):   58 suites  █████████████████████░░░░░░░░░  70%
   DIFF (1-50):     23 suites  ████████░░░░░░░░░░░░░░░░░░░░░░  28%
-  DIFF (51-250):    3 suites  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   4%
+  DIFF (51-250):    2 suites  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   2%
   DIFF (251+):      0 suites  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%
   ────────────────────────────────────────────────────────────────
-  Total diff:      464 raw lines — no GNU-side timeout truncation
-                   remains; `jobs` 78 includes a rubash-side 120s
-                   timeout kill (real job-control hang), `redir` 70
-                   includes ~34 accumulated-TMPDIR `exec 6<>` lines
-                   (stdout-only ledger; details in
-                   COMPATIBILITY-STATUS.md)
-  Was 3427 on Sep 9 → −86% raw in 13 days
+  Total diff:      407 raw lines — audited line-by-line
+                   (docs/diff-audit-20260922.md); ~390 genuine
+                   engine diffs, ~15 environment-bound; `jobs` 62
+                   includes a rubash-side 120s timeout kill (real
+                   job-control hang at `wait-for-job`)
+  Was 3427 on Sep 9 → −88% raw in 13 days
 ```
 
 ### Fully passing suites (zero diff)
 
-`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `trap` `varenv`
+`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `histexp` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `nameref` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `varenv`
 
 
 ### Major recent fixes (Sep 2026)

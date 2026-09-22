@@ -12,34 +12,34 @@
 
 Rubash 是用 Rust 从零实现的 GNU Bash —— 词法分析、解析器、展开引擎、执行器、内建命令，全部重写。目标是与 GNU Bash 5.3.0 逐字节兼容，原生运行在 Windows 上。
 
-**原生的意义**：打着"Windows 上的 bash"旗号的方案（Git Bash、MSYS2）装的是移植版 bash，骑在 POSIX 模拟层（`msys-2.0.dll`）上——fork 模拟、路径翻译的怪癖会渗进每一个脚本。Rubash 没有这层：一个自包含二进制，直接对话 Win32。据我们所知，它也是**验证最充分的 Windows 原生 bash**：兼容性不是宣称出来的，是用 GNU Bash 自己的 83 套件语料实测出来的（当前 57 套件逐字节一致，台账见下）。
+**原生的意义**：打着"Windows 上的 bash"旗号的方案（Git Bash、MSYS2）装的是移植版 bash，骑在 POSIX 模拟层（`msys-2.0.dll`）上——fork 模拟、路径翻译的怪癖会渗进每一个脚本。Rubash 没有这层：一个自包含二进制，直接对话 Win32。据我们所知，它也是**验证最充分的 Windows 原生 bash**：兼容性不是宣称出来的，是用 GNU Bash 自己的 83 套件语料实测出来的（当前 58 套件逐字节一致，台账见下）。
 
 **路径是一等公民，不是转换对象**：MSYS 的模型是*猜*哪些参数像路径然后改写——这就是为什么每个 AI agent 和脚本都得设置 `MSYS_NO_PATHCONV=1`，防止 `/flag` 被改成 `C:/Program Files/Git/flag`。Rubash 把模型反过来：Windows 路径是原生货币。POSIX 风格和 WSL 风格的路径都接受输入、解析成真实的 Windows 路径，原生 Windows 程序拿到的永远是合法的 Win32 路径——没有转换启发式、不需要 `MSYS_NO_PATHCONV`、进程边界零意外。
 
-**当前状态**：83 个 GNU Bash 上游测试套件中 57 个零差异通过。全部 83 套件总差异 464 原始行（2026-09-22 晚，`c1d151d2` 前台进程组超时 harness），13 天内从 3427 行下降 86%。（此前报告的 `intl`=1209 为缺 locale 的环境噪音；harness 现在自动生成 `en_US.UTF-8`，`intl` 实测为 8 行。）完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
+**当前状态**：83 个 GNU Bash 上游测试套件中 58 个零差异通过。全部 83 套件总差异 407 原始行（2026-09-22 深夜，`44a56d1c`），13 天内从 3427 行下降 88%。这是**首份无桩引擎级台账**：`__RUBASH_NO_UPSTREAM_SCRIPTS` 经 `WSLENV` 首次真实跨 WSL→Win32 边界（此前全部历史台账均在测量 canned upstream 回放）；`/bin/sh` 解析为挂载本工作树 rubash 的 niubash（`$BASH`→niu），`/bin|/usr/bin/X` 走 PATH basename 回退。407 行已逐行审计：~390 行真语义差（`jobs` 62 含 `wait-for-job` 真挂起被杀、glob/extglob ~60 行 LC_COLLATE 排序族、fd 重定向族 ~50、fc 族 32），~15 行环境绑定（二进制名、`/etc/passwd`、PWD 拼写）。逐行审计见 [`docs/diff-audit-20260922.md`](docs/diff-audit-20260922.md)，套件台账见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
 
 ## 兼容性一览
 
 ```
 GNU Bash 5.3.0 测试套件 — 83 个文件，true-baseline 实测
-（台账：2026-09-22 晚，master `c1d151d2`，前台进程组超时 harness；
-消除旧台账 GNU 侧 40s 超时截断伪影）
+（台账：2026-09-22 深夜，master `44a56d1c`；无 upstream 脚本桩 +
+ niu 挂载 /bin/sh 夹具 + 逐套件 TMPDIR 隔离 + 前台进程组超时；
+ 逐行审计 docs/diff-audit-20260922.md）
 
-  零差通过：      57 套件  █████████████████████░░░░░░░░░  69%
+  零差通过：      58 套件  █████████████████████░░░░░░░░░  70%
   小差异(1-50)：  23 套件  █████████░░░░░░░░░░░░░░░░░░░░░  28%
-  中差异(51-250)： 3 套件  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   4%
+  中差异(51-250)： 2 套件  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   2%
   大差异(251+)：   0 套件  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%
   ────────────────────────────────────────────────────────────────
-  总差异：        464 原始行（stdout 台账口径；`jobs` 78 含 rubash
-                 侧 120s 超时真挂起、`redir` 70 含 ~34 行 exec 6<>
-                 语义分歧；stderr/环境噪音在 COMPATIBILITY-STATUS.md
-                 按套件单列）
-  9月9日为 3427 行 → 13 天内 −86%
+  总差异：        407 原始行（stdout 台账口径，逐行审计：
+                 ~390 真语义差 / ~15 环境绑定；`jobs` 62 含 rubash
+                 侧 120s 超时真挂起 wait-for-job）
+  9月9日为 3427 行 → 13 天内 −88%
 ```
 
 ### 完全通过的套件（零差异）
 
-`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `trap` `varenv`
+`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `histexp` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `nameref` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `varenv`
 
 ### 近期重大修复（2026 年 9 月）
 
