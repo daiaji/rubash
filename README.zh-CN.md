@@ -16,27 +16,30 @@ Rubash 是用 Rust 从零实现的 GNU Bash —— 词法分析、解析器、�
 
 **路径是一等公民，不是转换对象**：MSYS 的模型是*猜*哪些参数像路径然后改写——这就是为什么每个 AI agent 和脚本都得设置 `MSYS_NO_PATHCONV=1`，防止 `/flag` 被改成 `C:/Program Files/Git/flag`。Rubash 把模型反过来：Windows 路径是原生货币。POSIX 风格和 WSL 风格的路径都接受输入、解析成真实的 Windows 路径，原生 Windows 程序拿到的永远是合法的 Win32 路径——没有转换启发式、不需要 `MSYS_NO_PATHCONV`、进程边界零意外。
 
-**当前状态**：83 个 GNU Bash 上游测试套件中 57 个零差异通过。全部 83 套件总差异 733 行，12 天内从 3427 行下降 79%。（此前报告的 `intl`=1209 为缺 locale 的环境噪音；harness 现在自动生成 `en_US.UTF-8`，`intl` 实测为 8 行。）完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
+**当前状态**：83 个 GNU Bash 上游测试套件中 57 个零差异通过。全部 83 套件总差异 464 原始行（2026-09-22 晚，`c1d151d2` 前台进程组超时 harness），13 天内从 3427 行下降 86%。（此前报告的 `intl`=1209 为缺 locale 的环境噪音；harness 现在自动生成 `en_US.UTF-8`，`intl` 实测为 8 行。）完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
 
 ## 兼容性一览
 
 ```
 GNU Bash 5.3.0 测试套件 — 83 个文件，true-baseline 实测
-（台账：2026-09-21 合并回归修复后全量重跑，master）
+（台账：2026-09-22 晚，master `c1d151d2`，前台进程组超时 harness；
+消除旧台账 GNU 侧 40s 超时截断伪影）
 
   零差通过：      57 套件  █████████████████████░░░░░░░░░  69%
-  小差异(1-50)：  19 套件  ███████░░░░░░░░░░░░░░░░░░░░░░░  23%
-  中差异(51-250)： 7 套件  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░   8%
+  小差异(1-50)：  23 套件  █████████░░░░░░░░░░░░░░░░░░░░░  28%
+  中差异(51-250)： 3 套件  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   4%
   大差异(251+)：   0 套件  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%
   ────────────────────────────────────────────────────────────────
-  总差异：        733 行（stdout 台账口径；stderr/环境噪音在
-                 COMPATIBILITY-STATUS.md 按套件单列）
-  9月9日为 3427 行 → 12 天内 −79%
+  总差异：        464 原始行（stdout 台账口径；`jobs` 78 含 rubash
+                 侧 120s 超时真挂起、`redir` 70 含 ~34 行 exec 6<>
+                 语义分歧；stderr/环境噪音在 COMPATIBILITY-STATUS.md
+                 按套件单列）
+  9月9日为 3427 行 → 13 天内 −86%
 ```
 
 ### 完全通过的套件（零差异）
 
-`appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `more-exp` `nameref` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `procsub` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `trap` `varenv`
+`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `trap` `varenv`
 
 ### 近期重大修复（2026 年 9 月）
 

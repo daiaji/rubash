@@ -66,6 +66,11 @@
 
 ## 一、总体结论
 
+> **注（2026-09-22）**：本节为 2026-09-12～09-13 的历史快照叙事；其中"38 零差"、
+> "array(239)/assoc(217)/history(127)/nameref(105)/globstar(101) 五大族"等数字已过时
+> （assoc/array/quotearray 已收敛为零差，rsh 已归零）。最新口径一律以本文件头部
+> 台账链（2026-09-22 晚，57 零差 / 464 原始行）为准。
+
 - **83 套件 GNU 5.3.0 true-baseline 重跑（2026-09-12）：38 零差 / 45 有 DIFF / 总 diff 1985 行。**
   ANSI-C `$'...'` 载体扩展修复（0x11/0x16 加入载体集 + `bytes_to_shell_text` 载体感知编码）后
   多族大幅收敛：new-exp 241→65、more-exp 232→33、quote 172→10、posixexp 93→14、
@@ -150,6 +155,9 @@ rubash 输出 141 行 vs bash 104 行，差异集中在 `braces.rs` / `expand_ra
   rubash 反而正确执行——这不是 rubash 的 bug。
 - **超时规则不同**：6 个测试双方超时计数不同，属平台差异。
 - **rubash 优于 bash**：`builtins`、`comsub2`、`histexp`、`complete -p` 计数等无需修。
+  （**勘误 2026-09-22**：`histexp`"无需修"结论已被
+  `docs/harness-attribution-20260922.md` 推翻——真账约 74 行 `!!` 透传缺失属真实语义差，
+  非噪声；本条其余归属维持。）
 
 ## 六、建议的下一步优先级
 
@@ -498,7 +506,7 @@ core.autocrlf=true 把 vendored bash 测试树（third_party/bash，submodule）
 ## 2026-09-07 第九轮：真基线重建（83 套件）+ fc 族关闭 + lexer 复合词修正
 
 ### 真基线方法论修正
-GNU 侧导出 THIS_SH=/bin/bash 后 ${THIS_SH} 子调用真实执行，消除早退截断；固定单一二进制路径消除 $0/THIS_SH 路径污染。runner: true-baseline.sh；产物 true-baseline/。**此前多轮台账数字作废，以本轮为准。**
+GNU 侧导出 THIS_SH=/bin/bash 后 ${THIS_SH} 子调用真实执行，消除早退截断；固定单一二进制路径消除 $0/THIS_SH 路径污染。runner: true-baseline.sh；产物 true-baseline/。**此前多轮台账数字作废，以本轮为准。**（注：该"本轮"声明本身也已被后续各轮取代——下方 09-07 排行如 assoc 360/rsh 193 均为历史快照，最新口径见头部台账链。）
 
 ### 真实缺口排行（83 套件，21 个真零差）
 dbg-support 635、array 456、assoc 360、nameref 303、new-exp 241、more-exp 232、posixexp 211、histexp 199、rsh 193、comsub2 190、history 188、quotearray 153、exp 134、quote 132、complete 115、shopt 113、varenv 109、globstar 101、invocation 93、alias 87、comsub 78、extglob 68、nquote 67、trap 61、glob 60、redir 58、func 58、intl 57、arith 50、dstack 50、read 48、precedence 46、type 45、jobs 37、errors 32、heredoc 29、iquote 28、rhs-exp 26、nquote1 25、comsub-posix 19、其余 ≤18。真零差：mapfile、printf、attr、casemod、cprint、dbg-support2、dstack2、dynvar、extglob2、extglob3、getopts、glob-bracket、herestr、ifs、invert、nquote2、nquote3、posixpat、strip、tilde、tilde2。

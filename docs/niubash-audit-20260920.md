@@ -10,11 +10,11 @@
 
 | # | 严重度 | 位置 | 问题 | 去向 |
 |---|---|---|---|---|
-| A1 | **严重** | `crates/niubash-runtime/src/shell.rs:685-696 / 2650-2663 / 2398-2412` | 5 连预处理 pass：`protect_parameter_pattern_removal_equals`（tokenize 前手写引号状态机**改源文本**）、`normalize_parameter_pattern_operator_order`（parse 后直接改引擎 `ParameterExpansion`）——两者是引擎 bug 的产品层补偿（rubash#117 反模式的翻版）；另有 3 个 Windows drive/virtual-root AST 归一化（合法产品特性但应走引擎 hook） | 补偿类下沉引擎；归一化走 hook |
-| A2 | **严重** | `shell.rs:2762 / 2821` | 产品自实现 `${var#pat}` 展开：白名单 fast path，含 `strip_prefix('\x1d')` **解读引擎私有标记字节** | GNU 无 word-level 展开捷径 → 引擎修复后整段删除 |
+| A1 | **严重**（**引擎根因已于 2026-09-22 解决**：rubash#117 白名单正解 2d7c973a，补偿 pass 不再有存在必要；niu 侧删除见 G3） | `crates/niubash-runtime/src/shell.rs:685-696 / 2650-2663 / 2398-2412` | 5 连预处理 pass：`protect_parameter_pattern_removal_equals`（tokenize 前手写引号状态机**改源文本**）、`normalize_parameter_pattern_operator_order`（parse 后直接改引擎 `ParameterExpansion`）——两者是引擎 bug 的产品层补偿（rubash#117 反模式的翻版）；另有 3 个 Windows drive/virtual-root AST 归一化（合法产品特性但应走引擎 hook） | 补偿类下沉引擎；归一化走 hook |
+| A2 | **严重**（**引擎侧已于 2026-09-22 解决**：同上 2d7c973a；H 节转义模式实锤 bug 亦由此消解——niu 侧须删 fast path 见处置清单） | `shell.rs:2762 / 2821` | 产品自实现 `${var#pat}` 展开：白名单 fast path，含 `strip_prefix('\x1d')` **解读引擎私有标记字节** | GNU 无 word-level 展开捷径 → 引擎修复后整段删除 |
 | A3 | 高 | `shell.rs:290` | **#129 修复（68ecc7b，expand_aliases）不在 `fix/niu-issues` 工作树**——该克隆构建会复发 | 合并 origin/master 即消 |
 | A4 | 高 | `src/main.rs:69/99` | 后台 `&` stdio 剥离在产品层：约 180 行 Windows 句柄手术 + 自解析 source，依赖 `__RUBASH_SHELL_PID` 私有协议 | 下沉 rubash |
-| A5 | 中 | `shell.rs:5191` 等 | 产品层复刻引擎内部标记协议（heredoc `\x1f`、`__RUBASH_HD1__`、`\x1d`、PUA 区间，注释自认绕开非公开 API） | rubash 补公开 API（对接治理文档 markers.rs） |
+| A5 | 中（**引擎侧前置条件已于 2026-09-22 满足**：markers.rs 公开注册表已建成（f8124f8b 起 M1-M5）、FdTable 已落地（7e56967d 起 M1-M5）、Phase 0 decode API 已入（3de4e165）；niu 侧迁移待排期） | `shell.rs:5191` 等 | 产品层复刻引擎内部标记协议（heredoc `\x1f`、`__RUBASH_HD1__`、`\x1d`、PUA 区间，注释自认绕开非公开 API） | rubash 补公开 API（对接治理文档 markers.rs） |
 | A6 | 中 | `shell.rs:549 / 585` | 进程内 THIS_SH 子 shell 手工 save/restore 仅 4 个 env，函数/alias/shopt/trap 泄漏 | 复用引擎 fresh-init（rubash 01029f1b/41a3308c 已有） |
 | A7-A9 | 低 | `completion/runtime.rs:211`、`main.rs:532`、`shell.rs:628` | completion 自写 `split_shell_words`（不识 `$'...'`）；`--dump-strings`/`--pretty-print` 手写扫描（引擎缺 AST serializer）；用 `parse+execute_ast("unset HISTFILE")` unset 变量属绕路 | 引擎补 API 后替换 |
 
@@ -27,6 +27,10 @@ ANSI-C carrier、**cfaa9125（quoted name=$(...) 非 assignment——恰好消�
 `ExecuteError` match 需同步）。`fix/niu-issues` 口径落后 91 commits。
 
 ## C. 交互式错误格式 "line 1:" —— 分歧定位（已实测 GNU 5.3.0）
+
+> **更新（2026-09-22）：引擎侧已修**——交互错误前缀 `diagnostic_prefix` interactive
+> 分支已落地（提交 `534bc2e8`）。以下定位分析保留作历史记录；niu 侧
+> `enter_interactive()` 改设 `__RUBASH_SHELL_NAME` 仍待产品层跟进。
 
 GNU 三种模式（脚本文件探针实测）：
 - 脚本：`/tmp/t1.sh: line 1: nosuchcmd: command not found`
@@ -88,10 +92,10 @@ bash 未定义的 UI 面自由分叉，但消费的引擎原语必须经公开 A
 ## G. 行动项（按优先级）
 
 1. niubash 各克隆对齐 origin/master（消 A3 #129 复发风险 + Cargo.lock 回退）。
-2. 引擎修 `diagnostic_prefix` interactive 分支 + niubash 改设 SHELL_NAME（C 节）。
+2. 引擎修 `diagnostic_prefix` interactive 分支 + niubash 改设 SHELL_NAME（C 节）。——**引擎半已修（2026-09-22，534bc2e8）**；niu 侧待办。
 3. rubash 升版后 niubash 刷新依赖（消 B 节 25 个修复的漂移），**删除 A1/A2
    补偿 pass**（cfaa9125 已使引擎原生正确），跑双侧基线确认。
-4. A4/A5/A6 按治理文档 3.6 分层纪律排期下沉；markers.rs 建成后 A5 自然消解。
+4. A4/A5/A6 按治理文档 3.6 分层纪律排期下沉；markers.rs 建成后 A5 自然消解。——**markers.rs 已建成（2026-09-22，f8124f8b 起 M1-M5；FdTable 7e56967d；decode API 3de4e165）**，A5 迁移可启动。
 5. `niu -Z` 措辞/退出码对齐 GNU EX_BADUSAGE。
 
 ## H. 追加审计：产品层手写 marker/heredoc 逻辑（2026-09-20 第二轮，含三方实测）
