@@ -1849,8 +1849,14 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
         }
     }
 
-    let result = unescape_storage_command_substitution_source(&source);
-    (result, closed)
+    // GNU parse.y parse_comsub feeds the collected body to the parser
+    // verbatim — a `\"` inside is an escaped-quote token the INNER lexer
+    // dequotes at execution time (PST_NOEXPAND keeps the backslash in the
+    // token, parse.y:5366-5375). Post-processing the body with
+    // unescape_storage_command_substitution_source stripped `\"` to `"`,
+    // so the inner parse saw a syntactic quote and dropped it
+    // (`$(echo $((x)) | echo "\"q\"")` printed `q` instead of `"q"`).
+    (source, closed)
 }
 
 fn command_substitution_status(result: Result<(), ExecuteError>, exit_code: i32) -> i32 {

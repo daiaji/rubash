@@ -807,23 +807,7 @@ pub(in crate::executor) fn decode_command_substitution_payload(value: &str) -> S
     output
 }
 
-pub(in crate::executor) fn unescape_storage_command_substitution_source(source: &str) -> String {
-    let mut output = String::new();
-    let mut chars = source.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.peek().copied() {
-                Some('"') | Some('\\') => {
-                    output.push(chars.next().unwrap());
-                }
-                _ => output.push(ch),
-            }
-        } else {
-            output.push(ch);
-        }
-    }
-    output
-}
+
 
 #[cfg(test)]
 mod command_substitution_payload_tests {

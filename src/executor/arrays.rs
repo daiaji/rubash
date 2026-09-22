@@ -440,7 +440,15 @@ pub(super) fn field_split_values_with_ifs(value: &str, ifs: Option<&str>) -> Vec
         return split_ifs_whitespace(value, " \t\n");
     };
     if ifs.is_empty() {
-        return vec![value.to_string()];
+        // An empty IFS disables field splitting, not empty-field removal:
+        // GNU expand_word_list_internal (subst.c:13219) contributes no
+        // field at all for an unquoted expansion that produces nothing
+        // (`IFS='' ; for v in 1 a $x` iterates twice when x is unset).
+        return if value.is_empty() {
+            Vec::new()
+        } else {
+            vec![value.to_string()]
+        };
     }
 
     // Bash defines IFS whitespace narrowly as space, tab, and newline.

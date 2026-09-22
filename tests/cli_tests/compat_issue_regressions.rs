@@ -1522,6 +1522,58 @@ fn heredoc_old_style_backticks_preserve_single_quoted_literals() {
 }
 
 #[test]
+fn comsub_arithmetic_body_preserves_escaped_quote_tokens() {
+    // GNU parse.y:4451 parse_comsub keeps the body raw (PST_NOEXPAND,
+    // parse.y:5366-5375): a `\"` inside `$(...)` is an escaped quote the
+    // inner lexer dequotes at execution. Words routed through the mutable
+    // embedded walker (anything containing `$((`) lost the backslash, so
+    // the inner parse saw a syntactic quote and dropped it.
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(concat!(
+            "echo $(echo $(( x )) | echo \"${x:-d}\" '$x' \"\\\"q\\\"\" \"${x:-d}\")\n",
+            "echo $(echo \"\\\"a\\\" \\\"b\\\"\")\n",
+            "echo $(echo $((x))\"\\\"q\\\"\")\n",
+        ))
+        .output()
+        .expect("run comsub escaped-quote probe");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "d $x \"q\" d\n\"a\" \"b\"\n0\"q\"\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn empty_ifs_for_list_drops_null_unquoted_expansion() {
+    // GNU subst.c:13219 expand_word_list_internal: an unquoted expansion
+    // that produces nothing contributes no field, regardless of IFS.
+    // `IFS=''` disables splitting only — an empty `$x` must still vanish.
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(concat!(
+            "unset x\n",
+            "IFS=''\n",
+            "for v in 1 a $x; do echo \"<$v>\"; done\n",
+            "x=' '\n",
+            "for v in 1 $x a; do echo \"[$v]\"; done\n",
+            "unset x\n",
+            "for v in 1 \"$x\" a; do echo \"{$v}\"; done\n",
+        ))
+        .output()
+        .expect("run empty-IFS for-list probe");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "<1>\n<a>\n[1]\n[ ]\n[a]\n{1}\n{}\n{a}\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn malformed_heredoc_reports_offending_source_line() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
