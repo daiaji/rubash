@@ -258,7 +258,12 @@ impl ShellInvocation {
             executor.set_shell_option("posix", true);
         }
         if let Some(name) = &self.command_name {
+            // GNU shell.c:523-528: the operand after the -c command string
+            // becomes dollar_vars[0]; BASH_ARGV0 mirrors it (variables.c).
+            // Hosts like niu pre-seed BASH_ARGV0 with their own name, so the
+            // explicit operand must overwrite it or `$0` keeps the host name.
             executor.set_env("__RUBASH_SCRIPT_NAME", name);
+            executor.set_env("BASH_ARGV0", name);
         } else if self.command.is_some() {
             // GNU `bash -c` without explicit $0 reports as "bash: -c: ..."
             executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
