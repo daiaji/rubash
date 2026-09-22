@@ -269,14 +269,17 @@ fn find_user_command_uncached(name: &str, env_vars: &HashMap<String, String>) ->
         if let Some(found) = find_winuxcmd_absolute_command(name, env_vars) {
             return Some(found);
         }
-        // `/bin/sh` and `/usr/bin/sh` name the POSIX-mandated system shell,
-        // which has no Windows filesystem location. GNU systems always
-        // provide it, so mirror the `/bin/bash` chain above and degrade to a
-        // `sh` found on PATH (e.g. Git's usr/bin/sh.exe). Suites spawning
-        // `/bin/sh -c ...` then exercise real subprocess semantics instead
-        // of "command not found".
-        if is_standard_unix_sh_path(name) {
-            if let Some(found) = find_user_command("sh", env_vars) {
+        // `/bin/X` and `/usr/bin/X` name commands from the system tool
+        // namespace, which has no Windows filesystem location when no
+        // shell root is configured. Resolve the basename through PATH —
+        // the Windows equivalent of that namespace (Git usr/bin, WinuxCmd
+        // links, the suite's own fixture dir). Suites spawning `/bin/sh`,
+        // `/bin/cat`, `/bin/echo` etc. then exercise real subprocess
+        // semantics instead of "command not found". Names that must stay
+        // unresolvable (zsh/ksh/csh, /bin/qux, /etc/...) simply miss on
+        // PATH as well, preserving the 127 result.
+        if let Some(base) = unix_bin_basename(name) {
+            if let Some(found) = find_user_command(base, env_vars) {
                 return Some(found);
             }
         }
@@ -996,11 +999,20 @@ fn is_standard_unix_bash_path(name: &str) -> bool {
     )
 }
 
-fn is_standard_unix_sh_path(name: &str) -> bool {
-    matches!(
-        name.replace('\\', "/").as_str(),
-        "/bin/sh" | "/usr/bin/sh"
-    )
+/// Basename of a single-component `/bin/X` or `/usr/bin/X` absolute path.
+/// Deeper paths (`/bin/foo/bar`) return None: they are real filesystem
+/// locations, not entries in the system tool namespace.
+fn unix_bin_basename(name: &str) -> Option<&str> {
+    let normalized = name.replace('\\', "/");
+    let base = normalized
+        .strip_prefix("/bin/")
+        .or_else(|| normalized.strip_prefix("/usr/bin/"))?;
+    if base.is_empty() || base.contains('/') {
+        return None;
+    }
+    // `normalized` is a local String; return the basename taken from
+    // `name` itself so the borrowed tail outlives the function.
+    name.rsplit(['/', '\\']).next().filter(|base| !base.is_empty())
 }
 
 pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, String>) -> PathBuf {
@@ -1589,23 +1601,31 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_bin_sh_falls_back_to_path_lookup() {
-        // `/bin/sh` is POSIX-mandated but has no Windows location; when no
-        // shell root provides it, resolve `sh` through PATH so suites can
-        // spawn a real subprocess instead of hitting "command not found".
-        let dir = std::env::temp_dir().join("rubash-sh-path-fallback");
+    fn windows_bin_commands_fall_back_to_path_lookup() {
+        // `/bin/X` and `/usr/bin/X` name the system tool namespace, which
+        // has no Windows location without a shell root; resolve the
+        // basename through PATH so suites spawn real subprocesses instead
+        // of hitting "command not found".
+        let dir = std::env::temp_dir().join("rubash-bin-path-fallback");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let sh = dir.join("sh.exe");
+        let cat = dir.join("cat.exe");
         fs::write(&sh, "").unwrap();
+        fs::write(&cat, "").unwrap();
 
         let mut env_vars = HashMap::new();
         env_vars.insert("PATH".to_string(), dir.to_string_lossy().to_string());
 
         assert_eq!(find_user_command("/bin/sh", &env_vars), Some(sh.clone()));
         assert_eq!(find_user_command("/usr/bin/sh", &env_vars), Some(sh));
-        // Non-sh absolute names keep the 127 path; no PATH fallback.
+        assert_eq!(find_user_command("/bin/cat", &env_vars), Some(cat.clone()));
+        assert_eq!(find_user_command("/usr/bin/cat", &env_vars), Some(cat));
+        // Basenames absent from PATH keep the 127 result; non-/bin
+        // absolute paths and nested paths never fall back.
         assert_eq!(find_user_command("/bin/nonexistent-tool", &env_vars), None);
+        assert_eq!(find_user_command("/sbin/cat", &env_vars), None);
+        assert_eq!(find_user_command("/bin/sub/cat", &env_vars), None);
         let _ = fs::remove_dir_all(dir);
     }
 
