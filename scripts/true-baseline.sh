@@ -124,12 +124,22 @@ mkdir -p "$OUT"
 for name in $SUITES; do
   sync_suite "$name" || { echo "$name SKIP(no-source)" >> "$LOG"; continue; }
   w="$OUT/$name"; mkdir -p "$w/tmp"
+  # timeout(1) without --foreground puts the command in a new process group;
+  # suite pieces that touch the terminal (history4.sub's `bash --norc -i`,
+  # jobs.tests `set -m`) then stop on SIGTTIN/SIGTTOU and ignore the TERM,
+  # surfacing as a fake 40s SIGKILL timeout. --foreground keeps them in the
+  # caller's group so the tty ops succeed. jobs.tests additionally needs >40s
+  # of real wall-clock sleeps, so it gets a larger bound.
+  case "$name" in
+    jobs) tmo=120 ;;
+    *)    tmo=40 ;;
+  esac
   ( cd "$BASE" && PATH="$BASE:/usr/bin:/bin" TMPDIR="$w/tmp" \
-      THIS_SH="$GNU_BASH" timeout -k 5 40 "$GNU_BASH" "./$name.tests" \
+      THIS_SH="$GNU_BASH" timeout --foreground -k 5 "$tmo" "$GNU_BASH" "./$name.tests" \
       > "$w/gnu.out" 2> "$w/gnu.err" ) < /dev/null
   echo $? > "$w/gnu.rc"
   ( cd "$BASE" && PATH="$BASE:/usr/bin:/bin" TMPDIR="$w/tmp" \
-      __RUBASH_NO_UPSTREAM_SCRIPTS=1 timeout -k 5 40 "$RUB" "./$name.tests" \
+      __RUBASH_NO_UPSTREAM_SCRIPTS=1 timeout --foreground -k 5 "$tmo" "$RUB" "./$name.tests" \
       > "$w/rb.out" 2> "$w/rb.err" ) < /dev/null
   echo $? > "$w/rb.rc"
   n=$(diff "$w/gnu.out" "$w/rb.out" 2>/dev/null | grep -c "^[<>]")
