@@ -22,8 +22,10 @@ set -u
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 BASE="$REPO/target/issue-suites/results/bash-tests-rw"
 OUT="$REPO/target/issue-suites/results/true-baseline"
-RUB="$REPO/target/debug/rubash.exe"
-LOG="$REPO/target/issue-suites/results/true-baseline-ledger.log"
+# RUB_OVERRIDE: point the binary-under-test at a product-layer binary
+# (e.g. niu.exe) for product-layer baselines without editing this file.
+RUB="${RUB_OVERRIDE:-$REPO/target/debug/rubash.exe}"
+LOG="${LOG_OVERRIDE:-$REPO/target/issue-suites/results/true-baseline-ledger.log}"
 TESTS_SRC="$REPO/third_party/bash/tests"
 
 # ---- WinuxCmd 1.0.6: prefer over Git coreutils 8.32 for the Rubash side -----
