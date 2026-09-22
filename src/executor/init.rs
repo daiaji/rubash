@@ -4,7 +4,7 @@ use crate::shell::VariableStore;
 fn shell_pwd_display(path: &str) -> String {
     #[cfg(windows)]
     {
-        if std::env::var_os("WINUXSH_SHELL_PATH_STYLE").is_some() {
+        if crate::executor::path::shell_path_style_enabled() {
             return path.to_string();
         }
         let bytes = path.as_bytes();

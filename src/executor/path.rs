@@ -96,6 +96,8 @@ fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
         "__RUBASH_SHELL_ROOT",
         "WINUXSH_ROOT",
         "RUBASH_ROOT",
+        "COREUTILS_PATH",
+        "SHELL_COREUTILS_DIR",
         "WINUXCMD",
         "WINUXCMD_PATH",
         "WINUXCMD_HOME",
@@ -512,6 +514,18 @@ pub fn external_command_for_named_program(
     (command, false)
 }
 
+/// Whether the host requested shell-native (Windows-style) PWD display.
+///
+/// Reads the neutral `__RUBASH_PATH_STYLE` first; `WINUXSH_SHELL_PATH_STYLE`
+/// is kept as a compatibility fallback for hosts that still export the
+/// pre-rename name (remove the fallback once niu stops setting it).
+pub fn shell_path_style_enabled() -> bool {
+    cfg!(windows)
+        && ["__RUBASH_PATH_STYLE", "WINUXSH_SHELL_PATH_STYLE"]
+            .into_iter()
+            .any(|name| std::env::var_os(name).is_some())
+}
+
 fn is_winuxcmd_dispatcher(path: &Path) -> bool {
     cfg!(windows)
         && path
@@ -522,7 +536,14 @@ fn is_winuxcmd_dispatcher(path: &Path) -> bool {
 
 #[cfg(windows)]
 fn find_winuxcmd_dispatcher(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
-    for name in ["WINUXCMD", "WINUXCMD_PATH"] {
+    // Neutral names first; WINUXCMD/WINUXCMD_PATH are pre-rename
+    // compatibility fallbacks (remove once hosts stop exporting them).
+    for name in [
+        "COREUTILS_PATH",
+        "SHELL_COREUTILS_DIR",
+        "WINUXCMD",
+        "WINUXCMD_PATH",
+    ] {
         if let Some(value) = env_vars.get(name) {
             let candidate = shell_path_to_windows(value, env_vars);
             if let Some(found) = executable_candidate(&candidate, env_vars) {
@@ -1546,6 +1567,23 @@ mod tests {
 
         assert_eq!(find_user_command("/usr/bin/tool", &env_vars), Some(command));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_neutral_shell_root_env_drives_root_resolution() {
+        // The neutral __RUBASH_SHELL_ROOT name must be sufficient on its own;
+        // WINUXSH_ROOT/RUBASH_ROOT are compatibility fallbacks only.
+        let root = std::env::temp_dir().join("rubash-neutral-shell-root");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("etc")).unwrap();
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "__RUBASH_SHELL_ROOT".to_string(),
+            root.to_string_lossy().to_string(),
+        );
+        assert_eq!(shell_path_to_windows("/etc/config", &env_vars), root.join("etc").join("config"));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]

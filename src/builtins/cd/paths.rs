@@ -110,7 +110,7 @@ pub(super) fn logical_pwd_var_display(path: &Path) -> String {
 
 pub(super) fn shell_pwd_display_path(path: &str) -> String {
     let value = path.replace('\\', "/");
-    if cfg!(windows) && std::env::var_os("WINUXSH_SHELL_PATH_STYLE").is_some() {
+    if crate::executor::path::shell_path_style_enabled() {
         if value.len() >= 5
             && value.as_bytes()[1] == b':'
             && value.as_bytes()[2] == b'/'
