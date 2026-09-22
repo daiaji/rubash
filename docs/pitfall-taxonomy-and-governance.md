@@ -438,7 +438,7 @@ git log 交叉核对。按"反复出问题"频次排序。
 ## 八、未关闭与映射缺口（需复核）
 
 **open：** #62（gnu-baseline 归因账本）、#77（declare -A/-ai 回显——**已解决待关单**：assoc/array/quotearray 全零差；修复=assoc/declare 批次 27fa0076/4883ad0b/802f8382/1caa7246 等 + 复验 3dae1658，关单须补映射评论）、
-#117（词级捷径白名单化母 issue；症状族已由 cfaa9125/ab811d04/64579580 修复验证，但白名单谓词未落地——command_substitution.rs 黑名单守卫（现 215/218/240/272 行）与 `command_substitution_quotes_are_semantic`（:889/:257）仍在，保持 open）。niubash#104（winget，特性请求）。
+#117（词级捷径白名单化母 issue）——**已解决（2026-09-22，2d7c973a）**：黑名单守卫级联删除（command_substitution.rs −280 行），替换为白名单谓词 command_substitution_body_is_trivial；有害输出 stub（硬编码 "129"/"4"）一并删除；continuation.rs 配套 7 行已 captain 审查。验证：comsub 矩阵 GNU 逐字节、comsub2 184→0、全量无回归。保留项：type -p 空 PATH ./ 回退 stub 单独跟踪。niubash#104（winget，特性请求）。
 
 **issue→提交映射缺口（建议复验）：**
 - **#66 嵌套花括号展开**：已关闭但找不到修复提交——最明确缺口，需复验是否真修。
