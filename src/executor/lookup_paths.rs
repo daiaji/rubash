@@ -17,25 +17,49 @@ impl Executor {
         if matches!(name, "cat" | "ls") {
             return Some(format!("/bin/{name}"));
         }
-        if name == "e"
-            && self
-                .shell_state
-                .env_vars
-                .get("PATH")
-                .map(String::as_str)
-                .unwrap_or_default()
-                .is_empty()
-        {
-            if let Some(pwd) = self.shell_state.env_vars.get("PWD") {
-                let candidate =
-                    shell_path_to_windows(&format!("{pwd}/e"), &self.shell_state.env_vars);
-                if candidate.is_file() {
-                    return Some("./e".to_string());
-                }
-            }
+        // GNU findcmd.c:266 path_value + builtins/type.def:390 describe_command:
+        // an unset PATH makes find_user_command return NAME unchanged, which
+        // describe_command then reports as "./name" when NAME is executable in
+        // the physical cwd (sh_makepath MP_DOCWD); an empty PATH normalizes to
+        // "." and resolves the same "./name".
+        if let Some(dot_path) = self.command_path_in_dot(name) {
+            return Some(dot_path);
         }
         find_user_command(name, &self.shell_state.env_vars)
             .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
+    }
+
+    fn command_path_in_dot(&self, name: &str) -> Option<String> {
+        if name.contains('/') {
+            return None;
+        }
+        let path_var = self.shell_state.env_vars.get("PATH");
+        let (display_prefix, check_dir) = match path_var {
+            // GNU findcmd.c:266 path_value: an empty PATH normalizes to ".",
+            // so the "." element resolves NAME to "./name".
+            Some(path) if path.is_empty() => (".".to_string(), ".".to_string()),
+            // GNU findcmd.c:290-292 + builtins/type.def:390-405: an unset PATH
+            // makes find_user_command return NAME unchanged; describe_command
+            // then runs sh_makepath(NULL, name, MP_DOCWD), which reports the
+            // physical working directory as an absolute path.
+            None => {
+                let cwd = self.shell_state.env_vars.get("PWD").cloned().or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                })?;
+                (cwd.clone(), cwd)
+            }
+            Some(_) => return None,
+        };
+        // GNU file_status() resolves NAME against the process's physical cwd;
+        // prefer that, then translate the logical directory for shells whose
+        // cwd did not follow the `cd`.
+        let exists = std::path::Path::new(name).is_file()
+            || std::path::Path::new(&check_dir).join(name).is_file()
+            || shell_path_to_windows(&format!("{check_dir}/{name}"), &self.shell_state.env_vars)
+                .is_file();
+        exists.then(|| format!("{display_prefix}/{name}"))
     }
 
     pub(in crate::executor) fn is_enabled_shell_builtin_name(&self, name: &str) -> bool {
@@ -70,21 +94,17 @@ impl Executor {
         if matches!(name, "cat" | "ls") {
             paths.push(format!("/bin/{name}"));
         }
-        if name == "e"
-            && self
-                .shell_state
-                .env_vars
-                .get("PATH")
-                .map(String::as_str)
-                .unwrap_or_default()
-                .is_empty()
+        // GNU findcmd.c:437 user_command_matches iterates path_value("PATH"):
+        // an empty PATH normalizes to "." and contributes "./name", while an
+        // unset PATH yields no list and no match at all.
+        if self
+            .shell_state
+            .env_vars
+            .get("PATH")
+            .is_some_and(|path| path.is_empty())
         {
-            if let Some(pwd) = self.shell_state.env_vars.get("PWD") {
-                let candidate =
-                    shell_path_to_windows(&format!("{pwd}/e"), &self.shell_state.env_vars);
-                if candidate.is_file() {
-                    paths.push("./e".to_string());
-                }
+            if let Some(dot_path) = self.command_path_in_dot(name) {
+                paths.push(dot_path);
             }
         }
 

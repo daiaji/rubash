@@ -803,20 +803,44 @@ pub fn run_source_with_line_offset(
     }
 
     if !interactive && has_unclosed_input_syntax(input) && !input.contains("<<") {
+        // GNU's incremental reader executes complete input lines before the
+        // line where the unclosed construct opened; that line itself is part
+        // of the failed parse and runs nothing.
+        let unclosed = crate::lexer::unclosed_input_close_char(input);
+        let cut_line = unclosed.map(|(_, open, _, _)| open);
         let source = input.trim_end_matches('\n');
-        if let Some((prefix, _)) = source.rsplit_once('\n') {
-            if !prefix.trim().is_empty() {
-                let _ = run_source_with_line_offset(
-                    executor,
-                    prefix,
-                    interactive,
-                    line_offset,
-                    redirect_cmd,
-                );
-            }
+        let prefix = match cut_line {
+            Some(open) if open > 1 => source.lines().take(open - 1).collect::<Vec<_>>().join("\n"),
+            Some(_) => String::new(),
+            None => source
+                .rsplit_once('\n')
+                .map(|(prefix, _)| prefix.to_string())
+                .unwrap_or_default(),
+        };
+        if !prefix.trim().is_empty() {
+            let _ = run_source_with_line_offset(
+                executor,
+                &prefix,
+                interactive,
+                line_offset,
+                redirect_cmd,
+            );
         }
         executor.mark_parse_error();
-        eprintln!("rubash: syntax error: unexpected end of file");
+        // GNU parse.y names the close delimiter of the innermost unclosed
+        // matched-pair construct ("unexpected EOF while looking for
+        // matching `}'"); only an unrecognized residue falls back to the
+        // generic end-of-file diagnostic.
+        match unclosed {
+            Some((close, open_line, eof_line, report_open)) => {
+                let reported = if report_open { open_line } else { eof_line };
+                eprintln!(
+                    "{}unexpected EOF while looking for matching `{close}'",
+                    executor.parser_diagnostic_prefix_for_line(reported)
+                );
+            }
+            None => eprintln!("rubash: syntax error: unexpected end of file"),
+        }
         return 2;
     }
 

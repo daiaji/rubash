@@ -203,9 +203,6 @@ impl Executor {
         if let Some(output) = self.command_substitution_heredoc_output(source) {
             return output;
         }
-        if source == "type -p e" {
-            return "./e".to_string();
-        }
         // GNU applies alias expansion while reading the substitution body
         // (parse.y alias_expand_token + push_string): expand the body text
         // at stream level once here so the whitelist below judges the same

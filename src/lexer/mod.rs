@@ -27,6 +27,7 @@ use continuation::{
 
 pub(crate) use alias_stream::{expand_aliases_in_source, AliasLookup};
 pub(crate) use continuation::has_unclosed_command_substitution;
+pub(crate) use continuation::unclosed_input_close_char;
 use heredoc::heredoc_delimiters;
 use scanner::Lexer;
 pub(crate) use skip::skip_parenthesized_unit_corrected;

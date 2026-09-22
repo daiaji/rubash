@@ -169,6 +169,242 @@ pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
     trailing_backslashes % 2 == 1
 }
 
+/// One pending matched-pair construct on the delimiter stack.
+#[derive(Clone, Copy)]
+struct UnclosedDelim {
+    /// Close delimiter of this construct.
+    close: char,
+    /// Line the construct opened on.
+    open_line: usize,
+    /// Backslash escapes the next char inside (false only in '...').
+    escapes: bool,
+    /// parse_matched_pair site (parse.y:3912): report the open line.
+    /// Otherwise the yyerror site (parse.y:6891) reports the EOF line.
+    report_open: bool,
+    /// `${ ' function-substitution (parse.y:5506 FUNSUB_CHAR ->
+    /// parse_comsub) or a `{ }' command group: `}' only closes at command
+    /// position, after a command terminator.
+    funsub: bool,
+    /// A complete command ended here (subshell `( )' or `{ }' group).
+    /// Closing such a construct resumes the enclosing funsub at command
+    /// position; expansions like `$(...)'/`${...}' are mid-word and do not.
+    command: bool,
+    /// funsub: the last significant char was a command terminator
+    /// (';', '&', '|', newline, or a closed command construct).
+    term_ready: bool,
+}
+
+/// GNU parse.y reports `unexpected EOF while looking for matching `X'' where
+/// X is the close delimiter of the innermost unclosed matched-pair
+/// construct: `}' for `${...}', `)' for `$(...)' / `( ... )' / `$(( ... ))',
+/// ``' for backquotes, and the quote characters themselves.
+///
+/// Two different C sites produce the diagnostic and they number lines
+/// differently: parse_matched_pair (parse.y:3912, quotes, backquotes and
+/// `$(( )` arithmetic) reports `start_lineno` — the line the construct
+/// opened on — while the `$(`/`${` paths take the yyerror route
+/// (parse.y:6891) and report `line_number` at EOF.
+///
+/// `${ ' followed by a FUNSUB_CHAR (parser.h:83-85: space, tab, newline,
+/// '|', '(') is a ksh-style function substitution parsed by parse_comsub
+/// (parse.y:5506): its `}' only closes at command position, so
+/// `_[${ a }]' is unterminated while `_[${ a; }]' runs `a'.
+///
+/// Returns (close char, open line, EOF line, report_open_line) for the
+/// innermost pending construct: callers print `open_line' when
+/// report_open_line is set, otherwise the line at EOF.
+pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usize, bool)> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut stack: Vec<UnclosedDelim> = Vec::new();
+    let mut line = 1usize;
+    let mut comment_start = true;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        let top = stack.last().copied();
+        if ch == '\n' {
+            line += 1;
+        }
+        if let Some(d) = top {
+            if d.escapes && ch == '\\' {
+                i += 2;
+                continue;
+            }
+            if ch == d.close && !(d.funsub && !d.term_ready) {
+                stack.pop();
+                // A closed subshell or brace group is a complete command:
+                // an enclosing function substitution's `}' may now close.
+                if let Some(parent) = stack.last_mut() {
+                    if parent.funsub && d.command {
+                        parent.term_ready = true;
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            if d.close == '\'' {
+                // Literal context: nothing else is special inside '...'.
+                i += 1;
+                continue;
+            }
+            if d.funsub {
+                // Track command-terminator state: `${ cmd }' without a
+                // separator before `}' never terminates (parse_comsub).
+                let d = stack.last_mut().unwrap();
+                match ch {
+                    ';' | '&' | '|' | '\n' => d.term_ready = true,
+                    c if !c.is_whitespace() => d.term_ready = false,
+                    _ => {}
+                }
+            }
+        } else {
+            // Top-level comment: a word-initial '#' consumes to EOL
+            // (parse.y read_token -> parse_comment).
+            if ch == '#' && comment_start {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '{' | '}') {
+                comment_start = true;
+            } else {
+                comment_start = false;
+            }
+        }
+        let in_double = top.is_some_and(|d| d.close == '"');
+        match ch {
+            '\'' if !in_double => {
+                // parse_matched_pair reports start_lineno for quotes.
+                stack.push(UnclosedDelim {
+                    close: '\'',
+                    open_line: line,
+                    escapes: false,
+                    report_open: true,
+                    funsub: false,
+                    command: false,
+                    term_ready: false,
+                });
+            }
+            '"' => {
+                stack.push(UnclosedDelim {
+                    close: '"',
+                    open_line: line,
+                    escapes: true,
+                    report_open: true,
+                    funsub: false,
+                    command: false,
+                    term_ready: false,
+                });
+            }
+            '`' => {
+                stack.push(UnclosedDelim {
+                    close: '`',
+                    open_line: line,
+                    escapes: true,
+                    report_open: true,
+                    funsub: false,
+                    command: false,
+                    term_ready: false,
+                });
+            }
+            '$' => {
+                match chars.get(i + 1) {
+                    Some('{') => {
+                        // parse.y:5506: `${' followed by a FUNSUB_CHAR is a
+                        // function substitution parsed as commands; a
+                        // parameter expansion takes parse_matched_pair
+                        // (yyerror path: EOF line either way).
+                        let funsub = chars
+                            .get(i + 2)
+                            .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|' | '('));
+                        stack.push(UnclosedDelim {
+                            close: '}',
+                            open_line: line,
+                            escapes: true,
+                            report_open: false,
+                            funsub,
+                            command: false,
+                            term_ready: false,
+                        });
+                        i += 1;
+                    }
+                    Some('(') => {
+                        // $( EOF takes the yyerror path: line_number at EOF.
+                        stack.push(UnclosedDelim {
+                            close: ')',
+                            open_line: line,
+                            escapes: true,
+                            report_open: false,
+                            funsub: false,
+                            command: false,
+                            term_ready: false,
+                        });
+                        if chars.get(i + 2) == Some(&'(') {
+                            // $(( ... )) arithmetic nests a second ')' and is
+                            // parsed by parse_matched_pair: start_lineno.
+                            stack.push(UnclosedDelim {
+                                close: ')',
+                                open_line: line,
+                                escapes: true,
+                                report_open: true,
+                                funsub: false,
+                                command: false,
+                                term_ready: false,
+                            });
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    Some('\'') if top.is_none() => {
+                        // ANSI-C $'...': single-quote close, escapes live.
+                        stack.push(UnclosedDelim {
+                            close: '\'',
+                            open_line: line,
+                            escapes: true,
+                            report_open: true,
+                            funsub: false,
+                            command: false,
+                            term_ready: false,
+                        });
+                        i += 1;
+                    }
+                    _ => {}
+                }
+            }
+            '(' if top.is_none_or(|d| d.close == ')' || (d.close == '}' && d.funsub)) => {
+                // Subshell: a complete command for funsub purposes.
+                stack.push(UnclosedDelim {
+                    close: ')',
+                    open_line: line,
+                    escapes: true,
+                    report_open: false,
+                    funsub: false,
+                    command: true,
+                    term_ready: false,
+                });
+            }
+            '{' if top.is_some_and(|d| d.close == '}' && d.funsub) => {
+                // `{ cmd; }' group inside a function substitution: `}' only
+                // closes after a command terminator, same rule.
+                stack.push(UnclosedDelim {
+                    close: '}',
+                    open_line: line,
+                    escapes: true,
+                    report_open: false,
+                    funsub: true,
+                    command: true,
+                    term_ready: false,
+                });
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let d = *stack.last()?;
+    Some((d.close, d.open_line, line, d.report_open))
+}
+
 pub(super) fn has_unclosed_quotes(input: &str) -> bool {
     // TODO(parse.y): Bash reads parser input with full quoting state,
     // continuations, command substitutions, arithmetic contexts, and here-doc

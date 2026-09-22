@@ -18,7 +18,8 @@ impl Executor {
             let _t = PhaseTimer::new(&super::exec_profile::P_LINECMD);
             if self.debug_trap_running && self.shell_state.function_depth > 0 {
                 if let Some(line) = self.debug_trap_function_line {
-                    self.shell_state.env_vars
+                    self.shell_state
+                        .env_vars
                         .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
                 } else {
                     self.set_current_line(cmd);
@@ -286,23 +287,6 @@ impl Executor {
         } else {
             self.expand_command_words(cmd)?
         };
-        // histexp1: `echo "$( echo "\!" )"` and `echo "\!"` with `set -H` should
-        // keep `\!` (with backslash) inside double quotes. `remove_shell_quotes`
-        // + `expand_word` currently strips the backslash for `"\!"` when the
-        // `!` is history-expanded (or for `\!` inside double quotes inside
-        // comsub), leaving `!` without. Detect the quoted `"\!"` raw and restore
-        // the backslash. This is narrow to `"\!"` (the only `\!` inside double
-        // quotes in histexp1) and does not affect bare `\!` outside quotes
-        // (`echo \!` correctly becomes `!`). Also handles `echo "$( echo "\!" )"`
-        // where the inner `"\!"` raw may be `"\"\\!\""` with different escaping
-        // inside comsub body.
-        if expanded.words.len() == 2 && expanded.words[0] == "echo" && expanded.words[1] == "!" {
-            if let Some(raw) = cmd.word_metadata.get(1).map(|m| m.raw.as_str()) {
-                if raw.contains("\\!") && raw.contains('"') {
-                    expanded.words[1] = "\\!".to_string();
-                }
-            }
-        }
         if let Some(code) = self.current_shell_substitution_exit.take() {
             // A `${ ...; exit N; }` body aborts the enclosing (sub)shell with
             // N (GNU subst.c nofork exit propagation; comsub26.sub line 32).
@@ -580,7 +564,11 @@ impl Executor {
             // (reader_loop) sets EOF_Reached so a script-mode shell exits
             // with last_command_exit_value (EXECUTION_FAILURE=1).
             if self.posix_mode_enabled()
-                && self.shell_state.env_vars.get("__RUBASH_INTERACTIVE").map(String::as_str)
+                && self
+                    .shell_state
+                    .env_vars
+                    .get("__RUBASH_INTERACTIVE")
+                    .map(String::as_str)
                     != Some("1")
             {
                 let code = if self.shell_state.env_vars.get("__RUBASH_IS_C").is_some() {
@@ -608,7 +596,8 @@ impl Executor {
         if self.shell_state.parameter_bad_substitution.replace(false) {
             if self.posix_mode_enabled()
                 && self
-                    .shell_state.env_vars
+                    .shell_state
+                    .env_vars
                     .get("__RUBASH_INTERACTIVE")
                     .map(String::as_str)
                     != Some("1")
@@ -685,9 +674,7 @@ impl Executor {
             }
         }
         if let Some(word) = cmd.here_string.take() {
-            let carrier = crate::parser::StdinBody::Preexpanded(
-                self.expand_here_string_mut(&word)
-            );
+            let carrier = crate::parser::StdinBody::Preexpanded(self.expand_here_string_mut(&word));
             cmd.here_string = Some(carrier.to_string());
             cmd.here_string_carrier = Some(carrier);
         }

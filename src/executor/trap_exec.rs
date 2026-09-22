@@ -121,25 +121,77 @@ impl Executor {
             crate::builtins::eval::EvalAction::Execute(source) => {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 let source = eval_source_for_reparse(&source);
+                // GNU parse.y: EOF inside a matched-pair construct of the
+                // eval string reports "unexpected EOF while looking for
+                // matching `X'" naming the innermost close delimiter
+                // (eval3.sub: `eval 'x() { _;}>_[${' -> "eval: line N:
+                // unexpected EOF while looking for matching `}'"). The
+                // probe runs on the raw eval text: GNU's parser sees the
+                // string as written, before alias expansion splices bodies
+                // (which can consume `${ $() }' text and hide the error).
+                // Heredoc bodies are raw text, so inputs carrying `<<` skip
+                // this probe like the script driver does.
+                if !source.contains("<<") {
+                    if let Some((close, open_line, eof_line, report_open)) =
+                        crate::lexer::unclosed_input_close_char(&source)
+                    {
+                        // GNU eval continues the caller's line numbering:
+                        // eval-input line i sits at caller_line+i-1;
+                        // quote/arithmetic constructs report their open line,
+                        // while `}'/`)' report the end-of-input line
+                        // (parse.y:3912 start_lineno vs 6891 line_number).
+                        let caller_line: usize = self
+                            .shell_state
+                            .env_vars
+                            .get("__RUBASH_CURRENT_LINE")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(1);
+                        // GNU's eval reader executes the complete input lines
+                        // before the line where the unclosed construct
+                        // opened; that line itself is part of the failed
+                        // parse and runs nothing.
+                        if open_line > 1 {
+                            let prefix = source
+                                .lines()
+                                .take(open_line - 1)
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !prefix.trim().is_empty() {
+                                self.execute_eval_source(&prefix, caller_line, cmd)?;
+                            }
+                        }
+                        let internal = if report_open {
+                            open_line.saturating_sub(1)
+                        } else {
+                            eof_line
+                        };
+                        let saved_eval_context = self
+                            .shell_state
+                            .env_vars
+                            .insert("__RUBASH_EVAL_CONTEXT".to_string(), "1".to_string());
+                        eprintln!(
+                            "{}unexpected EOF while looking for matching `{close}'",
+                            self.parser_diagnostic_prefix_for_line(caller_line + internal)
+                        );
+                        match saved_eval_context {
+                            Some(previous) => {
+                                self.shell_state
+                                    .env_vars
+                                    .insert("__RUBASH_EVAL_CONTEXT".to_string(), previous);
+                            }
+                            None => {
+                                self.shell_state.env_vars.remove("__RUBASH_EVAL_CONTEXT");
+                            }
+                        }
+                        self.exit_code = 2;
+                        return Ok(());
+                    }
+                }
                 // GNU parse.y re-reads the eval string as parser input, so
                 // alias expansion applies at command position
                 // (parse.y alias_expand_token / push_string; comsub21.sub
                 // `eval my_alias` inside a substitution body expands here).
                 let source = self.comsub_body_alias_splice(&source);
-                // ShellShock CVE-2014-7186/7187/6278: GNU Bash 5.3 rejects
-                // function definitions whose trailing redirections contain
-                // command substitutions (`>_[$(...)]`, `>_[${...}]`,
-                // `>r[0${$(}0`) and are followed by a brace group. The
-                // pre-patch parser would accept `x() { _;}>_[$($())] { echo
-                // vuln;}` as two commands (function + `{ echo vuln;}`) and
-                // execute the second, producing the `vuln`/`eval ok` stdout
-                // seen in exportfunc. This targeted guard mirrors
-                // variables.c:parse_and_execute(SEVAL_FUNCDEF|SEVAL_ONECMD)
-                // rejection: a function definition with a `$`-containing
-                // redirection target followed by a brace group is a syntax
-                // error and must not produce stdout. We keep the check
-                // narrow to the two eval payloads that remain after the
-                // import-side fix (`}>_[$($())] {` and `>_[${`).
                 // GNU eval continues the caller's line numbering: eval-input
                 // line i sits at script line caller_line+i-1, and EOF inside
                 // the input reports at one past the last input line.
@@ -149,97 +201,73 @@ impl Executor {
                     .get("__RUBASH_CURRENT_LINE")
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(1);
-                if (source.contains("}>_[$($())]") || source.contains("}>_["))
-                    && source.contains("{ echo")
-                {
-                    // Covers `x() { _;}>_[$($())] { echo vuln;}` — the stray
-                    // `{` token reports at its own input line, and GNU echoes
-                    // the offending line (print_offending_line).
-                    let mut err = Vec::new();
-                    let _ = writeln!(
-                        err,
-                        "{}eval: line {caller_line}: syntax error near unexpected token `{{'",
-                        self.diagnostic_prefix()
-                    );
-                    let _ = writeln!(
-                        err,
-                        "{}eval: line {caller_line}: `{source}'",
-                        self.diagnostic_prefix()
-                    );
-                    self.write_buffered_builtin_output(cmd, &[], &err)?;
-                    self.exit_code = 2;
-                    return Ok(());
-                }
-                if source.contains(">_[${") && source.contains("{ echo") {
-                    // Covers `foo() { _; } >_[${ $() }] ;{ echo eval ok; }`
-                    // GNU reports `unexpected EOF while looking for matching `}'`
-                    // (parse.y: `}` inside `${` is not a function closer).
-                    let eof_line = caller_line + source.lines().count().max(1);
-                    let mut err = Vec::new();
-                    let _ = writeln!(
-                        err,
-                        "{}eval: line {eof_line}: unexpected EOF while looking for matching `}}'",
-                        self.diagnostic_prefix()
-                    );
-                    self.write_buffered_builtin_output(cmd, &[], &err)?;
-                    self.exit_code = 2;
-                    return Ok(());
-                }
-                let mut tokens = crate::lexer::tokenize(&source);
-                // GNU eval reports errors with the caller line numbering:
-                // the string lines continue the script line counter
-                // (posix2.tests: "eval: line 199: syntax error ...").
-                if caller_line > 1 {
-                    for token in tokens.iter_mut() {
-                        token.position += caller_line - 1;
-                    }
-                }
-                let mut ast = crate::parser::parse_with_options(
-                    &tokens,
-                    crate::parser::ParseLoopOptions {
-                        stray_close_is_error: true,
-                        source_text: Some(source.clone()),
-                        source_line_offset: caller_line.saturating_sub(1),
-                    },
-                );
-                self.apply_command_output_redirects(cmd, &mut ast)?;
-                // A syntax error inside the eval string makes eval return 2;
-                // it does not abort the calling script the way a top-level
-                // parse error does. An inner exit still exits the shell, so
-                // only the parse-error marker (status 2) becomes a status.
-                let has_parse_error = ast
-                    .commands
-                    .iter()
-                    .any(|command| command.has_assignment("__RUBASH_PARSE_ERROR__"));
-                let saved_eval_context = self
-                    .shell_state
-                    .env_vars
-                    .insert("__RUBASH_EVAL_CONTEXT".to_string(), "1".to_string());
-                // eval re-reads its string as fresh parser input; the alias
-                // expansion GNU applies there (parse.y alias_expand_token)
-                // already ran on `source` above via comsub_body_alias_splice,
-                // so executor-level expansion must not fire a second time.
-                let saved_alias_streamed = self.mark_alias_streamed();
-                let result = self.execute_ast(&ast);
-                self.resume_alias_streamed(saved_alias_streamed);
-                match saved_eval_context {
-                    Some(previous) => {
-                        self.shell_state
-                            .env_vars
-                            .insert("__RUBASH_EVAL_CONTEXT".to_string(), previous);
-                    }
-                    None => {
-                        self.shell_state.env_vars.remove("__RUBASH_EVAL_CONTEXT");
-                    }
-                }
-                match result {
-                    Err(ExecuteError::ExitCode(code)) if has_parse_error && code == 2 => {
-                        self.exit_code = code;
-                        Ok(())
-                    }
-                    other => other,
-                }
+                self.execute_eval_source(&source, caller_line, cmd)
             }
+        }
+    }
+
+    /// Reparse and execute one eval-source string with the caller's line
+    /// numbering (GNU variables.c:parse_and_execute SEVAL flags; eval-input
+    /// line i sits at script line caller_line+i-1).
+    fn execute_eval_source(
+        &mut self,
+        source: &str,
+        caller_line: usize,
+        cmd: &CommandNode,
+    ) -> Result<(), ExecuteError> {
+        let mut tokens = crate::lexer::tokenize(source);
+        // GNU eval reports errors with the caller line numbering:
+        // the string lines continue the script line counter
+        // (posix2.tests: "eval: line 199: syntax error ...").
+        if caller_line > 1 {
+            for token in tokens.iter_mut() {
+                token.position += caller_line - 1;
+            }
+        }
+        let mut ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                stray_close_is_error: true,
+                source_text: Some(source.to_string()),
+                source_line_offset: caller_line.saturating_sub(1),
+            },
+        );
+        self.apply_command_output_redirects(cmd, &mut ast)?;
+        // A syntax error inside the eval string makes eval return 2;
+        // it does not abort the calling script the way a top-level
+        // parse error does. An inner exit still exits the shell, so
+        // only the parse-error marker (status 2) becomes a status.
+        let has_parse_error = ast
+            .commands
+            .iter()
+            .any(|command| command.has_assignment("__RUBASH_PARSE_ERROR__"));
+        let saved_eval_context = self
+            .shell_state
+            .env_vars
+            .insert("__RUBASH_EVAL_CONTEXT".to_string(), "1".to_string());
+        // eval re-reads its string as fresh parser input; the alias
+        // expansion GNU applies there (parse.y alias_expand_token)
+        // already ran on `source` above via comsub_body_alias_splice,
+        // so executor-level expansion must not fire a second time.
+        let saved_alias_streamed = self.mark_alias_streamed();
+        let result = self.execute_ast(&ast);
+        self.resume_alias_streamed(saved_alias_streamed);
+        match saved_eval_context {
+            Some(previous) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_EVAL_CONTEXT".to_string(), previous);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_EVAL_CONTEXT");
+            }
+        }
+        match result {
+            Err(ExecuteError::ExitCode(code)) if has_parse_error && code == 2 => {
+                self.exit_code = code;
+                Ok(())
+            }
+            other => other,
         }
     }
 

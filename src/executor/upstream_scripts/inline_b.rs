@@ -139,9 +139,6 @@ pub(in crate::executor::upstream_scripts) const POSIXPIPE_TEST_OUTPUT: &str =
 pub(in crate::executor::upstream_scripts) const SHOPT_TEST_DONE: &str = "__RUBASH_SHOPT_TEST_DONE";
 pub(in crate::executor::upstream_scripts) const SHOPT_TEST_OUTPUT: &str =
     include_str!("../../../third_party/bash/tests/shopt.right");
-pub(in crate::executor::upstream_scripts) const TYPE_TEST_DONE: &str = "__RUBASH_TYPE_TEST_DONE";
-pub(in crate::executor::upstream_scripts) const TYPE_TEST_OUTPUT: &str =
-    include_str!("../../../third_party/bash/tests/type.right");
 pub(in crate::executor::upstream_scripts) const CPRINT_TF_DESCRIPTION: &str = concat!(
     "tf is a function\n",
     "tf () \n",

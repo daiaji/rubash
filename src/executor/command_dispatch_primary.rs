@@ -58,17 +58,8 @@ impl Executor {
                 }
             }
             "cd" => {
-                if self
-                    .shell_state.env_vars
-                    .get("__RUBASH_SCRIPT_NAME")
-                    .is_some_and(|script| script.contains("type3.sub"))
-                {
-                    self.exit_code = 0;
-                    Ok(())
-                } else {
-                    self.exit_code = self.execute_cd(cmd)?;
-                    Ok(())
-                }
+                self.exit_code = self.execute_cd(cmd)?;
+                Ok(())
             }
             "pushd" => {
                 self.exit_code =

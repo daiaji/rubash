@@ -53,44 +53,53 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
             && command_is_empty(&state.current_cmd)
             && (tokens[i].value == ")" || matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&"))
         {
-            state.current_cmd.insert_assignment(
-                "__RUBASH_PARSE_ERROR__".to_string(),
-                format!("unexpected token `{}'", tokens[i].value),
-            );
-            // GNU echoes only the offending input line, from its first
-            // token, not the rest of the file (parse.y y.error prints the
-            // current input line). With the original text available (eval
-            // reparse) echo that line verbatim; token reconstruction cannot
-            // recover the original spacing.
-            let verbatim = options.source_text.as_ref().and_then(|text| {
-                let source_offset = tokens[i].position.checked_sub(options.source_line_offset)?;
-                source_line_at_byte_offset(text, source_offset)
-            });
-            let source = verbatim.unwrap_or_else(|| {
-                let line_number = tokens[i].position;
-                let mut line_start = i;
-                while line_start > 0 && tokens[line_start - 1].position == line_number {
-                    line_start -= 1;
-                }
-                let mut joined = tokens[line_start].raw.clone();
-                for token in tokens[line_start + 1..].iter() {
-                    if token.position != line_number {
-                        break;
-                    }
-                    joined.push(' ');
-                    joined.push_str(&token.raw);
-                }
-                joined
-            });
-            state
-                .current_cmd
-                .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
-            state.ast.commands.push(state.current_cmd);
-            state.current_cmd = CommandNode::new();
+            push_unexpected_token_error(&mut state, tokens, i, &options);
             break;
         }
 
         if let Some(next_i) = try_parse_compound_start(tokens, i, &mut state) {
+            // GNU parse.y: a complete compound command (including its
+            // trailing redirections) must be followed by a command
+            // connector — ';', '&', a newline, '|', '&&' or '||'. A token
+            // that would start the next command without one is a syntax
+            // error: `{ a; } { b; }', `x() { :; } > f { ...; }' and
+            // `if ...; fi echo' all report "syntax error near unexpected
+            // token `X'".
+            let separated = next_i > 0
+                && matches!(
+                    tokens[next_i - 1].kind,
+                    TokenKind::Semicolon
+                        | TokenKind::Pipe
+                        | TokenKind::PipeErr
+                        | TokenKind::And
+                        | TokenKind::Or
+                        | TokenKind::Background
+                );
+            let already_error = state
+                .ast
+                .commands
+                .last()
+                .is_some_and(|command| command.has_assignment("__RUBASH_PARSE_ERROR__"));
+            if !separated
+                && !already_error
+                && command_is_empty(&state.current_cmd)
+                && tokens.get(next_i).is_some_and(|next| {
+                    !matches!(
+                        next.kind,
+                        TokenKind::Semicolon
+                            | TokenKind::Pipe
+                            | TokenKind::PipeErr
+                            | TokenKind::And
+                            | TokenKind::Or
+                            | TokenKind::Background
+                            | TokenKind::HereDocBody
+                            | TokenKind::Eof
+                    )
+                })
+            {
+                push_unexpected_token_error(&mut state, tokens, next_i, &options);
+                break;
+            }
             i = next_i;
             continue;
         }
@@ -879,6 +888,73 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
 fn command_allows_compound_start(command: &CommandNode) -> bool {
     command_is_empty(command) || command_is_pending_inversion(command)
+}
+
+/// GNU parse.y reports `syntax error near unexpected token `X'' on the
+/// offending token and echoes only that input line (yyerror + the current
+/// input line), aborting the rest of the input.
+fn push_unexpected_token_error(
+    state: &mut ParseState,
+    tokens: &[Token],
+    i: usize,
+    options: &ParseLoopOptions,
+) {
+    // GNU reports the yacc token: the lexer keeps a whole `{ ...; }' brace
+    // group in one token, but the grammar token is just `{'.
+    let token_text = if tokens[i].value.starts_with('{') {
+        "{"
+    } else {
+        tokens[i].value.as_str()
+    };
+    state.current_cmd.insert_assignment(
+        "__RUBASH_PARSE_ERROR__".to_string(),
+        format!("unexpected token `{token_text}'"),
+    );
+    // GNU's parser aborts the input line at the error, so commands already
+    // parsed from the same line never run (`{ a; } { b; }' does not run
+    // `a').  Drop the trailing commands parsed from the offending line.
+    let error_line = tokens[i].position;
+    while state
+        .ast
+        .commands
+        .last()
+        .is_some_and(|command| command.line == Some(error_line))
+    {
+        state.ast.commands.pop();
+    }
+    // GNU echoes only the offending input line, from its first
+    // token, not the rest of the file (parse.y y.error prints the
+    // current input line). With the original text available (eval
+    // reparse) echo that line verbatim; token reconstruction cannot
+    // recover the original spacing.
+    let verbatim = options.source_text.as_ref().and_then(|text| {
+        let source_offset = tokens[i].position.checked_sub(options.source_line_offset)?;
+        source_line_at_byte_offset(text, source_offset)
+    });
+    let source = verbatim.unwrap_or_else(|| {
+        let line_number = tokens[i].position;
+        let mut line_start = i;
+        while line_start > 0 && tokens[line_start - 1].position == line_number {
+            line_start -= 1;
+        }
+        let mut joined = tokens[line_start].raw.clone();
+        for token in tokens[line_start + 1..].iter() {
+            if token.position != line_number {
+                break;
+            }
+            joined.push(' ');
+            joined.push_str(&token.raw);
+        }
+        joined
+    });
+    state
+        .current_cmd
+        .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
+    state.current_cmd.line = Some(error_line);
+    state
+        .ast
+        .commands
+        .push(std::mem::take(&mut state.current_cmd));
 }
 
 fn push_parse_error_until(

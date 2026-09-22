@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 /// GNU bash accepts an ANSI-C quoted span as the parameter name (the extquote
 /// feature: subst.c expand_brace_dollar decodes the name word and re-dispatches
@@ -70,9 +70,7 @@ impl Executor {
             // (SUB_RES_XPASS). An active site means the `${` walker arm
             // already named this fragment — keep it.
             let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active())
-                .then(|| {
-                    crate::executor::expand_braced_indices::SubSiteGuard::new(0)
-                });
+                .then(|| crate::executor::expand_braced_indices::SubSiteGuard::new(0));
             return self.expand_braced_parameter_word(word, name);
         }
 
@@ -119,7 +117,11 @@ impl Executor {
         // alternate word reaches expansion only when that word is actually
         // evaluated (`${x-${'x1'%'t'}}` with x set is silent in GNU).
         if braced_name_ends_on_quote(name) {
-            eprintln!("{}{}: bad substitution", self.diagnostic_prefix(), bad_substitution_display(word));
+            eprintln!(
+                "{}{}: bad substitution",
+                self.diagnostic_prefix(),
+                bad_substitution_display(word)
+            );
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -168,7 +170,8 @@ impl Executor {
             "$@" => Some(self.shell_state.positional_params.join(" ")),
             // Bash joins `$*` with the first character of IFS, not a space.
             "$*" => Some(
-                self.shell_state.positional_params
+                self.shell_state
+                    .positional_params
                     .join(&self.ifs_first_char_separator()),
             ),
             "$#" => Some(self.shell_state.positional_params.len().to_string()),
@@ -256,7 +259,12 @@ impl Executor {
             && !compound_assignment
             && !expanded.contains('=')
             && tilde_expand::assignment_value_needs_tilde_expansion(value, true)
-            && (self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
+            && (self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_POSIX_MODE")
+                .map(String::as_str)
+                != Some("1")
                 || expanded.starts_with("~/"))
         {
             return format!("{name}={}", self.expand_assignment_tilde(&expanded));
@@ -276,17 +284,15 @@ impl Executor {
             return Some(value);
         }
 
-        if word.contains("kill -l") && word.contains("128") && word.contains('+') {
-            return Some("HUP".to_string());
-        }
-
         if let Some(expression) = word
             .strip_prefix("$((")
             .and_then(|rest| rest.strip_suffix("))"))
         {
             let expression = self.expand_arithmetic_special_parameters(expression);
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
-                if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars) {
+                if let Some(name) =
+                    arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
+                {
                     if !self.shell_state.arithmetic_expansion_error.replace(true) {
                         eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
                     }
@@ -302,7 +308,9 @@ impl Executor {
             if let Some(value) = value {
                 return Some(value.to_string());
             }
-            self.shell_state.arithmetic_last_error_category.set(actual_category);
+            self.shell_state
+                .arithmetic_last_error_category
+                .set(actual_category);
             // Bash reports arithmetic expansion errors (floating point,
             // negative exponent, division by zero, ...) on stderr instead of
             // silently producing nothing, and abandons the enclosing command
@@ -318,7 +326,11 @@ impl Executor {
                     "{expression}: syntax error in expression (error token is \"{expression}\")"
                 )
             });
-            let actual_fatal = self.shell_state.arithmetic_last_error_category.take().is_some();
+            let actual_fatal = self
+                .shell_state
+                .arithmetic_last_error_category
+                .take()
+                .is_some();
             if !actual_fatal
                 && !crate::executor::arithmetic::arithmetic_expansion_is_fatal(&expression)
             {

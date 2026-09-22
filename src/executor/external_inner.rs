@@ -241,7 +241,8 @@ impl Executor {
             }
             for name in ["SystemRoot", "WINDIR", "ComSpec"] {
                 if let Some(value) = self
-                    .shell_state.env_vars
+                    .shell_state
+                    .env_vars
                     .get(name)
                     .cloned()
                     .or_else(|| env::var(name).ok())
@@ -279,7 +280,11 @@ impl Executor {
         for (name, value) in &config.assignments {
             env_vars.insert(name.clone(), value.clone());
         }
-        materialize_required_windows_env(&mut env_vars, &self.shell_state.env_vars, config.ignore_environment);
+        materialize_required_windows_env(
+            &mut env_vars,
+            &self.shell_state.env_vars,
+            config.ignore_environment,
+        );
         Ok(Some(env_vars))
     }
 
@@ -409,7 +414,8 @@ impl Executor {
             && !cmd.words[0].contains('\\')
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "hashall")
             && self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("__RUBASH_TEMP_PATH")
                 .map(String::as_str)
                 != Some("1")
@@ -492,37 +498,6 @@ impl Executor {
             return Ok(true);
         }
 
-        if self
-            .shell_state.env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .is_some_and(|script| script.ends_with("type3.sub"))
-            && cmd.words[0] == "foo"
-        {
-            self.print_upstream_type_function("foo", &[]);
-            println!("a:file");
-            println!("b:file");
-            println!("c:file");
-            self.exit_code = 0;
-            return Ok(true);
-        }
-
-        if self
-            .shell_state.env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .is_some_and(|script| script.ends_with("type4.sub"))
-        {
-            if matches!(cmd.words[0].as_str(), "coproc" | "producer" | "EOF2") {
-                self.exit_code = 0;
-                return Ok(true);
-            }
-            if cmd.words.first().map(String::as_str) == Some("echo")
-                && cmd.words.iter().any(|word| word.contains("coprocs"))
-            {
-                self.exit_code = 0;
-                return Ok(true);
-            }
-        }
-
         if cmd.words[0] == "cat" && self.handle_hashed_cat_checkhash()? {
             return Ok(true);
         }
@@ -549,8 +524,10 @@ impl Executor {
             // each command and pass named pipes/FIFOs to `diff`. Upstream
             // shopt1.sub uses `diff <("$t1") <("$t2")` where the files are
             // executable helper scripts that differ only by a shebang.
-            let left = shell_path_to_windows(&self.expand_word(&cmd.words[1]), &self.shell_state.env_vars);
-            let right = shell_path_to_windows(&self.expand_word(&cmd.words[2]), &self.shell_state.env_vars);
+            let left =
+                shell_path_to_windows(&self.expand_word(&cmd.words[1]), &self.shell_state.env_vars);
+            let right =
+                shell_path_to_windows(&self.expand_word(&cmd.words[2]), &self.shell_state.env_vars);
             if let (Ok(left_source), Ok(right_source)) =
                 (fs::read_to_string(left), fs::read_to_string(right))
             {
@@ -565,17 +542,23 @@ impl Executor {
     }
 
     fn handle_hashed_cat_checkhash(&mut self) -> Result<bool, ExecuteError> {
-        let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, "cat") else {
+        let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, "cat")
+        else {
             return Ok(false);
         };
         if self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_SHOPT_CHECKHASH")
             .map(String::as_str)
             == Some("1")
             || std::env::var("__RUBASH_SHOPT_CHECKHASH").ok().as_deref() == Some("1")
         {
-            crate::builtins::hash::set_hashed_path(&mut self.shell_state.env_vars, "cat", "/usr/bin/cat");
+            crate::builtins::hash::set_hashed_path(
+                &mut self.shell_state.env_vars,
+                "cat",
+                "/usr/bin/cat",
+            );
             self.exit_code = 0;
             return Ok(true);
         }
@@ -756,7 +739,8 @@ impl Executor {
                 let interp_resolves = matches!(interp, "sh" | "bash" | "dash" | "rubash")
                     || interp.ends_with("/sh")
                     || interp.ends_with("/bash")
-                    || crate::executor::path::find_user_command(interp, &self.shell_state.env_vars).is_some();
+                    || crate::executor::path::find_user_command(interp, &self.shell_state.env_vars)
+                        .is_some();
                 if !interp_resolves {
                     return Some((
                         format!(

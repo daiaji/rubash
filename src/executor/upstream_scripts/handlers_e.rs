@@ -172,20 +172,4 @@ impl Executor {
         true
     }
 
-    pub(super) fn execute_upstream_type_script(&mut self) -> bool {
-        if self.shell_state.env_vars.contains_key(TYPE_TEST_DONE)
-            || !self
-                .shell_state.env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.ends_with("type.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", TYPE_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.shell_state.env_vars
-            .insert(TYPE_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
-    }
 }

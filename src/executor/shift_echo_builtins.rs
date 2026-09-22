@@ -65,7 +65,10 @@ impl Executor {
             }
             crate::builtins::shift::ShiftAction::Shift(amount) => {
                 if amount > self.shell_state.positional_params.len() {
-                    if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "shift_verbose") {
+                    if crate::builtins::shopt::option_enabled(
+                        &self.shell_state.env_vars,
+                        "shift_verbose",
+                    ) {
                         writeln!(
                             stderr,
                             "{}shift: {amount}: shift count out of range",
@@ -137,24 +140,6 @@ impl Executor {
         // TODO(redir.c/execute_cmd.c/builtins/echo.def): Generalize builtin
         // redirection. This covers upstream source tests that create sourced
         // files with `echo ... > file`.
-        if self
-            .shell_state.env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .is_some_and(|script| script.ends_with("type4.sub"))
-            && cmd.words.iter().any(|word| word.contains("coprocs"))
-        {
-            self.exit_code = 0;
-            return Ok(());
-        }
-        if self
-            .shell_state.env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .is_some_and(|script| script.ends_with("type5.sub"))
-            && cmd.words.iter().any(|word| word.contains("unset PATH"))
-        {
-            self.exit_code = 0;
-            return Ok(());
-        }
         let echo_args = echo_args_without_background_marker(&cmd.words[1..]);
         let mut output = Vec::new();
         crate::builtins::echo::write_echo_decoded(

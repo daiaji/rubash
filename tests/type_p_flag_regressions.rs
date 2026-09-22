@@ -190,3 +190,73 @@ fn type_ap_single_builtin_only_name_exits_zero() {
     assert!(stderr.is_empty(), "stderr: {stderr}");
     assert_eq!(code, Some(0));
 }
+
+// ---------------------------------------------------------------------------
+// Empty/unset PATH — GNU findcmd.c:266 path_value + builtins/type.def:390
+// describe_command STREQ->file_status->sh_makepath(MP_DOCWD) semantics:
+// PATH="" searches "." (prints "./name"); unset PATH returns NAME, then
+// reports the physical cwd as an absolute path. `type -a` iterates
+// user_command_matches: empty PATH contributes "./name", unset PATH nothing.
+// ---------------------------------------------------------------------------
+
+fn setup_dot_fixture(tag: &str) -> std::path::PathBuf {
+    let dir = Path::new("target").join(format!("type-dot-{}", tag));
+    fs::create_dir_all(&dir).expect("mkdir");
+    let e = dir.join("e");
+    fs::write(&e, "#!/bin/sh\nexit 0\n").expect("write e");
+    make_executable(&e);
+    dir
+}
+
+#[test]
+fn type_p_empty_path_reports_dot_name() {
+    let dir = setup_dot_fixture("empty");
+    let script = "PATH=\ntype -p e\n";
+    let script_path = dir.join("s.sh");
+    fs::write(&script_path, script).expect("write script");
+
+    let (stdout, stderr, code) = run_rubash(&[script_path.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "./e\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn type_p_unset_path_reports_physical_cwd() {
+    let dir = setup_dot_fixture("unset");
+    let script =
+        "unset PATH\nz=$(type -p e)\ncase $z in */e) echo ok;; *) echo \"bad:[$z]\";; esac\n";
+    let script_path = dir.join("s.sh");
+    fs::write(&script_path, script).expect("write script");
+
+    let (stdout, stderr, code) = run_rubash(&[script_path.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "ok\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn type_a_unset_path_finds_nothing() {
+    let dir = setup_dot_fixture("a-unset");
+    let script = "unset PATH\ntype -a e\necho rc=$?\n";
+    let script_path = dir.join("s.sh");
+    fs::write(&script_path, script).expect("write script");
+
+    let (stdout, _stderr, code) = run_rubash(&[script_path.to_str().unwrap()]);
+    assert_eq!(stdout, "rc=1\n");
+    assert_eq!(code, Some(0));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn type_a_empty_path_reports_dot_name() {
+    let dir = setup_dot_fixture("a-empty");
+    let script = "PATH=\ntype -a e\n";
+    let script_path = dir.join("s.sh");
+    fs::write(&script_path, script).expect("write script");
+
+    let (stdout, stderr, code) = run_rubash(&[script_path.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "e is ./e\n");
+    let _ = fs::remove_dir_all(&dir);
+}

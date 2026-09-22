@@ -1,4 +1,4 @@
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 pub(in crate::executor) fn split_shell_words(source: &str) -> Vec<String> {
     split_shell_words_with_quote_info(source)
         .into_iter()
@@ -374,8 +374,8 @@ fn apply_simple_sed_substitutions(input: &str, scripts: &[&str]) -> Option<Strin
             let (_, line) = line;
             substitutions
                 .iter()
-                .fold(line.to_string(), |line, (pattern, replacement)| {
-                    apply_simple_sed_line(&line, pattern, replacement)
+                .fold(line.to_string(), |line, (pattern, replacement, global)| {
+                    apply_simple_sed_line(&line, pattern, replacement, *global)
                 })
         })
         .collect::<Vec<_>>()
@@ -386,7 +386,7 @@ fn apply_simple_sed_substitutions(input: &str, scripts: &[&str]) -> Option<Strin
     Some(output)
 }
 
-fn parse_sed_substitutions(script: &str) -> Option<Vec<(&str, &str)>> {
+fn parse_sed_substitutions(script: &str) -> Option<Vec<(&str, &str, bool)>> {
     let substitutions = script
         .lines()
         .filter_map(|line| {
@@ -405,13 +405,421 @@ fn parse_sed_substitutions(script: &str) -> Option<Vec<(&str, &str)>> {
     }
 }
 
-fn parse_sed_substitution(script: &str) -> Option<(&str, &str)> {
+#[derive(Clone, Debug, PartialEq)]
+enum BreAtom {
+    Char(char),
+    Any,
+    Class {
+        negated: bool,
+        ranges: Vec<(char, char)>,
+    },
+    Group {
+        index: usize,
+        atoms: Vec<BreAtom>,
+    },
+    AnchorStart,
+    AnchorEnd,
+    Backref(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum BreQuantifier {
+    One,
+    ZeroOrOne,
+    ZeroOrMore,
+    OneOrMore,
+}
+
+#[derive(Clone, Debug)]
+struct BrePiece {
+    atom: BreAtom,
+    quantifier: BreQuantifier,
+}
+
+// GNU sed(1) BRE as documented in regex(7): `^`/`$` anchors, `.`, `*`,
+// `[...]` classes, `\(...\)` subexpressions, `\1`-`\9` backreferences, and the
+// GNU `\+`/`\?` extensions. Anything outside this surface (`\{...\}`
+// intervals, `\|` alternation) fails the parse and the caller falls through
+// to the real `sed` binary.
+fn parse_bre(pattern: &[char]) -> Option<Vec<BrePiece>> {
+    let mut group_count = 0usize;
+    let (atoms, next) = parse_bre_atoms(pattern, 0, &mut group_count, false)?;
+    if next != pattern.len() {
+        return None;
+    }
+    Some(atoms_to_pieces(&atoms))
+}
+
+fn parse_bre_atoms(
+    pattern: &[char],
+    mut index: usize,
+    group_count: &mut usize,
+    in_group: bool,
+) -> Option<(Vec<BreAtom>, usize)> {
+    let mut atoms = Vec::new();
+    while index < pattern.len() {
+        let ch = pattern[index];
+        match ch {
+            '\\' => {
+                index += 1;
+                let esc = *pattern.get(index)?;
+                index += 1;
+                match esc {
+                    '(' => {
+                        *group_count += 1;
+                        if *group_count > 9 {
+                            return None;
+                        }
+                        let group_index = *group_count;
+                        let (inner, next) = parse_bre_atoms(pattern, index, group_count, true)?;
+                        atoms.push(BreAtom::Group {
+                            index: group_index,
+                            atoms: inner,
+                        });
+                        index = next;
+                    }
+                    ')' => {
+                        if !in_group {
+                            return None;
+                        }
+                        return Some((atoms, index));
+                    }
+                    '1'..='9' => atoms.push(BreAtom::Backref(esc as usize - '0' as usize)),
+                    '+' => {
+                        let last = atoms.pop()?;
+                        atoms.push(BreAtom::Group {
+                            index: usize::MAX,
+                            atoms: vec![last],
+                        });
+                    }
+                    '?' => {
+                        let last = atoms.pop()?;
+                        atoms.push(BreAtom::Group {
+                            index: usize::MAX - 1,
+                            atoms: vec![last],
+                        });
+                    }
+                    'n' => atoms.push(BreAtom::Char('\n')),
+                    't' => atoms.push(BreAtom::Char('\t')),
+                    '{' | '|' => return None,
+                    other => atoms.push(BreAtom::Char(other)),
+                }
+            }
+            '[' => {
+                index += 1;
+                let mut negated = false;
+                if pattern.get(index) == Some(&'^') {
+                    negated = true;
+                    index += 1;
+                }
+                let mut ranges = Vec::new();
+                let mut first = true;
+                loop {
+                    let item = *pattern.get(index)?;
+                    if item == ']' && !first {
+                        index += 1;
+                        break;
+                    }
+                    first = false;
+                    let lo = item;
+                    index += 1;
+                    if pattern.get(index) == Some(&'-')
+                        && pattern.get(index + 1).is_some_and(|c| *c != ']')
+                    {
+                        index += 1;
+                        let hi = pattern[index];
+                        index += 1;
+                        ranges.push((lo, hi));
+                    } else {
+                        ranges.push((lo, lo));
+                    }
+                }
+                atoms.push(BreAtom::Class { negated, ranges });
+            }
+            '^' if atoms.is_empty() && !in_group => {
+                atoms.push(BreAtom::AnchorStart);
+                index += 1;
+            }
+            '$' if index + 1 == pattern.len() => {
+                atoms.push(BreAtom::AnchorEnd);
+                index += 1;
+            }
+            '.' => {
+                atoms.push(BreAtom::Any);
+                index += 1;
+            }
+            other => {
+                atoms.push(BreAtom::Char(other));
+                index += 1;
+            }
+        }
+    }
+    if in_group {
+        return None;
+    }
+    Some((atoms, index))
+}
+
+fn atoms_to_pieces(atoms: &[BreAtom]) -> Vec<BrePiece> {
+    let mut pieces = Vec::new();
+    for atom in atoms {
+        if *atom == BreAtom::Char('*') {
+            if let Some(last) = pieces.last_mut() {
+                let last: &mut BrePiece = last;
+                if last.quantifier == BreQuantifier::One
+                    && !matches!(last.atom, BreAtom::AnchorStart | BreAtom::AnchorEnd)
+                {
+                    last.quantifier = BreQuantifier::ZeroOrMore;
+                    continue;
+                }
+            }
+        }
+        pieces.push(BrePiece {
+            atom: atom.clone(),
+            quantifier: BreQuantifier::One,
+        });
+    }
+    pieces
+}
+
+type BreCaptures = [Option<(usize, usize)>; 10];
+
+fn bre_atom_match(
+    atom: &BreAtom,
+    text: &[char],
+    pos: usize,
+    captures: &BreCaptures,
+) -> Option<usize> {
+    match atom {
+        BreAtom::Char(expected) => (text.get(pos) == Some(expected)).then_some(pos + 1),
+        BreAtom::Any => text.get(pos).is_some().then_some(pos + 1),
+        BreAtom::Class { negated, ranges } => {
+            let ch = *text.get(pos)?;
+            let inside = ranges.iter().any(|(lo, hi)| ch >= *lo && ch <= *hi);
+            (inside != *negated).then_some(pos + 1)
+        }
+        BreAtom::Backref(index) => {
+            let (start, end) = captures.get(*index).copied().flatten()?;
+            let len = end - start;
+            if text.len() - pos < len || text[pos..pos + len] != text[start..end] {
+                return None;
+            }
+            Some(pos + len)
+        }
+        BreAtom::Group { .. } | BreAtom::AnchorStart | BreAtom::AnchorEnd => None,
+    }
+}
+
+// Greedy backtracking match of `pieces` at `pos`; returns the longest end
+// position reachable along the first successful path, recording `\(...\)`
+// captures. GNU's matcher is leftmost-longest (regexec); the greedy order
+// here agrees for the s/// surface the upstream tests exercise.
+fn bre_match_pieces(
+    pieces: &[BrePiece],
+    text: &[char],
+    pos: usize,
+    captures: &mut BreCaptures,
+) -> Option<usize> {
+    let Some((piece, rest)) = pieces.split_first() else {
+        return Some(pos);
+    };
+    match &piece.atom {
+        BreAtom::AnchorStart => {
+            if pos == 0 {
+                bre_match_pieces(rest, text, pos, captures)
+            } else {
+                None
+            }
+        }
+        BreAtom::AnchorEnd => {
+            if pos == text.len() {
+                bre_match_pieces(rest, text, pos, captures)
+            } else {
+                None
+            }
+        }
+        _ => {
+            let (min, max) = match piece.quantifier {
+                BreQuantifier::One => (1, 1),
+                BreQuantifier::ZeroOrOne => (0, 1),
+                BreQuantifier::ZeroOrMore => (0, usize::MAX),
+                BreQuantifier::OneOrMore => (1, usize::MAX),
+            };
+            bre_match_repetitions(piece, rest, text, pos, captures, 0, min, max)
+        }
+    }
+}
+
+fn bre_match_repetitions(
+    piece: &BrePiece,
+    rest: &[BrePiece],
+    text: &[char],
+    pos: usize,
+    captures: &mut BreCaptures,
+    count: usize,
+    min: usize,
+    max: usize,
+) -> Option<usize> {
+    // Greedy: try one more repetition first (longer match), then back off.
+    if count < max {
+        if let Some((next, trial)) = bre_match_single(piece, text, pos, captures) {
+            if next > pos {
+                let mut trial = trial;
+                if let Some(end) =
+                    bre_match_repetitions(piece, rest, text, next, &mut trial, count + 1, min, max)
+                {
+                    *captures = trial;
+                    return Some(end);
+                }
+            }
+        }
+    }
+    if count >= min {
+        return bre_match_pieces(rest, text, pos, captures);
+    }
+    None
+}
+
+fn bre_match_single(
+    piece: &BrePiece,
+    text: &[char],
+    pos: usize,
+    captures: &BreCaptures,
+) -> Option<(usize, BreCaptures)> {
+    match &piece.atom {
+        BreAtom::Group { index, atoms } => {
+            if *index == usize::MAX - 1 {
+                // `a\?` — zero or one.
+                let inner = atoms_to_pieces(atoms);
+                let mut trial = *captures;
+                if let Some(end) = bre_match_pieces(&inner, text, pos, &mut trial) {
+                    return Some((end, trial));
+                }
+                return Some((pos, *captures));
+            }
+            if *index == usize::MAX {
+                // `a\+` — one or more.
+                let inner = atoms_to_pieces(atoms);
+                let mut trial = *captures;
+                let mut cursor = bre_match_pieces(&inner, text, pos, &mut trial)?;
+
+                loop {
+                    let mut t2 = trial;
+                    match bre_match_pieces(&inner, text, cursor, &mut t2) {
+                        Some(next) if next > cursor => {
+                            trial = t2;
+                            cursor = next;
+                        }
+                        _ => break,
+                    }
+                }
+                return Some((cursor, trial));
+            }
+            let inner = atoms_to_pieces(atoms);
+            let mut trial = *captures;
+            let end = bre_match_pieces(&inner, text, pos, &mut trial)?;
+            if *index > 0 && *index < 10 {
+                trial[*index] = Some((pos, end));
+            }
+            Some((end, trial))
+        }
+        atom => bre_atom_match(atom, text, pos, captures).map(|end| (end, *captures)),
+    }
+}
+
+fn bre_substitute(line: &str, pattern: &str, replacement: &str, global: bool) -> Option<String> {
+    let pattern_chars: Vec<char> = pattern.chars().collect();
+    let pieces = parse_bre(&pattern_chars)?;
+    let text: Vec<char> = line.chars().collect();
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    let mut replaced = false;
+    while cursor <= text.len() {
+        let mut found = None;
+        for start in cursor..=text.len() {
+            let mut captures: BreCaptures = [None; 10];
+            if let Some(end) = bre_match_pieces(&pieces, &text, start, &mut captures) {
+                found = Some((start, end, captures));
+                break;
+            }
+        }
+        let Some((start, end, captures)) = found else {
+            break;
+        };
+        for ch in &text[cursor..start] {
+            output.push(*ch);
+        }
+        expand_sed_replacement(&mut output, replacement, &text, start, end, &captures);
+        replaced = true;
+        if !global {
+            cursor = end;
+            break;
+        }
+        cursor = end.max(start + 1);
+        if end == start {
+            if let Some(ch) = text.get(start) {
+                output.push(*ch);
+            }
+        }
+    }
+    if !replaced {
+        return Some(line.to_string());
+    }
+    for ch in &text[cursor.min(text.len())..] {
+        output.push(*ch);
+    }
+    Some(output)
+}
+
+fn expand_sed_replacement(
+    output: &mut String,
+    replacement: &str,
+    text: &[char],
+    start: usize,
+    end: usize,
+    captures: &BreCaptures,
+) {
+    let mut chars = replacement.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '&' => {
+                for ch in &text[start..end] {
+                    output.push(*ch);
+                }
+            }
+            '\\' => match chars.next() {
+                Some('n') => output.push('\n'),
+                Some('t') => output.push('\t'),
+                Some(digit @ '1'..='9') => {
+                    if let Some(Some((s, e))) = captures.get(digit as usize - '0' as usize) {
+                        for ch in &text[*s..*e] {
+                            output.push(*ch);
+                        }
+                    }
+                }
+                Some('&') => output.push('&'),
+                Some(other) => output.push(other),
+                None => output.push('\\'),
+            },
+            other => output.push(other),
+        }
+    }
+}
+
+fn parse_sed_substitution(script: &str) -> Option<(&str, &str, bool)> {
     let rest = script.strip_prefix('s')?;
     let separator = rest.chars().next()?;
     let rest = &rest[separator.len_utf8()..];
     let (pattern, rest) = split_escaped_separator(rest, separator)?;
-    let (replacement, _) = split_escaped_separator(rest, separator)?;
-    Some((pattern, replacement))
+    let (replacement, flags) = split_escaped_separator(rest, separator)?;
+    let mut global = false;
+    for flag in flags.chars() {
+        match flag {
+            'g' => global = true,
+            _ => return None,
+        }
+    }
+    Some((pattern, replacement, global))
 }
 
 fn split_escaped_separator(value: &str, separator: char) -> Option<(&str, &str)> {
@@ -432,110 +840,12 @@ fn split_escaped_separator(value: &str, separator: char) -> Option<(&str, &str)>
     None
 }
 
-fn apply_simple_sed_line(line: &str, pattern: &str, replacement: &str) -> String {
+fn apply_simple_sed_line(line: &str, pattern: &str, replacement: &str, global: bool) -> String {
     let pattern = pattern
         .replace(DATA_DOLLAR, "$")
         .replace(crate::executor::markers::CTLESC, "")
         .replace(r"\\.", r"\.");
-    match pattern.as_str() {
-        "'" => line.replace('\'', &unescape_sed_replacement(replacement)),
-        "#" => line.replace('#', &unescape_sed_replacement(replacement)),
-        "\\" | r"\\" => line.replace('\\', &unescape_sed_replacement(replacement)),
-        r"\!\*" => line.replace("!*", &unescape_sed_replacement(replacement)),
-        r"\!:\([1-9]\)" => replace_aliasconv_positional_markers(line),
-        r"\..*$" | "..*$" => line
-            .split_once('.')
-            .map(|(prefix, _)| format!("{prefix}{replacement}"))
-            .unwrap_or_else(|| line.to_string()),
-        r"^.*\." => line
-            .rsplit_once('.')
-            .map(|(_, suffix)| format!("{replacement}{suffix}"))
-            .unwrap_or_else(|| line.to_string()),
-        _ if is_aliasconv_line_pattern(&pattern) => {
-            apply_aliasconv_line_substitution(line, replacement).unwrap_or_else(|| line.to_string())
-        }
-        _ if pattern.starts_with(r"\$") => {
-            let needle = pattern.replacen(r"\$", "$", 1);
-            line.replace(&needle, &unescape_sed_replacement(replacement))
-        }
-        // Plain `s/pattern/replacement/`: apply a literal replacement. GNU
-        // sed treats the pattern as a BRE, but the upstream tests that reach
-        // this path use literal needles (`s/a/B/`).
-        _ if pattern.starts_with('^') => {
-            // GNU BRE: a leading `^` anchors the match at the line start and
-            // s/// then rewrites that one occurrence only. The s command's
-            // escaped delimiter (`\/` in `s/^refs\/heads\///`, the
-            // git-symbolic-ref idiom in issue #70) is the literal character.
-            let needle = pattern[1..].replace(r"\/", "/");
-            match line.strip_prefix(needle.as_str()) {
-                Some(rest) => format!("{}{rest}", unescape_sed_replacement(replacement)),
-                None => line.to_string(),
-            }
-        }
-        _ => line.replace(
-            pattern.replace(r"\/", "/").as_str(),
-            &unescape_sed_replacement(replacement),
-        ),
-    }
-}
-
-fn is_aliasconv_line_pattern(pattern: &str) -> bool {
-    pattern.contains("[a-zA-Z0-9_-]*") && pattern.contains('\t') && pattern.contains(r"\(.*\)")
-}
-
-fn apply_aliasconv_line_substitution(line: &str, replacement: &str) -> Option<String> {
-    if replacement != r"mkalias \1 '\2'" {
-        return None;
-    }
-    let (name, value) = line.split_once('\t')?;
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-    {
-        return None;
-    }
-    Some(format!("mkalias {name} '{value}'"))
-}
-
-fn replace_aliasconv_positional_markers(line: &str) -> String {
-    let mut output = String::new();
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '!' && chars.peek().copied() == Some(':') {
-            chars.next();
-            if let Some(digit @ '1'..='9') = chars.peek().copied() {
-                chars.next();
-                output.push('"');
-                output.push('$');
-                output.push(digit);
-                output.push('"');
-                continue;
-            }
-            output.push('!');
-            output.push(':');
-            continue;
-        }
-        output.push(ch);
-    }
-    output
-}
-
-fn unescape_sed_replacement(replacement: &str) -> String {
-    let mut output = String::new();
-    let mut chars = replacement.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(next) = chars.next() {
-                output.push(next);
-            } else {
-                output.push(ch);
-            }
-        } else {
-            output.push(ch);
-        }
-    }
-    output
+    bre_substitute(line, &pattern, replacement, global).unwrap_or_else(|| line.to_string())
 }
 
 pub(in crate::executor) fn split_unquoted_and_and(source: &str) -> Option<(&str, &str)> {
