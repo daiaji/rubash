@@ -95,6 +95,22 @@ pub fn run_script_with_history(
     redirect_cmd: Option<&CommandNode>,
 ) -> i32 {
     let session = Rc::new(RefCell::new(SessionHistory::new()));
+    run_script_with_history_in(executor, contents, session, redirect_cmd)
+}
+
+/// Same grouped driver with a host-owned session history (data plane).
+/// Hosts embedding rubash (niubash) preload the session from their own
+/// history file so `!!`/`!str` inside scripts expands against — and records
+/// back into — the live session list. Spawned and in-process THIS_SH
+/// children keep run_script_with_history's fresh list: GNU gives each new
+/// shell process an empty history list (`set -o history` in a script does
+/// not read $HISTFILE), so only the embedding host may share its session.
+pub fn run_script_with_history_in(
+    executor: &mut Executor,
+    contents: &str,
+    session: Rc<RefCell<SessionHistory>>,
+    redirect_cmd: Option<&CommandNode>,
+) -> i32 {
     executor.set_session_history(Some(session.clone()));
     let raw_lines: Vec<&str> = contents.split_inclusive('\n').collect();
     let mut index = 0usize;
