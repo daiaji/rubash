@@ -1186,6 +1186,20 @@ impl Executor {
                 if has_io {
                     file_arg = args.get(idx).cloned();
                 }
+                // GNU history.def:145: only one of -anrw may be given.
+                let io_flags = [do_append, do_read_new, do_read, do_write]
+                    .iter()
+                    .filter(|flag| **flag)
+                    .count();
+                if io_flags > 1 {
+                    writeln!(
+                        stderr,
+                        "{}history: cannot use more than one of -anrw",
+                        self.diagnostic_prefix()
+                    )?;
+                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    return Ok(1);
+                }
             }
 
             if has_io {

@@ -83,19 +83,21 @@ pub(in crate::executor) fn execute_history_session(
             continue;
         }
         if !no_more_opts && arg.len() >= 2 && arg.starts_with('-') {
-            // A bare negative number is a listing count (history -5).
-            if arg[1..].chars().all(|c| c.is_ascii_digit()) {
-                count = arg[1..].parse::<usize>().ok();
-                i += 1;
-                continue;
-            }
             let mut bad: Option<char> = None;
-            for c in arg[1..].chars() {
+            for (position, c) in arg[1..].char_indices() {
                 match c {
                     'c' => clear = true,
                     'd' => {
                         mode = HistoryMode::Delete;
-                        expecting_offset = true;
+                        // internal_getopt: -d's optarg is the rest of the
+                        // cluster when attached (-d5), else the next word.
+                        let rest = &arg[position + 2..];
+                        if rest.is_empty() {
+                            expecting_offset = true;
+                        } else {
+                            delete_offset = Some(rest.to_string());
+                        }
+                        break;
                     }
                     'p' => {
                         mode = HistoryMode::Print;
@@ -144,6 +146,16 @@ pub(in crate::executor) fn execute_history_session(
         operands.push(arg.clone());
         i += 1;
     }
+    // internal_getopt reports a missing -d optarg before the builtin runs.
+    if expecting_offset {
+        let _ = writeln!(
+            stderr,
+            "{}history: -d: option requires an argument",
+            executor.diagnostic_prefix()
+        );
+        let _ = writeln!(stderr, "history: usage: history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]");
+        return Ok(2);
+    }
     // history.def:161-166: reject when more than one of -a/-r/-w/-n is set.
     if anrw_count > 1 {
         let _ = writeln!(
@@ -154,19 +166,33 @@ pub(in crate::executor) fn execute_history_session(
         return Ok(1);
     }
 
-    // GNU display_history -> get_numeric_arg: a non-numeric listing limit is
-    // "numeric argument required" with EX_USAGE, not a full listing.
+    // GNU display_history -> get_numeric_arg(list, 0, &limit): the operand
+    // is validated as a number first (sh_neednumarg, EX_USAGE), then
+    // no_args() rejects any further operands with `too many arguments`.
+    // no_args jumps to DISCARD, so the listing never runs on error paths.
     if mode == HistoryMode::List {
-        if let Some(bad) = operands.first() {
-            if bad.parse::<i64>().is_err() {
-                let _ = writeln!(
-                    stderr,
-                    "{}history: {bad}: numeric argument required",
-                    executor.diagnostic_prefix()
-                );
-                return Ok(2);
+        let mut rest = operands.as_slice();
+        if count.is_none() {
+            if let Some(first) = rest.first() {
+                if first.parse::<i64>().is_err() {
+                    let _ = writeln!(
+                        stderr,
+                        "{}history: {first}: numeric argument required",
+                        executor.diagnostic_prefix()
+                    );
+                    return Ok(2);
+                }
+                count = first.parse::<usize>().ok();
+                rest = &rest[1..];
             }
-            count = bad.parse::<usize>().ok();
+        }
+        if !rest.is_empty() {
+            let _ = writeln!(
+                stderr,
+                "{}history: too many arguments",
+                executor.diagnostic_prefix()
+            );
+            return Ok(2);
         }
     }
 

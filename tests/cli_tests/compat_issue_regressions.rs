@@ -2070,3 +2070,62 @@ fn cp_dot_slash_source_copies_contents_into_existing_directory() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
+
+#[test]
+fn history_builtin_rejects_extra_and_malformed_arguments() {
+    // GNU builtins/history.def + common.c get_numeric_arg()/no_args():
+    // the listing form takes at most one numeric operand — a second one
+    // is `too many arguments` (EX_USAGE), a non-numeric one is `numeric
+    // argument required`, and -d's optarg is mandatory. no_args jumps to
+    // DISCARD, so no listing is printed on error paths.
+    let dir = env::temp_dir().join(format!("rubash-history-args-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create history args probe dir");
+    let script = dir.join("probe.sh");
+    fs::write(
+        &script,
+        concat!(
+            "set -o history\n",
+            "history -s alpha beta gamma\n",
+            "history 10 42 2>e1.txt; echo \"r1=$?\"\n",
+            "history abc 2>e2.txt; echo \"r2=$?\"\n",
+            "history 5 abc 2>e3.txt; echo \"r3=$?\"\n",
+            "history -d 2>e4.txt; echo \"r4=$?\"\n",
+            "history -d xyz 2>e5.txt; echo \"r5=$?\"\n",
+            "history -ar 2>e6.txt; echo \"r6=$?\"\n",
+            "history 2\n",
+            "for f in e1 e2 e3 e4 e5 e6; do cat \"$f.txt\"; done\n"
+        ),
+    )
+    .expect("write history args probe script");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("probe.sh")
+        .current_dir(&dir)
+        .output()
+        .expect("run history args probe");
+
+    let _ = fs::remove_dir_all(&dir);
+    let name = "probe.sh";
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            concat!(
+                "r1=2\nr2=2\nr3=2\nr4=2\nr5=1\nr6=1\n",
+                "    7  history -ar 2>e6.txt; echo \"r6=$?\"\n",
+                "    8  history 2\n",
+                "{name}: line 3: history: too many arguments\n",
+                "{name}: line 4: history: abc: numeric argument required\n",
+                "{name}: line 5: history: too many arguments\n",
+                "{name}: line 6: history: -d: option requires an argument\n",
+                "history: usage: history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]\n",
+                "{name}: line 7: history: xyz: invalid number\n",
+                "{name}: line 8: history: cannot use more than one of -anrw\n"
+            ),
+            name = name
+        )
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
