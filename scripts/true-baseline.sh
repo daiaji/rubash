@@ -119,6 +119,34 @@ else
   SUITES="$*"
 fi
 
+# ---- /bin/sh fixture (rb side only) ----------------------------------------
+# Upstream tests spawn `/bin/sh` by absolute path (jobs3.sub `sleep 4`,
+# histexp `/bin/sh -c 'echo this is $0'`, errors/rsh). On Windows there is no
+# /bin; executor/path.rs degrades /bin/sh|/usr/bin/sh to a `sh` found on PATH
+# (the same chain /bin/bash already used). The fixture dir ships sh.exe = a
+# niubash build mounted on THIS rubash worktree, so /bin/sh children run our
+# own engine ($BASH -> niu) instead of an unrelated Git/WSL shell — every
+# diff line then stays attributable to rubash semantics. PATH propagates to
+# ${THIS_SH} sub-shells naturally; no logical-root env is touched, so `cd /`
+# and dstack keep real semantics.
+SHFIX="$REPO/target/sh-fixture"
+NIU_SRC="${NIUBASH_BIN:-$REPO/../niubash/target/debug/niu.exe}"
+mkdir -p "$SHFIX"
+if [ -x "$NIU_SRC" ]; then
+  cp -f "$NIU_SRC" "$SHFIX/sh.exe" 2>/dev/null || true
+fi
+# RB_PATH prefixes the fixture so `sh` resolves to niu before Git's usr/bin.
+RB_PATH="$SHFIX"
+[ -x "$SHFIX/sh.exe" ] || echo "WARN: no sh fixture; /bin/sh falls back to PATH" >&2
+
+# WSL -> Win32 env propagation is opt-in: without a WSLENV /w entry a custom
+# variable never reaches rubash.exe (verified: __RUBASH_NO_UPSTREAM_SCRIPTS
+# and TMPDIR silently vanished, so past runs measured with upstream stub
+# scripts ENABLED and every suite shared one Windows %TEMP% — the redir
+# `to c` xN accumulation). Flags: /w share WSL->Win32, /p translate the
+# value as a Linux path into its Windows form.
+export WSLENV="__RUBASH_NO_UPSTREAM_SCRIPTS/w:TMPDIR/p"
+
 mkdir -p "$OUT"
 : > "$LOG"
 for name in $SUITES; do
@@ -138,8 +166,9 @@ for name in $SUITES; do
       THIS_SH="$GNU_BASH" timeout --foreground -k 5 "$tmo" "$GNU_BASH" "./$name.tests" \
       > "$w/gnu.out" 2> "$w/gnu.err" ) < /dev/null
   echo $? > "$w/gnu.rc"
-  ( cd "$BASE" && PATH="$BASE:/usr/bin:/bin" TMPDIR="$w/tmp" \
-      __RUBASH_NO_UPSTREAM_SCRIPTS=1 timeout --foreground -k 5 "$tmo" "$RUB" "./$name.tests" \
+  ( cd "$BASE" && PATH="$RB_PATH:$BASE:/usr/bin:/bin" TMPDIR="$w/tmp" \
+      __RUBASH_NO_UPSTREAM_SCRIPTS=1 \
+      timeout --foreground -k 5 "$tmo" "$RUB" "./$name.tests" \
       > "$w/rb.out" 2> "$w/rb.err" ) < /dev/null
   echo $? > "$w/rb.rc"
   n=$(diff "$w/gnu.out" "$w/rb.out" 2>/dev/null | grep -c "^[<>]")

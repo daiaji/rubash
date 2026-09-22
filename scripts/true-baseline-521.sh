@@ -43,6 +43,23 @@ else
   SUITES="$*"
 fi
 
+# ---- /bin/sh fixture (rb side only) ----------------------------------------
+# Same as true-baseline.sh: executor/path.rs degrades /bin/sh|/usr/bin/sh to
+# a `sh` found on PATH; the fixture dir ships sh.exe = a niubash build
+# mounted on this rubash worktree so /bin/sh children run our own engine.
+SHFIX="$REPO/target/sh-fixture"
+NIU_SRC="${NIUBASH_BIN:-$REPO/../niubash/target/debug/niu.exe}"
+mkdir -p "$SHFIX"
+if [ -x "$NIU_SRC" ]; then
+  cp -f "$NIU_SRC" "$SHFIX/sh.exe" 2>/dev/null || true
+fi
+RB_PATH="$SHFIX"
+[ -x "$SHFIX/sh.exe" ] || echo "WARN: no sh fixture; /bin/sh falls back to PATH" >&2
+
+# WSL -> Win32 env propagation is opt-in (see true-baseline.sh): without
+# WSLENV /w entries the __RUBASH_* and TMPDIR vars never reach rubash.exe.
+export WSLENV="__RUBASH_NO_UPSTREAM_SCRIPTS/w:TMPDIR/p"
+
 mkdir -p "$OUT"
 : > "$LOG"
 for name in $SUITES; do
@@ -62,8 +79,9 @@ for name in $SUITES; do
       THIS_SH=/usr/bin/bash timeout --foreground -k 5 "$tmo" /usr/bin/bash "./$name.tests" \
       > "$w/gnu.out" 2> "$w/gnu.err" ) < /dev/null
   echo $? > "$w/gnu.rc"
-  ( cd "$BASE" && PATH="$BASE:/usr/bin:/bin" TMPDIR="$w/tmp" \
-      __RUBASH_NO_UPSTREAM_SCRIPTS=1 timeout --foreground -k 5 "$tmo" "$RUB" "./$name.tests" \
+  ( cd "$BASE" && PATH="$RB_PATH:$BASE:/usr/bin:/bin" TMPDIR="$w/tmp" \
+      __RUBASH_NO_UPSTREAM_SCRIPTS=1 \
+      timeout --foreground -k 5 "$tmo" "$RUB" "./$name.tests" \
       > "$w/rb.out" 2> "$w/rb.err" ) < /dev/null
   echo $? > "$w/rb.rc"
   n=$(diff "$w/gnu.out" "$w/rb.out" 2>/dev/null | grep -c "^[<>]")
