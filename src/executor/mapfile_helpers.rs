@@ -275,13 +275,23 @@ impl Executor {
     }
 
     fn mapfile_heredoc_fd_input(&mut self, cmd: &CommandNode, fd: u32) -> Option<String> {
-        let body = cmd
+        let redirect = cmd
             .heredoc_redirects
             .iter()
             .rev()
-            .find(|redirect| redirect.fd == Some(fd))?
-            .body
-            .as_deref()?;
+            .find(|redirect| redirect.fd == Some(fd))?;
+        if redirect.body_carrier.is_some() {
+            let mut input = if redirect.here_string {
+                self.expand_here_string_mut_from_carrier(&redirect.body_carrier)
+            } else {
+                self.expand_heredoc_body_mut_from_carrier(&redirect.body_carrier)
+            };
+            if redirect.here_string {
+                input.push('\n');
+            }
+            return Some(input);
+        }
+        let body = redirect.body.as_deref()?;
         if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
             let mut input =
                 decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));

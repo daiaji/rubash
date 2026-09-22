@@ -817,9 +817,11 @@ fn copy_command_redirects(from: &CommandNode, to: &mut CommandNode) {
     to.redirect_err = from.redirect_err.clone();
     to.redirect_err_append = from.redirect_err_append.clone();
     to.heredoc = from.heredoc.clone();
+    to.heredoc_body = from.heredoc_body.clone();
     to.heredoc_delimiter = from.heredoc_delimiter.clone();
     to.heredoc_redirects = from.heredoc_redirects.clone();
     to.here_string = from.here_string.clone();
+    to.here_string_carrier = from.here_string_carrier.clone();
 }
 
 fn alias_source_compound_end_word(source: &str) -> Option<&'static str> {

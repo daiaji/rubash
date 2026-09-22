@@ -669,7 +669,7 @@ impl Executor {
                     !r.here_string && (r.fd.is_none() || r.fd == Some(0))
                 }));
         if !wants_here_string {
-            if let Some(body) = cmd
+            if let Some(redirect) = cmd
                 .heredoc_redirects
                 .iter()
                 .rev()
@@ -677,9 +677,20 @@ impl Executor {
                     !redirect.here_string
                         && (redirect.fd.is_none() || redirect.fd == Some(0))
                 })
-                .and_then(|redirect| redirect.body.clone())
             {
-                return Some(self.expand_heredoc_body_mut(&body));
+                if redirect.body_carrier.is_some() {
+                    return Some(
+                        self.expand_heredoc_body_mut_from_carrier(&redirect.body_carrier),
+                    );
+                }
+                if let Some(body) = redirect.body.clone() {
+                    return Some(self.expand_heredoc_body_mut(&body));
+                }
+            }
+            if cmd.heredoc_body.is_some() {
+                return Some(
+                    self.expand_heredoc_body_mut_from_carrier(&cmd.heredoc_body),
+                );
             }
             if let Some(body) = cmd.heredoc.clone() {
                 return Some(self.expand_heredoc_body_mut(&body));
@@ -694,20 +705,33 @@ impl Executor {
             && cmd.heredoc.is_none()
             || wants_here_string
         {
-            if let Some(body) = cmd
+            if let Some(redirect) = cmd
                 .heredoc_redirects
                 .iter()
                 .rev()
                 .find(|redirect| redirect.here_string && redirect.fd == Some(0))
-                .and_then(|redirect| redirect.body.clone())
             {
-                if let Some(word) = body.strip_prefix('\u{1d}') {
-                    let mut input = decode_ansi_c_quoted_word(word)
-                        .unwrap_or_else(|| self.expand_word(word));
+                if redirect.body_carrier.is_some() {
+                    let mut input = self
+                        .expand_here_string_mut_from_carrier(&redirect.body_carrier);
                     input.push('\n');
                     return Some(input);
                 }
-                return Some(self.expand_heredoc_body_mut(&body));
+                if let Some(body) = redirect.body.clone() {
+                    if let Some(word) = body.strip_prefix('\u{1d}') {
+                        let mut input = decode_ansi_c_quoted_word(word)
+                            .unwrap_or_else(|| self.expand_word(word));
+                        input.push('\n');
+                        return Some(input);
+                    }
+                    return Some(self.expand_heredoc_body_mut(&body));
+                }
+            }
+            if cmd.here_string_carrier.is_some() {
+                let mut input =
+                    self.expand_here_string_mut_from_carrier(&cmd.here_string_carrier);
+                input.push('\n');
+                return Some(input);
             }
             if let Some(word) = cmd.here_string.clone() {
                 let decoded = decode_ansi_c_quoted_word(&word);
@@ -755,7 +779,7 @@ impl Executor {
         let last_fd0 = fd0_stdin_redirect_winner(cmd);
         match last_fd0.as_ref() {
             Some(crate::parser::RedirectKind::HereDoc) => {
-                if let Some(body) = cmd
+                if let Some(redirect) = cmd
                     .heredoc_redirects
                     .iter()
                     .rev()
@@ -763,30 +787,51 @@ impl Executor {
                         !redirect.here_string
                             && (redirect.fd.is_none() || redirect.fd == Some(0))
                     })
-                    .and_then(|redirect| redirect.body.as_deref())
                 {
-                    return Some(
-                        self.expand_heredoc_body_readback(body).text_lossy(),
-                    );
+                    if redirect.body_carrier.is_some() {
+                        return Some(
+                            self.expand_heredoc_body_readback_from_carrier(
+                                &redirect.body_carrier,
+                                redirect.body.as_deref(),
+                            )
+                            .text_lossy(),
+                        );
+                    }
+                    if let Some(body) = redirect.body.as_deref() {
+                        return Some(
+                            self.expand_heredoc_body_readback(body).text_lossy(),
+                        );
+                    }
                 }
             }
             Some(crate::parser::RedirectKind::HereString) => {
-                if let Some(body) = cmd
+                if let Some(redirect) = cmd
                     .heredoc_redirects
                     .iter()
                     .rev()
                     .find(|redirect| redirect.here_string && redirect.fd == Some(0))
-                    .and_then(|redirect| redirect.body.as_deref())
                 {
-                    if let Some(word) = body.strip_prefix('\u{1d}') {
-                        let mut input = decode_ansi_c_quoted_word(word)
-                            .unwrap_or_else(|| self.expand_word(word));
+                    if redirect.body_carrier.is_some() {
+                        let mut input = self
+                            .expand_heredoc_body_readback_from_carrier(
+                                &redirect.body_carrier,
+                                redirect.body.as_deref(),
+                            )
+                            .text_lossy();
                         input.push('\n');
                         return Some(input);
                     }
-                    return Some(
-                        self.expand_heredoc_body_readback(body).text_lossy(),
-                    );
+                    if let Some(body) = redirect.body.as_deref() {
+                        if let Some(word) = body.strip_prefix('\u{1d}') {
+                            let mut input = decode_ansi_c_quoted_word(word)
+                                .unwrap_or_else(|| self.expand_word(word));
+                            input.push('\n');
+                            return Some(input);
+                        }
+                        return Some(
+                            self.expand_heredoc_body_readback(body).text_lossy(),
+                        );
+                    }
                 }
                 // Unnumbered `<<<` keeps its word in cmd.here_string; it is
                 // handled at the bottom of this function.

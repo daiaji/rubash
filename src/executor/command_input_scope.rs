@@ -227,12 +227,18 @@ impl Executor {
             return Some(input);
         }
 
+        if cmd.here_string_carrier.is_some() {
+            return Some(self.expand_here_string_mut_from_carrier(&cmd.here_string_carrier));
+        }
         if let Some(here_string) = cmd.here_string.clone() {
             // Here-string content already had quote removal applied by the
             // parser; expand only substitutions with quotes-as-data semantics.
             return Some(self.expand_here_string_mut(&here_string));
         }
 
+        if cmd.heredoc_body.is_some() {
+            return Some(self.expand_heredoc_body_mut_from_carrier(&cmd.heredoc_body));
+        }
         if let Some(heredoc) = cmd.heredoc.clone() {
             return Some(self.expand_heredoc_body_mut(&heredoc));
         }
@@ -241,8 +247,21 @@ impl Executor {
             .iter()
             .rev()
             .find(|redirect| redirect.fd.is_none())
-            .and_then(|redirect| redirect.body.as_deref())
-            .map(|body| self.expand_heredoc_body_mut(body))
+            .map(|redirect| {
+                if redirect.body_carrier.is_some() {
+                    if redirect.here_string {
+                        self.expand_here_string_mut_from_carrier(&redirect.body_carrier)
+                    } else {
+                        self.expand_heredoc_body_mut_from_carrier(&redirect.body_carrier)
+                    }
+                } else {
+                    redirect
+                        .body
+                        .as_deref()
+                        .map(|body| self.expand_heredoc_body_mut(body))
+                        .unwrap_or_default()
+                }
+            })
     }
 
     /// Expands an unquoted heredoc body like Bash: parameter, command and
@@ -303,6 +322,32 @@ impl Executor {
             0,
             SubstitutionQuoteContext::HereDocument,
         )
+    }
+
+    /// Readback variant of `expand_heredoc_body_mut_from_carrier`: a
+    /// `Preexpanded` carrier is already expanded text (preexpand_command_stdin
+    /// ran at the GNU do_redirections point), so it returns verbatim —
+    /// expanding again would re-run embedded substitutions and collapse
+    /// backslash sequences a second time (e.g. `c\\`<newline>`d` -> `cd`).
+    pub(in crate::executor) fn expand_heredoc_body_readback_from_carrier(
+        &self,
+        carrier: &Option<crate::parser::StdinBody>,
+        fallback_body: Option<&str>,
+    ) -> SubstitutionOutput {
+        match carrier {
+            Some(crate::parser::StdinBody::Preexpanded(text)) => {
+                return SubstitutionOutput::readback(
+                    decode_stdin_body_enq(text).into_bytes(),
+                    0,
+                    SubstitutionQuoteContext::HereDocument,
+                );
+            }
+            Some(crate::parser::StdinBody::NeedsExpansion(body)) => {
+                return self.expand_heredoc_body_readback(body);
+            }
+            None => {}
+        }
+        self.expand_heredoc_body_readback(fallback_body.unwrap_or_default())
     }
 
     pub(in crate::executor) fn expand_heredoc_body(&self, body: &str) -> String {

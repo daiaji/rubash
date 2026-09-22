@@ -95,7 +95,9 @@ impl Executor {
             redirects.redirect_err = cmd.redirect_err.clone();
             redirects.redirect_err_append = cmd.redirect_err_append.clone();
             redirects.heredoc = cmd.heredoc.clone();
+            redirects.heredoc_body = cmd.heredoc_body.clone();
             redirects.here_string = cmd.here_string.clone();
+            redirects.here_string_carrier = cmd.here_string_carrier.clone();
             self.shell_state.function_definition_redirects
                 .insert(function.name.clone(), redirects);
         } else {

@@ -671,7 +671,11 @@ impl Executor {
                     continue;
                 }
                 let carrier = if Self::stdin_body_needs_expansion(&body) {
-                    let expanded = self.expand_heredoc_body_mut(&body);
+                    let expanded = if redirect.here_string {
+                        self.expand_here_string_mut(&body)
+                    } else {
+                        self.expand_heredoc_body_mut(&body)
+                    };
                     crate::parser::StdinBody::Preexpanded(expanded)
                 } else {
                     crate::parser::StdinBody::NeedsExpansion(body)

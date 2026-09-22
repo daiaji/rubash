@@ -1245,7 +1245,17 @@ impl Executor {
             // A loop's numbered heredoc is still an ordinary unquoted
             // heredoc. Keep its expansion rules identical to the command's
             // stdin heredoc, including parameter and command substitutions.
-            let body = self.expand_heredoc_body_mut(&body);
+            // The typed carrier wins: a Preexpanded body was already expanded
+            // at the do_redirections point and must not expand again.
+            let body = if redirect.body_carrier.is_some() {
+                if redirect.here_string {
+                    self.expand_here_string_mut_from_carrier(&redirect.body_carrier)
+                } else {
+                    self.expand_heredoc_body_mut_from_carrier(&redirect.body_carrier)
+                }
+            } else {
+                self.expand_heredoc_body_mut(&body)
+            };
             saved_fd_inputs.push((fd, self.fd_table.entries.get(&fd).cloned()));
             self.fd_table
                 .open_input(fd, FdReadEndpoint::text(&body), true);
@@ -2003,9 +2013,11 @@ fn flatten_if_command_for_alias_scan(
     fi.redirect_err = cmd.redirect_err.clone();
     fi.redirect_err_append = cmd.redirect_err_append.clone();
     fi.heredoc = cmd.heredoc.clone();
+    fi.heredoc_body = cmd.heredoc_body.clone();
     fi.heredoc_delimiter = cmd.heredoc_delimiter.clone();
     fi.heredoc_redirects = cmd.heredoc_redirects.clone();
     fi.here_string = cmd.here_string.clone();
+    fi.here_string_carrier = cmd.here_string_carrier.clone();
     commands.push(fi);
     commands
 }

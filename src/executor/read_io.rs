@@ -41,6 +41,14 @@ impl Executor {
         // An unnumbered heredoc is the last stdin redirect, so it overrides
         // an earlier `<&fd`. An explicit `read -u N` still owns the input fd.
         if read_fd.is_none() {
+            if cmd.heredoc_body.is_some() {
+                return Some(trim_read_input(
+                    self.expand_heredoc_body_mut_from_carrier(&cmd.heredoc_body),
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                ));
+            }
             if let Some(heredoc) = &cmd.heredoc {
                 return Some(trim_read_input(
                     self.expand_heredoc_body_mut(heredoc),
