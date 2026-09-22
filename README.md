@@ -12,34 +12,37 @@ A GNU Bash-compatible shell implementation written in Rust.
 
 Rubash is a from-scratch reimplementation of GNU Bash in Rust — lexer, parser, expansion engine, executor, builtins, and all. It targets byte-level compatibility with GNU Bash 5.3.0 and runs on Windows natively.
 
-**Why native matters**: shells billed as "bash on Windows" (Git Bash, MSYS2) ship a ported bash that rides on a POSIX emulation layer (`msys-2.0.dll`), with fork emulation and path translation that leak quirks into every script. Rubash has no such layer — one self-contained binary speaking Win32 directly. To our knowledge it is also the most thoroughly verified native Windows bash: compatibility is measured, not claimed, against GNU Bash's own 83-suite test corpus (55 suites byte-identical today, ledger below).
+**Why native matters**: shells billed as "bash on Windows" (Git Bash, MSYS2) ship a ported bash that rides on a POSIX emulation layer (`msys-2.0.dll`), with fork emulation and path translation that leak quirks into every script. Rubash has no such layer — one self-contained binary speaking Win32 directly. To our knowledge it is also the most thoroughly verified native Windows bash: compatibility is measured, not claimed, against GNU Bash's own 83-suite test corpus (57 suites byte-identical today, ledger below).
 
 **Paths are first-class, not converted**: the MSYS model *guesses* which arguments look like paths and rewrites them — which is why every AI agent and script has to set `MSYS_NO_PATHCONV=1` to stop `/flags` from becoming `C:/Program Files/Git/flags`. Rubash inverts the model: Windows paths are the native currency. POSIX-style and WSL-style paths are accepted as input and resolved to real Windows paths, so what a native Windows program receives is always a valid Win32 path — no conversion heuristics, no `MSYS_NO_PATHCONV`, no surprises at the process boundary.
 
-**Current status**: 55 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 799 raw lines (down from 3427 on Sep 9); of those, 204 lines (`jobs` 31 + `history` 173) are harness-timeout artifacts where *both* sides are truncated by the per-suite 40s limit, leaving ≈595 lines of real semantic diff. (The previously reported `intl`=1209 was missing-locale environment noise; the harness now generates `en_US.UTF-8`, and `intl` measures 8 lines.) The earlier "57/733" figure was measured on an incomplete test-seed — missing `.sub` helpers produced false-zero diffs; the corrected count is the honest one. Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
+**Current status**: 57 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 464 raw lines (down from 3427 on Sep 9), all of it real semantic diff — the harness now runs suite timeouts in the foreground process group, so the earlier `jobs`/`history` GNU-side 40s-timeout truncation artifacts are gone. Two caveats inside that number: `jobs` (78) includes a rubash-side 120s timeout kill caused by a real job-control hang at `wait-for-job`, and `redir` (70) includes ~34 lines from an `exec 6<>` append-vs-overwrite divergence amplified by a persistent per-suite TMPDIR. (The previously reported `intl`=1209 was missing-locale environment noise; the harness now generates `en_US.UTF-8`, and `intl` measures 8 lines.) Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
 
 ## Compatibility at a Glance
 
 ```
 GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
-(ledger: 2026-09-22 corrected recount — full test-seed, intact helper
-binaries; supersedes the 57-suite figure measured on an incomplete seed)
+(ledger: 2026-09-22 re-run on master c1d151d2 — foreground timeout
+harness; supersedes the same-day 799-line recount that still carried
+GNU-side truncation artifacts)
 
-  PASS (0 diff):   55 suites  ████████████████████░░░░░░░░░░  66%
+  PASS (0 diff):   57 suites  █████████████████████░░░░░░░░░  69%
   DIFF (1-50):     23 suites  ████████░░░░░░░░░░░░░░░░░░░░░░  28%
-  DIFF (51-250):    5 suites  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░   6%
+  DIFF (51-250):    3 suites  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   4%
   DIFF (251+):      0 suites  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%
   ────────────────────────────────────────────────────────────────
-  Total diff:      799 raw lines; 204 of them (`jobs`,`history`) are
-                   GNU-side 40s-timeout truncations, so ~595 lines are
-                   real semantic diff (stdout-only ledger; details in
+  Total diff:      464 raw lines — no GNU-side timeout truncation
+                   remains; `jobs` 78 includes a rubash-side 120s
+                   timeout kill (real job-control hang), `redir` 70
+                   includes ~34 accumulated-TMPDIR `exec 6<>` lines
+                   (stdout-only ledger; details in
                    COMPATIBILITY-STATUS.md)
-  Was 3427 on Sep 9 → −77% raw / −83% semantic in 13 days
+  Was 3427 on Sep 9 → −86% raw in 13 days
 ```
 
 ### Fully passing suites (zero diff)
 
-`appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `trap` `varenv`
+`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `trap` `varenv`
 
 
 ### Major recent fixes (Sep 2026)
@@ -52,7 +55,7 @@ binaries; supersedes the 57-suite figure measured on an incomplete seed)
 | **trap** | 3 → ~5 (racy) | ERR line binding, SIGCHLD queue, background child trap isolation; residual diff is SIGCHLD/`wait` timing, nondeterministic |
 | **func** | 58 → 0 | POSIX funcname rules, AST printer, special-builtin precedence |
 | **complete** | 115 → 0 | Multi-operand compspec registration |
-| **history** | 190 → 127 | `history -d start-end` range deletion (GNU 5.3 feature) |
+| **history** | 190 → 40 | `history -d start-end` range deletion (GNU 5.3 feature), GNU argument grammar (`too many arguments`/`numeric argument required` rc=2), foreground-timeout harness removed the 173-line truncation artifact |
 | **globstar** | 182 → 4 | Multiplicity fix, command lookup cache, `checkhash` bypass (residual is WinuxCmd `ls` ordering, not rubash) |
 | **array/assoc** | 444+358 → 148+187 | Compound assignment quote grouping, `"$@"`/`$0` expansion, arithmetic subscript side effects (`count++`) |
 | **compound-array quoting** | intl 1194→1192 fails | Escaped `\"`/`\'`/`\\`/`` \` `` preserved through compound RHS; `quote_array_value` double-escape fix; data/syntax quote distinction in unquoted assignment RHS (`EChar=${Array[0x0022]}`) |
@@ -163,4 +166,4 @@ Issues, compatibility reproductions, focused regression tests, and implementatio
 
 ---
 
-*Last updated: 2026-09-11*
+*Last updated: 2026-09-22*

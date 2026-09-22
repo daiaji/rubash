@@ -15,7 +15,18 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-22，修正重计数——完整测试种子 + 完好辅助二进制）：55 零差 / 28 有 DIFF / 总 799 原始行**
+> **最新台账（2026-09-22 晚，master `c1d151d2`，前台进程组超时 harness）：57 零差 / 26 有 DIFF / 总 464 原始行**
+> （台账快照 `target/issue-suites/results/true-baseline-ledger-c1d151d2.log`。
+> `timeout --foreground` 消除了旧台账的 GNU 侧 40s 截断伪影：history 173→40（真实差）、
+> intl 12→8、alias 69→0、histexp 74→1、read 25→16、comsub 17→13、trap 1→0；
+> 新增零差 `alias`、`posixexp`。口径说明：`jobs` 78 含 rubash 侧 120s 超时被杀
+> （`wait-for-job` 后真挂起，rb.rc=138、输出截在 47/99 行——是真实作业控制缺陷，
+> 非测量伪影）；`redir` 70 中约 34 行来自 `exec 6<>` 追加 vs 覆盖语义分歧被持久
+> TMPDIR 残渣放大（bash-c 累积 34 次 `to c`），另含 `exec <&5-` 重打、ERR trap rc、
+> `|&` 重打、c3/c4 计数器等真实差。51-250 桶 3 套件：jobs 78 / redir 70 / glob 67；
+> 251+ 桶 0。）
+>
+> **上一台账（2026-09-22，修正重计数——完整测试种子 + 完好辅助二进制）：55 零差 / 28 有 DIFF / 总 799 原始行**
 > （其中 `jobs` 31 + `history` 173 = 204 行为 harness 40s 超时双侧截断的测量伪影——
 > GNU 侧 jobs rc=124、history rc=137 均被 timeout 杀死，非 rubash 语义差；
 > 真实语义差 ≈595 行 / 26 套件。本台账取代 2026-09-21 的 "57 零差 / 733 行"：
