@@ -1,4 +1,3 @@
-#[cfg(not(windows))]
 use std::fs;
 use std::{env, process::Command};
 
@@ -2024,5 +2023,50 @@ fn alias_injected_operator_body_routes_to_real_parser() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n[x\\\"y]\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn cp_dot_slash_source_copies_contents_into_existing_directory() {
+    // GNU coreutils cp.c copy_internal: a source operand ending in `/.`
+    // names the directory's CONTENTS (dotfiles included), not the
+    // directory itself. With an existing directory destination the
+    // children land inside it; there is no `dst/src` subdirectory. The
+    // `/.` diagnostics keep exit status 0 under the local GNU oracle.
+    let dir = env::temp_dir().join(format!("rubash-cp-dotslash-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create cp dot-slash probe dir");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(concat!(
+            "mkdir -p src/sub dst && ",
+            "echo A > src/a.txt && echo B > src/sub/b.txt && echo H > src/.hidden && ",
+            "cp -r src/. dst && ",
+            "{ [ -f dst/a.txt ] && [ -f dst/sub/b.txt ] && [ -f dst/.hidden ] && [ ! -e dst/src ]; } && echo C1OK; ",
+            "cp -r src/. dst2 && ",
+            "{ [ -f dst2/a.txt ] && [ -f dst2/.hidden ] && [ ! -e dst2/src ]; } && echo C2OK; ",
+            "cp src/. dst3 2>e3.txt; echo \"rc3=$?\"; cat e3.txt; ",
+            "echo F > f.txt; cp -r src/. f.txt 2>e5.txt; echo \"rc5=$?\"; cat e5.txt; ",
+            "cp -r f.txt/. dst 2>e6.txt; cat e6.txt"
+        ))
+        .current_dir(&dir)
+        .output()
+        .expect("run cp dot-slash probe");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        concat!(
+            "C1OK\nC2OK\n",
+            "rc3=0\n",
+            "bash: line 1: cp: -r not specified; omitting directory 'src/.'\n",
+            "rc5=0\n",
+            "bash: line 1: cp: cannot overwrite non-directory 'f.txt' with directory 'src/.'\n",
+            "bash: line 1: cp: cannot stat 'f.txt/.': Not a directory\n"
+        )
+    );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }

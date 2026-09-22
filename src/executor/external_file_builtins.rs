@@ -326,92 +326,176 @@ impl Executor {
                 continue;
             }
             let source = shell_path_to_windows(source_word, &self.shell_state.env_vars);
-            let (target, target_display) = if destination.is_dir() {
-                let Some(name) = source.file_name() else {
+
+            // GNU coreutils cp.c copy_internal: an operand whose final
+            // component is `.` (`src/.`, `./`, `.`) names the directory's
+            // CONTENTS — dotfiles included — not the directory itself.
+            // With an existing directory destination the children land
+            // directly inside it instead of under a `dst/src` subdir.
+            let source_names_contents = {
+                let trimmed = source_word.replace('\\', "/");
+                let trimmed = trimmed.trim_end_matches('/');
+                trimmed == "." || trimmed.ends_with("/.")
+            };
+            let mut copy_units: Vec<(PathBuf, String)> = Vec::new();
+            if source_names_contents {
+                if !source.is_dir() {
+                    // stat(src/.) fails with ENOTDIR when src exists but is
+                    // not a directory, ENOENT when src itself is missing.
+                    let detail = if source.exists() {
+                        "Not a directory"
+                    } else {
+                        "No such file or directory"
+                    };
                     let _ = writeln!(
                         stderr,
-                        "{}cp: missing destination file operand after '{}'",
+                        "{}cp: cannot stat '{}': {}",
+                        prefix, source_word, detail
+                    );
+                    continue;
+                }
+                if !recursive {
+                    let _ = writeln!(
+                        stderr,
+                        "{}cp: -r not specified; omitting directory '{}'",
+                        prefix, source_word
+                    );
+                    continue;
+                }
+                if destination.exists() && !destination.is_dir() {
+                    let _ = writeln!(
+                        stderr,
+                        "{}cp: cannot overwrite non-directory '{}' with directory '{}'",
+                        prefix, destination_word, source_word
+                    );
+                    continue;
+                }
+                if destination.is_dir() {
+                    let mut entries: Vec<_> = match fs::read_dir(&source) {
+                        Ok(read_dir) => read_dir.filter_map(Result::ok).collect(),
+                        Err(error) => {
+                            let _ = writeln!(
+                                stderr,
+                                "{}cp: cannot access '{}': {}",
+                                prefix,
+                                source_word,
+                                crate::posix_errors::message(&error)
+                            );
+                            status = 1;
+                            continue;
+                        }
+                    };
+                    entries.sort_by_key(|entry| entry.file_name());
+                    for entry in entries {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        copy_units.push((
+                            entry.path(),
+                            format!("{}/{}", source_word.trim_end_matches('/'), name),
+                        ));
+                    }
+                } else {
+                    copy_units.push((source.clone(), source_word.clone()));
+                }
+            } else {
+                copy_units.push((source.clone(), source_word.clone()));
+            }
+
+            for (source, source_word) in copy_units {
+                let (target, target_display) = if destination.is_dir() {
+                    let Some(name) = source.file_name() else {
+                        let _ = writeln!(
+                            stderr,
+                            "{}cp: missing destination file operand after '{}'",
+                            prefix, source_word
+                        );
+                        status = 1;
+                        continue;
+                    };
+                    let leaf = name.to_string_lossy().to_string();
+                    // `cp -rv src/. dst` names children 'dst/./name' — the
+                    // `/.` join is part of GNU's verbose target spelling.
+                    let separator = if source_names_contents { "/./" } else { "/" };
+                    (
+                        destination.join(name),
+                        format!(
+                            "{}{}{}",
+                            destination_word.trim_end_matches('/'),
+                            separator,
+                            leaf
+                        ),
+                    )
+                } else {
+                    (destination.clone(), destination_word.clone())
+                };
+
+                if !source.exists() {
+                    let _ = writeln!(
+                        stderr,
+                        "{}cp: cannot stat '{}': No such file or directory",
                         prefix, source_word
                     );
                     status = 1;
                     continue;
-                };
-                let leaf = name.to_string_lossy().to_string();
-                (
-                    destination.join(name),
-                    format!("{}/{}", destination_word.trim_end_matches('/'), leaf),
-                )
-            } else {
-                (destination.clone(), destination_word.clone())
-            };
-
-            if !source.exists() {
-                let _ = writeln!(
-                    stderr,
-                    "{}cp: cannot stat '{}': No such file or directory",
-                    prefix, source_word
-                );
-                status = 1;
-                continue;
-            }
-            if source.is_dir() && !recursive {
-                let _ = writeln!(
-                    stderr,
-                    "{}cp: -r not specified; omitting directory '{}'",
-                    prefix, source_word
-                );
-                status = 1;
-                continue;
-            }
-            if target.exists() {
-                if no_clobber {
-                    continue;
                 }
-                if interactive {
-                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-                    stdout.clear();
-                    stderr.clear();
-                    if !cp_confirm_overwrite(&target_display) {
-                        status = 1;
-                        continue;
-                    }
-                }
-            }
-            if remove_dest {
-                let _ = fs::remove_file(&target);
-            }
-            if update_only && target.exists() && cp_source_not_newer(&source, &target) {
-                continue;
-            }
-
-            let result = if source.is_dir() {
-                cp_copy_tree(&source, &target, 0)
-            } else {
-                fs::copy(&source, &target).map(|_| ())
-            };
-            match result {
-                Ok(_) => {
-                    if !source.is_dir() {
-                        cp_set_modified_now(&target);
-                    }
-                    if verbose {
-                        let _ = writeln!(
-                            stdout,
-                            "{} -> {}",
-                            cp_quoted_name(source_word),
-                            cp_quoted_name(&target_display)
-                        );
-                    }
-                }
-                Err(error) => {
+                if source.is_dir() && !recursive {
                     let _ = writeln!(
                         stderr,
-                        "{}cp: cannot create '{}': {}",
-                        prefix,
-                        target.display(),
-                        crate::posix_errors::message(&error)
+                        "{}cp: -r not specified; omitting directory '{}'",
+                        prefix, source_word
                     );
                     status = 1;
+                    continue;
+                }
+                if target.exists() {
+                    if no_clobber {
+                        continue;
+                    }
+                    if interactive {
+                        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                        stdout.clear();
+                        stderr.clear();
+                        if !cp_confirm_overwrite(&target_display) {
+                            status = 1;
+                            continue;
+                        }
+                    }
+                }
+                if remove_dest {
+                    let _ = fs::remove_file(&target);
+                }
+                if update_only && target.exists() && cp_source_not_newer(&source, &target) {
+                    continue;
+                }
+
+                let result = if source.is_dir() {
+                    cp_copy_tree(&source, &target, 0)
+                } else {
+                    fs::copy(&source, &target).map(|_| ())
+                };
+                match result {
+                    Ok(_) => {
+                        if !source.is_dir() {
+                            cp_set_modified_now(&target);
+                        }
+                        if verbose {
+                            let _ = writeln!(
+                                stdout,
+                                "{} -> {}",
+                                cp_quoted_name(&source_word),
+                                cp_quoted_name(&target_display)
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        let _ = writeln!(
+                            stderr,
+                            "{}cp: cannot create '{}': {}",
+                            prefix,
+                            target.display(),
+                            crate::posix_errors::message(&error)
+                        );
+                        status = 1;
+                    }
                 }
             }
         }
