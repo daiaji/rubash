@@ -106,6 +106,7 @@ impl Executor {
         let value = root.as_ref().to_string_lossy().into_owned();
         self.shell_state.env_vars
             .insert("__RUBASH_SHELL_ROOT".to_string(), value.clone());
+        // deprecated: niu bridge, remove after niu stops reading
         self.shell_state.env_vars.insert("WINUXSH_ROOT".to_string(), value);
         self.mark_exported("WINUXSH_ROOT");
     }

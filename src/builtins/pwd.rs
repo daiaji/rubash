@@ -199,7 +199,7 @@ mod tests {
         let mut env_vars = HashMap::new();
         env_vars.insert("PWD".to_string(), "/etc".to_string());
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().to_string(),
         );
 
