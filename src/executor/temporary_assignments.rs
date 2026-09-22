@@ -30,8 +30,8 @@ impl Executor {
             // with `declare -i i`) reports evalerror and propagates exit
             // status 1. apply_shell_assignment resets exit_code to 0 on
             // success, so promote the arithmetic_expansion_error flag here.
-            if self.arithmetic_expansion_error.get() {
-                self.arithmetic_expansion_error.set(false);
+            if self.shell_state.arithmetic_expansion_error.get() {
+                self.shell_state.arithmetic_expansion_error.set(false);
                 self.exit_code = 1;
             }
         }

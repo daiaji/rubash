@@ -306,7 +306,7 @@ impl Executor {
                         self.report_arithmetic_error(expression);
                     }
                 }
-                if self.arithmetic_nounset_error.get() {
+                if self.shell_state.arithmetic_nounset_error.get() {
                     127
                 } else {
                     1

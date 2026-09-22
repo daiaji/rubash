@@ -492,24 +492,6 @@ pub struct Executor {
     source_debug_suppressed: bool,
     debug_trap_command: std::cell::RefCell<Option<String>>,
     debug_trap_function_line: Option<usize>,
-    /// NOTE: Arithmetic error fields moved to ShellState for proper subshell isolation.
-    /// These fields are DEPRECATED and kept only for Executor initialization compatibility.
-    /// All access should go through the compatibility accessors that forward to shell_state.
-    arithmetic_expansion_error: Cell<bool>,
-    arithmetic_nonfatal_error: Cell<bool>,
-    /// A `[sub]=` element inside a `declare -aA name=(...)` operand failed
-    /// err_badarraysub — GNU assign_compound_array_list stores the elements
-    /// processed before the break and still fails the command (any_failed).
-    arithmetic_fatal_error: Cell<bool>,
-    /// `set -u` unbound-variable error raised during arithmetic evaluation.
-    /// A Cell because word-expansion paths hold `&self` (GNU expr.c raises
-    /// FORCE_EOF; the shell exits 127 in -c mode).
-    arithmetic_nounset_error: Cell<bool>,
-    /// Error category reported by the most recent arithmetic evaluation that
-    /// used the real shell environment (GNU expr.c reports fatality from the
-    /// actual evaluation, not from a re-evaluation in a fresh environment).
-    arithmetic_last_error_category:
-        Cell<Option<crate::executor::arithmetic::ArithmeticErrorCategory>>,
     /// Expanded form of the offset/length expression from the last failed
     /// substring arithmetic evaluation. `report_substring_arithmetic_error`
     /// uses this so the error token reflects the post-expansion text (GNU
@@ -549,10 +531,8 @@ pub struct Executor {
     /// `${}` inside a pattern/alternate word reaches it only when that word
     /// is actually evaluated), so the expander latches it here and the
     /// command boundary raises DISCARD — or FORCE_EOF for a noninteractive
-    /// POSIX shell (subst.c:10288).
-    /// NOTE: This field is DEPRECATED - moved to ShellState::parameter_bad_substitution
-    /// for proper subshell isolation. Kept temporarily for compatibility during migration.
-    parameter_bad_substitution: Cell<bool>,
+    /// POSIX shell (subst.c:10288). Stored in ShellState so the command-
+    /// substitution boundary isolates it via the typed clone.
     /// GNU variables.c:3536 assign_in_env: names bound through `name=value
     /// cmd` temporary-environment assignments are live at the command's
     /// variable context while it runs — a function-local `declare -n r`
@@ -670,83 +650,6 @@ pub struct Executor {
     external_file_builtins_enabled: bool,
     process_env_snapshot: HashMap<String, String>,
     history_provider: Option<crate::history::SharedHistoryProvider>,
-}
-
-impl Executor {
-    /// Compatibility accessor - forwards to ShellState::arithmetic_expansion_error
-    pub(in crate::executor) fn arithmetic_expansion_error(&self) -> bool {
-        self.shell_state.arithmetic_expansion_error.get()
-    }
-
-    /// Compatibility accessor - forwards to ShellState::arithmetic_expansion_error
-    pub(in crate::executor) fn set_arithmetic_expansion_error(&self, value: bool) {
-        self.shell_state.arithmetic_expansion_error.set(value);
-    }
-
-    /// Compatibility accessor - forwards to ShellState::arithmetic_nonfatal_error
-    pub(in crate::executor) fn arithmetic_nonfatal_error(&self) -> bool {
-        self.shell_state.arithmetic_nonfatal_error.get()
-    }
-
-    /// Compatibility accessor - forwards to ShellState::arithmetic_nonfatal_error
-    pub(in crate::executor) fn set_arithmetic_nonfatal_error(&self, value: bool) {
-        self.shell_state.arithmetic_nonfatal_error.set(value);
-    }
-
-    /// Compatibility accessor - forwards to ShellState::arithmetic_fatal_error
-    pub(in crate::executor) fn arithmetic_fatal_error(&self) -> bool {
-        self.shell_state.arithmetic_fatal_error.get()
-    }
-
-    /// Compatibility accessor - forwards to ShellState::arithmetic_fatal_error
-    pub(in crate::executor) fn set_arithmetic_fatal_error(&self, value: bool) {
-        self.shell_state.arithmetic_fatal_error.set(value);
-    }
-
-    /// Compatibility accessor - forwards to ShellState::arithmetic_nounset_error
-    pub(in crate::executor) fn arithmetic_nounset_error(&self) -> bool {
-        self.shell_state.arithmetic_nounset_error.get()
-    }
-
-    /// Compatibility accessor - forwards to ShellState::arithmetic_nounset_error
-    pub(in crate::executor) fn set_arithmetic_nounset_error(&self, value: bool) {
-        self.shell_state.arithmetic_nounset_error.set(value);
-    }
-
-    /// Compatibility accessor - forwards to ShellState::arithmetic_last_error_category
-    pub(in crate::executor) fn arithmetic_last_error_category(&self) -> Option<crate::executor::arithmetic::ArithmeticErrorCategory> {
-        self.shell_state.arithmetic_last_error_category.get()
-    }
-
-    /// Compatibility accessor - forwards to ShellState::arithmetic_last_error_category
-    pub(in crate::executor) fn set_arithmetic_last_error_category(&self, value: Option<crate::executor::arithmetic::ArithmeticErrorCategory>) {
-        self.shell_state.arithmetic_last_error_category.set(value);
-    }
-
-    /// Compatibility accessor - forwards to ShellState::parameter_bad_substitution
-    pub(in crate::executor) fn parameter_bad_substitution(&self) -> bool {
-        self.shell_state.parameter_bad_substitution.get()
-    }
-
-    /// Compatibility accessor - forwards to ShellState::parameter_bad_substitution
-    pub(in crate::executor) fn set_parameter_bad_substitution(&self, value: bool) {
-        self.shell_state.parameter_bad_substitution.set(value);
-    }
-
-    /// Compatibility accessor - forwards to ShellState::parameter_bad_substitution
-    pub(in crate::executor) fn replace_parameter_bad_substitution(&self, value: bool) -> bool {
-        self.shell_state.parameter_bad_substitution.replace(value)
-    }
-
-    /// Initialize Executor with arithmetic error fields synchronized from ShellState
-    fn sync_arithmetic_fields_from_shell_state(&mut self) {
-        self.arithmetic_expansion_error.set(self.shell_state.arithmetic_expansion_error.get());
-        self.arithmetic_nonfatal_error.set(self.shell_state.arithmetic_nonfatal_error.get());
-        self.arithmetic_fatal_error.set(self.shell_state.arithmetic_fatal_error.get());
-        self.arithmetic_nounset_error.set(self.shell_state.arithmetic_nounset_error.get());
-        self.arithmetic_last_error_category.set(self.shell_state.arithmetic_last_error_category.get());
-        self.parameter_bad_substitution.set(self.shell_state.parameter_bad_substitution.get());
-    }
 }
 
 #[cfg(test)]

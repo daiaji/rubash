@@ -120,7 +120,7 @@ impl Executor {
         // evaluated (`${x-${'x1'%'t'}}` with x set is silent in GNU).
         if braced_name_ends_on_quote(name) {
             eprintln!("{}{}: bad substitution", self.diagnostic_prefix(), bad_substitution_display(word));
-            self.parameter_bad_substitution.set(true);
+            self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
 
@@ -287,13 +287,13 @@ impl Executor {
             let expression = self.expand_arithmetic_special_parameters(expression);
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
                 if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars) {
-                    if !self.arithmetic_expansion_error.replace(true) {
+                    if !self.shell_state.arithmetic_expansion_error.replace(true) {
                         eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
                     }
                     // GNU expr.c expr_streval: an unbound variable under `set
                     // -u` raises FORCE_EOF and exits the shell (127 in -c
                     // mode), regardless of the other words in the command.
-                    self.arithmetic_nounset_error.set(true);
+                    self.shell_state.arithmetic_nounset_error.set(true);
                     return Some(String::new());
                 }
             }
@@ -302,7 +302,7 @@ impl Executor {
             if let Some(value) = value {
                 return Some(value.to_string());
             }
-            self.arithmetic_last_error_category.set(actual_category);
+            self.shell_state.arithmetic_last_error_category.set(actual_category);
             // Bash reports arithmetic expansion errors (floating point,
             // negative exponent, division by zero, ...) on stderr instead of
             // silently producing nothing, and abandons the enclosing command
@@ -318,15 +318,15 @@ impl Executor {
                     "{expression}: syntax error in expression (error token is \"{expression}\")"
                 )
             });
-            let actual_fatal = self.arithmetic_last_error_category.take().is_some();
+            let actual_fatal = self.shell_state.arithmetic_last_error_category.take().is_some();
             if !actual_fatal
                 && !crate::executor::arithmetic::arithmetic_expansion_is_fatal(&expression)
             {
-                self.arithmetic_nonfatal_error.set(true);
+                self.shell_state.arithmetic_nonfatal_error.set(true);
             } else {
-                self.arithmetic_fatal_error.set(true);
+                self.shell_state.arithmetic_fatal_error.set(true);
             }
-            if !self.arithmetic_expansion_error.replace(true) {
+            if !self.shell_state.arithmetic_expansion_error.replace(true) {
                 eprintln!("{}{}", self.diagnostic_prefix(), message);
             }
         }

@@ -126,11 +126,11 @@ impl Executor {
         &self,
     ) -> (bool, bool, bool, bool, Option<ArithmeticErrorCategory>) {
         (
-            self.arithmetic_expansion_error.get(),
-            self.arithmetic_nonfatal_error.get(),
-            self.arithmetic_fatal_error.get(),
-            self.arithmetic_nounset_error.get(),
-            self.arithmetic_last_error_category.get(),
+            self.shell_state.arithmetic_expansion_error.get(),
+            self.shell_state.arithmetic_nonfatal_error.get(),
+            self.shell_state.arithmetic_fatal_error.get(),
+            self.shell_state.arithmetic_nounset_error.get(),
+            self.shell_state.arithmetic_last_error_category.get(),
         )
     }
 
@@ -141,12 +141,12 @@ impl Executor {
         &self,
         saved: &(bool, bool, bool, bool, Option<ArithmeticErrorCategory>),
     ) -> bool {
-        let nounset_hit = self.arithmetic_nounset_error.get() && !saved.3;
-        self.arithmetic_expansion_error.set(saved.0);
-        self.arithmetic_nonfatal_error.set(saved.1);
-        self.arithmetic_fatal_error.set(saved.2);
-        self.arithmetic_nounset_error.set(saved.3);
-        self.arithmetic_last_error_category.set(saved.4);
+        let nounset_hit = self.shell_state.arithmetic_nounset_error.get() && !saved.3;
+        self.shell_state.arithmetic_expansion_error.set(saved.0);
+        self.shell_state.arithmetic_nonfatal_error.set(saved.1);
+        self.shell_state.arithmetic_fatal_error.set(saved.2);
+        self.shell_state.arithmetic_nounset_error.set(saved.3);
+        self.shell_state.arithmetic_last_error_category.set(saved.4);
         nounset_hit
     }
 
@@ -252,7 +252,7 @@ impl Executor {
         expand: bool,
         label: &'static str,
     ) -> Option<i128> {
-        self.arithmetic_last_error_category.set(None);
+        self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
         // Stale nested-subscript failure marker (lvalue.rs records the
@@ -280,8 +280,8 @@ impl Executor {
         *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars) {
-                self.arithmetic_nounset_error.set(true);
-                if !self.arithmetic_expansion_error.replace(true) {
+                self.shell_state.arithmetic_nounset_error.set(true);
+                if !self.shell_state.arithmetic_expansion_error.replace(true) {
                     eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
                     use std::io::Write;
                     let _ = std::io::stderr().flush();
@@ -329,7 +329,7 @@ impl Executor {
             true,
         );
         self.shell_state.env_vars.remove("__RUBASH_ARITH_EXP_EXPANDED");
-        self.arithmetic_last_error_category.set(category);
+        self.shell_state.arithmetic_last_error_category.set(category);
         self.report_arithmetic_readonly_error();
         // GNU prints bind/subscript diagnostics (`a[]: bad array
         // subscript`, `` `a[]': not a valid identifier ``) while the
@@ -411,7 +411,7 @@ impl Executor {
                 _ => None,
             };
         }
-        self.arithmetic_last_error_category.set(None);
+        self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
         self.shell_state.env_vars.remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
@@ -448,7 +448,7 @@ impl Executor {
             Some(&self.shell_state.random_state),
             true,
         );
-        self.arithmetic_last_error_category.set(category);
+        self.shell_state.arithmetic_last_error_category.set(category);
         self.report_arithmetic_readonly_error();
         self.flush_arith_diags(None);
         sync_arith_writes_to_shell_state(self);
@@ -517,7 +517,7 @@ impl Executor {
     /// before evaluation (`$(( "1" + 1 ))` is `2`), while the command
     /// context (`for (( ... ))` headers) keeps them and rejects them.
     pub(crate) fn eval_arithmetic_expansion_value(&mut self, expression: &str) -> Option<i128> {
-        self.arithmetic_last_error_category.set(None);
+        self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
         self.shell_state.env_vars.remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
@@ -532,8 +532,8 @@ impl Executor {
         *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars) {
-                self.arithmetic_nounset_error.set(true);
-                if !self.arithmetic_expansion_error.replace(true) {
+                self.shell_state.arithmetic_nounset_error.set(true);
+                if !self.shell_state.arithmetic_expansion_error.replace(true) {
                     eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
                     use std::io::Write;
                     let _ = std::io::stderr().flush();
@@ -555,7 +555,7 @@ impl Executor {
             Some(&self.shell_state.random_state),
             true,
         );
-        self.arithmetic_last_error_category.set(category);
+        self.shell_state.arithmetic_last_error_category.set(category);
         self.report_arithmetic_readonly_error();
         // Expansion context: this_command_name is NULL inside evalexp for
         // $(( )), so bind/subscript diagnostics carry no command label.
@@ -576,7 +576,7 @@ impl Executor {
         let Some(name) = self.shell_state.env_vars.remove("__RUBASH_ARITH_READONLY_ERROR") else {
             return;
         };
-        if !self.arithmetic_expansion_error.replace(true) {
+        if !self.shell_state.arithmetic_expansion_error.replace(true) {
             eprintln!("{}{}: readonly variable", self.diagnostic_prefix(), name);
             use std::io::Write;
             let _ = std::io::stderr().flush();
@@ -592,12 +592,12 @@ impl Executor {
     pub(crate) fn abandon_on_arithmetic_expansion_error(
         &mut self,
     ) -> Result<(), crate::executor::ExecuteError> {
-        if !self.arithmetic_fatal_error.get() && !self.arithmetic_nounset_error.get() {
+        if !self.shell_state.arithmetic_fatal_error.get() && !self.shell_state.arithmetic_nounset_error.get() {
             return Ok(());
         }
-        let nounset = self.arithmetic_nounset_error.replace(false);
-        self.arithmetic_fatal_error.set(false);
-        self.arithmetic_expansion_error.set(false);
+        let nounset = self.shell_state.arithmetic_nounset_error.replace(false);
+        self.shell_state.arithmetic_fatal_error.set(false);
+        self.shell_state.arithmetic_expansion_error.set(false);
         if nounset {
             // `set -u` unbound in a compound-expansion context (case words,
             // loop headers) terminates the noninteractive shell exactly like

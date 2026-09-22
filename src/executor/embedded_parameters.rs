@@ -401,7 +401,7 @@ impl Executor {
                                 output.push_str(&value);
                             }
                         } else {
-                            self.arithmetic_last_error_category.set(actual_category);
+                            self.shell_state.arithmetic_last_error_category.set(actual_category);
                             // Bash reports arithmetic expansion errors
                             // (floating point, negative exponent, division
                             // by zero, ...) on stderr and sets rc=1; Rubash
@@ -409,17 +409,17 @@ impl Executor {
                             // unconditionally: a readonly diagnostic may have
                             // consumed the print gate, but the evaluation
                             // error still decides list abandonment.
-                            let actual_fatal = self.arithmetic_last_error_category.take().is_some();
+                            let actual_fatal = self.shell_state.arithmetic_last_error_category.take().is_some();
                             if !actual_fatal
                                 && !crate::executor::arithmetic::arithmetic_expansion_is_fatal(
                                     &expression,
                                 )
                             {
-                                self.arithmetic_nonfatal_error.set(true);
+                                self.shell_state.arithmetic_nonfatal_error.set(true);
                             } else {
-                                self.arithmetic_fatal_error.set(true);
+                                self.shell_state.arithmetic_fatal_error.set(true);
                             }
-                            if !self.arithmetic_expansion_error.replace(true) {
+                            if !self.shell_state.arithmetic_expansion_error.replace(true) {
                                 let message = crate::executor::arithmetic::arithmetic_error_message(
                                     &expression,
                                     true,

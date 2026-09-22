@@ -234,7 +234,7 @@ impl Executor {
             // consuming the flag it leaks into the *next* command's check
             // and discards an innocent command (v=${x-${'u'%'v'}} ate the
             // following `echo`).
-            if self.parameter_bad_substitution.replace(false) {
+            if self.shell_state.parameter_bad_substitution.replace(false) {
                 if self.posix_mode_enabled()
                     && self
                         .shell_state.env_vars
@@ -265,7 +265,7 @@ impl Executor {
                 // prints "after"), matching the plain-parameter nounset path;
                 // other fatal categories abandon only the command list
                 // (probe a6: `x=$((1/0)); echo after` prints "after").
-                if self.arithmetic_nounset_error.replace(false) {
+                if self.shell_state.arithmetic_nounset_error.replace(false) {
                     self.exit_code = 127;
                     return Err(ExecuteError::ExitCode(127));
                 }
@@ -302,8 +302,8 @@ impl Executor {
             // status 1. apply_shell_assignment returns true (the assignment
             // was stored as empty) but sets arithmetic_expansion_error, so
             // promote it to status here.
-            if self.arithmetic_expansion_error.get() {
-                self.arithmetic_expansion_error.set(false);
+            if self.shell_state.arithmetic_expansion_error.get() {
+                self.shell_state.arithmetic_expansion_error.set(false);
                 status = 1;
             }
         }
@@ -577,7 +577,7 @@ impl Executor {
         // (echo produces no output at all, not even a newline). The
         // expand_command_word path sets arithmetic_nonfatal_error; check it
         // here and skip the command with ExpansionFailure(1).
-        if self.arithmetic_nonfatal_error.take() {
+        if self.shell_state.arithmetic_nonfatal_error.take() {
             return Err(ExecuteError::ExpansionFailure(1));
         }
         variable_expanded.words = expanded_words
@@ -764,16 +764,16 @@ impl Executor {
             if let Some(value) = self.eval_arithmetic_expansion_value(expression) {
                 return vec![value.to_string()];
             }
-            self.arithmetic_expansion_error.set(true);
+            self.shell_state.arithmetic_expansion_error.set(true);
             // GNU expr.c raises evalerror from the actual evaluation;
             // classify from the recorded real-environment category.
-            let actual_fatal = self.arithmetic_last_error_category.take().is_some();
+            let actual_fatal = self.shell_state.arithmetic_last_error_category.take().is_some();
             if actual_fatal
                 || crate::executor::arithmetic::arithmetic_expansion_is_fatal(expression)
             {
-                self.arithmetic_fatal_error.set(true);
+                self.shell_state.arithmetic_fatal_error.set(true);
             } else {
-                self.arithmetic_nonfatal_error.set(true);
+                self.shell_state.arithmetic_nonfatal_error.set(true);
             }
             return Vec::new();
         }
@@ -1078,7 +1078,7 @@ impl Executor {
         } else {
             word
         };
-        let saved_nonfatal = self.arithmetic_nonfatal_error.replace(false);
+        let saved_nonfatal = self.shell_state.arithmetic_nonfatal_error.replace(false);
         let expanded = self.expand_word_mut_with_context(word_to_expand, context);
         // GNU subst.c:9955-9956: when parameter_brace_expand_length returns
         // a negative number (bad array subscript), the word expansion returns
@@ -1086,12 +1086,12 @@ impl Executor {
         // no output, not even an empty line). We signal this via
         // arithmetic_nonfatal_error; the caller (expand_command_words)
         // checks the flag and returns ExpansionFailure to skip the command.
-        if self.arithmetic_nonfatal_error.get() {
+        if self.shell_state.arithmetic_nonfatal_error.get() {
             // Keep the flag set so expand_command_words can detect it and
             // return ExpansionFailure(1) to skip the entire command.
             return Vec::new();
         }
-        self.arithmetic_nonfatal_error.set(saved_nonfatal);
+        self.shell_state.arithmetic_nonfatal_error.set(saved_nonfatal);
         // Apply side-effect writes from arithmetic evaluation in array
         // subscripts (e.g. `count++` in `${arr[$((count++))]}`).
         self.apply_pending_subscript_writes();

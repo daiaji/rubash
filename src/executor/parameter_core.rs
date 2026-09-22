@@ -206,12 +206,12 @@ impl Executor {
                 let command_source = format!("({expression})");
                 return self.expand_command_substitution_mut_with_context(&command_source, context);
             }
-            let actual_fatal = self.arithmetic_last_error_category.take().is_some();
+            let actual_fatal = self.shell_state.arithmetic_last_error_category.take().is_some();
             if actual_fatal
                 || crate::executor::arithmetic::arithmetic_expansion_is_fatal(expression)
             {
-                self.arithmetic_fatal_error.set(true);
-                if !self.arithmetic_expansion_error.replace(true) {
+                self.shell_state.arithmetic_fatal_error.set(true);
+                if !self.shell_state.arithmetic_expansion_error.replace(true) {
                     // GNU evalexp reports against the post-expansion string
                     // (expand_arith_string ran before it); the captured eval
                     // input echoes `$var` values, not the literal text.
@@ -242,7 +242,7 @@ impl Executor {
             // retry below — GNU never re-parses the expansion text as a
             // command, and doing so produced a spurious
             // `b: command not found` (issue #67).
-            if self.arithmetic_nounset_error.get() {
+            if self.shell_state.arithmetic_nounset_error.get() {
                 return String::new();
             }
             // GNU subst.c retries unrecognized arithmetic syntax as command substitution.
@@ -414,7 +414,7 @@ impl Executor {
                     // expansion error. Returning None here would let the
                     // caller fall through to non-substring handlers (e.g.
                     // ${#} length), producing wrong output.
-                    if self.arithmetic_last_error_category.take().is_some() {
+                    if self.shell_state.arithmetic_last_error_category.take().is_some() {
                         self.report_substring_arithmetic_error(var_name, offset_str);
                         return Some((var_name, 0, Some(0)));
                     }
@@ -430,7 +430,7 @@ impl Executor {
             match self.eval_parameter_substring_offset(length_str) {
                 Some(value) => Some(value),
                 None => {
-                    if self.arithmetic_last_error_category.take().is_some() {
+                    if self.shell_state.arithmetic_last_error_category.take().is_some() {
                         self.report_substring_arithmetic_error(var_name, length_str);
                         return Some((var_name, 0, Some(0)));
                     }
@@ -473,7 +473,7 @@ impl Executor {
         let (evaluated, category) =
             eval_conditional_arith_value_categorized(&expression, &self.shell_state.env_vars);
         if evaluated.is_none() {
-            self.arithmetic_last_error_category.set(category);
+            self.shell_state.arithmetic_last_error_category.set(category);
             // Save the expanded expression so report_substring_arithmetic_error
             // can use it — GNU evalexp operates on the expanded text, so the
             // error token must come from the post-expansion form (e.g.
@@ -590,7 +590,7 @@ impl Executor {
                     // expansion error. Returning None here would let the
                     // caller fall through to non-substring handlers (e.g.
                     // ${#} length), producing wrong output.
-                    if self.arithmetic_last_error_category.take().is_some() {
+                    if self.shell_state.arithmetic_last_error_category.take().is_some() {
                         self.report_substring_arithmetic_error(var_name, offset_str);
                         return Some((var_name, 0, Some(0)));
                     }
@@ -606,7 +606,7 @@ impl Executor {
             match self.eval_parameter_substring_offset_mut(length_str) {
                 Some(value) => Some(value),
                 None => {
-                    if self.arithmetic_last_error_category.take().is_some() {
+                    if self.shell_state.arithmetic_last_error_category.take().is_some() {
                         self.report_substring_arithmetic_error(var_name, length_str);
                         return Some((var_name, 0, Some(0)));
                     }
@@ -652,8 +652,8 @@ impl Executor {
     /// offset/length text. Rubash mirrors this by prepending the varname to
     /// the standard `arithmetic_error_message` output.
     fn report_substring_arithmetic_error(&self, var_name: &str, expression: &str) {
-        self.arithmetic_fatal_error.set(true);
-        if !self.arithmetic_expansion_error.replace(true) {
+        self.shell_state.arithmetic_fatal_error.set(true);
+        if !self.shell_state.arithmetic_expansion_error.replace(true) {
             // Prefer the expanded expression saved by eval_parameter_substring_offset
             // — GNU evalexp runs after parameter/command substitution, so the
             // error token must come from the post-expansion form (e.g.

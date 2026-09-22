@@ -330,8 +330,8 @@ impl Executor {
         let expanded = self.expand_assignment_value(name, value);
         let substitution_status = self.last_command_substitution_status.get();
         self.last_command_substitution_status.set(None);
-        let arithmetic_error = self.arithmetic_expansion_error.replace(false);
-        let arithmetic_nonfatal_error = self.arithmetic_nonfatal_error.replace(false);
+        let arithmetic_error = self.shell_state.arithmetic_expansion_error.replace(false);
+        let arithmetic_nonfatal_error = self.shell_state.arithmetic_nonfatal_error.replace(false);
         AssignmentExpansionResult {
             value: expanded,
             substitution_status,
@@ -972,14 +972,14 @@ impl Executor {
                 // errors like `x+=2` on a declared integer, and a `set -u`
                 // unbound variable must stay fatal even though a fresh
                 // environment would happily evaluate it as 0.
-                let actual_fatal = self.arithmetic_last_error_category.take().is_some()
-                    || self.arithmetic_nounset_error.get();
+                let actual_fatal = self.shell_state.arithmetic_last_error_category.take().is_some()
+                    || self.shell_state.arithmetic_nounset_error.get();
                 if !actual_fatal
                     && !crate::executor::arithmetic::arithmetic_expansion_is_fatal(expression)
                 {
-                    self.arithmetic_nonfatal_error.set(true);
+                    self.shell_state.arithmetic_nonfatal_error.set(true);
                 }
-                if self.arithmetic_nounset_error.get() {
+                if self.shell_state.arithmetic_nounset_error.get() {
                     // `set -u` unbound is script-fatal (command_prepare turns
                     // the recorded flag into ExitCode). Returning an empty
                     // value here stops the slower assignment expanders from

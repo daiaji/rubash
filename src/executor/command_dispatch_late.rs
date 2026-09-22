@@ -204,9 +204,9 @@ impl Executor {
                 // shell (probe a2: `set -u; ((b)); echo after` never prints
                 // "after"). The status alone would otherwise keep the script
                 // running.
-                if self.arithmetic_nounset_error.get() {
-                    self.arithmetic_nounset_error.set(false);
-                    self.arithmetic_expansion_error.set(false);
+                if self.shell_state.arithmetic_nounset_error.get() {
+                    self.shell_state.arithmetic_nounset_error.set(false);
+                    self.shell_state.arithmetic_expansion_error.set(false);
                     self.exit_code = 127;
                     return Err(ExecuteError::ExitCode(127));
                 }

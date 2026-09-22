@@ -470,7 +470,7 @@ impl Executor {
         // expand_braced_parameter_word for the `\x1d`/whole-word entry.
         if crate::executor::expand_word::braced_name_ends_on_quote(name) {
             eprintln!("{}{}: bad substitution", self.diagnostic_prefix(), crate::executor::expand_word::bad_substitution_display(word));
-            self.parameter_bad_substitution.set(true);
+            self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
 

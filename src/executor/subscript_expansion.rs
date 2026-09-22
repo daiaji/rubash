@@ -285,8 +285,8 @@ impl Executor {
                 // NOT set them — its callers run inside an already-running
                 // command (assignments, builtins) where the flag would leak
                 // into and wrongly skip the NEXT command.
-                self.arithmetic_expansion_error.set(true);
-                self.arithmetic_fatal_error.set(true);
+                self.shell_state.arithmetic_expansion_error.set(true);
+                self.shell_state.arithmetic_fatal_error.set(true);
                 IndexedSubscript::Error
             }
         };

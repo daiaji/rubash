@@ -245,8 +245,8 @@ impl Executor {
                 self.diagnostic_prefix(),
                 quote
             );
-            self.arithmetic_fatal_error.set(true);
-            self.arithmetic_expansion_error.set(true);
+            self.shell_state.arithmetic_fatal_error.set(true);
+            self.shell_state.arithmetic_expansion_error.set(true);
             return String::new();
         }
         // Decode quotes before embedded expansion so quoted glob
@@ -409,8 +409,8 @@ impl Executor {
                 // Runs during word expansion of a pending command: the
                 // evalerror DISCARDs the command itself
                 // (eval_indexed_subscript_deferred documents the model).
-                self.arithmetic_expansion_error.set(true);
-                self.arithmetic_fatal_error.set(true);
+                self.shell_state.arithmetic_expansion_error.set(true);
+                self.shell_state.arithmetic_fatal_error.set(true);
                 return false;
             }
         };

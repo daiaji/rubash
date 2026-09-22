@@ -749,6 +749,15 @@ impl Executor {
         shell_state
             .subshell_depth
             .set(self.shell_state.subshell_depth.get() + 1);
+        // Mid-expansion error latches belong to the parent's in-flight word
+        // expansion; the forked child starts with a clean slate (same as a
+        // real fork, where no such rubash-internal latch exists).
+        shell_state.arithmetic_expansion_error.set(false);
+        shell_state.arithmetic_nonfatal_error.set(false);
+        shell_state.arithmetic_fatal_error.set(false);
+        shell_state.arithmetic_nounset_error.set(false);
+        shell_state.arithmetic_last_error_category.set(None);
+        shell_state.parameter_bad_substitution.set(false);
         Executor {
             shell_state,
             fd_table: self.fd_table.clone(),
@@ -761,18 +770,12 @@ impl Executor {
             bash_logout_sourced: true,
             shell_pid: self.shell_pid,
             owns_signal_mailbox: false,
-            arithmetic_expansion_error: Cell::new(false),
-            arithmetic_nonfatal_error: Cell::new(false),
-            arithmetic_fatal_error: Cell::new(false),
-            arithmetic_nounset_error: Cell::new(false),
-            arithmetic_last_error_category: Cell::new(None),
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),
             assignment_command_name: None,
             buffer_assignment_diagnostics: false,
             pending_assignment_diagnostics: Vec::new(),
             parameter_assignment_failure: Cell::new(false),
-            parameter_bad_substitution: Cell::new(false),
             tempenv_names: Vec::new(),
             tempenv_marks: Vec::new(),
             tempenv_promoted_names: Vec::new(),

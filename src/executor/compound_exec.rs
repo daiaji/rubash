@@ -1793,7 +1793,7 @@ impl Executor {
             let matched = fall_through
                 || clause.pattern_nodes.iter().any(|pattern| {
                     let stripped = self.expand_case_pattern(pattern);
-                    if self.arithmetic_fatal_error.get() || self.arithmetic_nounset_error.get() {
+                    if self.shell_state.arithmetic_fatal_error.get() || self.shell_state.arithmetic_nounset_error.get() {
                         return false;
                     }
                     if case_pattern_has_extglob(&stripped) {

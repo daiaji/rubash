@@ -412,7 +412,7 @@ impl Executor {
                         self.diagnostic_prefix(),
                         index
                     );
-                    self.arithmetic_nonfatal_error.set(true);
+                    self.shell_state.arithmetic_nonfatal_error.set(true);
                     return String::new();
                 }
             }
@@ -440,7 +440,7 @@ impl Executor {
                         self.diagnostic_prefix(),
                         raw_key
                     );
-                    self.arithmetic_nonfatal_error.set(true);
+                    self.shell_state.arithmetic_nonfatal_error.set(true);
                     return String::new();
                 }
                 return self

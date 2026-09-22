@@ -504,7 +504,7 @@ impl Executor {
                 // stage loop with the expansion-error latch held: the
                 // stage's re-expansion re-raises the nounset error without
                 // printing the diagnostic a second time.
-                self.arithmetic_expansion_error.set(true);
+                self.shell_state.arithmetic_expansion_error.set(true);
                 Ok(None)
             }
             (other, _) => other,
@@ -1387,7 +1387,7 @@ impl Executor {
                 // The stage re-raised (or consumed) the unbound-variable
                 // error; clear the expansion-error latch so it does not
                 // leak into the enclosing command's exit-status handling.
-                self.arithmetic_expansion_error.set(false);
+                self.shell_state.arithmetic_expansion_error.set(false);
                 Ok(Some((output, stderr, 127)))
             }
             other => other,

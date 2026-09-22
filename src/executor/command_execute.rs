@@ -334,7 +334,7 @@ impl Executor {
         let alias_expanded =
             self.apply_alias_expansion_after_word_expansion(expanded, &original_raws);
         let alias_expansion_changed_words = alias_expanded.words != pre_alias_words;
-        if alias_expanded.words.is_empty() && !self.arithmetic_expansion_error.get() {
+        if alias_expanded.words.is_empty() && !self.shell_state.arithmetic_expansion_error.get() {
             // GNU execute_simple_command (execute_cmd.c): a simple command
             // whose words all expand to nothing is still executed as a null
             // command - its redirections run and create/truncate their
@@ -557,10 +557,10 @@ impl Executor {
     /// (e.g. bare `$((1/0))` with no other words) abandons the rest of the
     /// current command list (GNU Bash 5.2.37 evidence).
     fn abort_on_expansion_errors(&mut self) -> Result<(), ExecuteError> {
-        if self.arithmetic_expansion_error.get() {
-            self.arithmetic_expansion_error.set(false);
-            let was_fatal = self.arithmetic_fatal_error.replace(false);
-            let nounset = self.arithmetic_nounset_error.replace(false);
+        if self.shell_state.arithmetic_expansion_error.get() {
+            self.shell_state.arithmetic_expansion_error.set(false);
+            let was_fatal = self.shell_state.arithmetic_fatal_error.replace(false);
+            let nounset = self.shell_state.arithmetic_nounset_error.replace(false);
             if nounset {
                 // GNU expr.c expr_streval: an unbound variable under `set -u`
                 // raises FORCE_EOF and terminates the noninteractive shell.
@@ -605,7 +605,7 @@ impl Executor {
         // FORCE_EOF when posixly_correct. shell.c:1471 maps FORCE_EOF to
         // 127 under `-c`; eval.c:104-109 ends script input so the shell
         // exits with last_command_exit_value (EXECUTION_FAILURE=1).
-        if self.parameter_bad_substitution.replace(false) {
+        if self.shell_state.parameter_bad_substitution.replace(false) {
             if self.posix_mode_enabled()
                 && self
                     .shell_state.env_vars

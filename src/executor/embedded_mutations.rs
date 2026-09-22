@@ -731,15 +731,15 @@ impl Executor {
                                 }
                             } else {
                                 let actual_fatal =
-                                    self.arithmetic_last_error_category.take().is_some();
+                                    self.shell_state.arithmetic_last_error_category.take().is_some();
                                 if (actual_fatal
                                     || crate::executor::arithmetic::arithmetic_expansion_is_fatal(
                                         &expression,
                                     ))
                                     && !embedded_command_substitution_expression(&expression)
                                 {
-                                    self.arithmetic_fatal_error.set(true);
-                                    if !self.arithmetic_expansion_error.replace(true) {
+                                    self.shell_state.arithmetic_fatal_error.set(true);
+                                    if !self.shell_state.arithmetic_expansion_error.replace(true) {
                                         // GNU evalexp reports against the
                                         // post-expansion string
                                         // (expand_arith_string ran first);
@@ -797,8 +797,8 @@ impl Executor {
                             "{}command substitution: line 1: unexpected EOF while looking for matching `)'",
                             self.diagnostic_prefix()
                         );
-                        self.arithmetic_fatal_error.set(true);
-                        self.arithmetic_expansion_error.set(true);
+                        self.shell_state.arithmetic_fatal_error.set(true);
+                        self.shell_state.arithmetic_expansion_error.set(true);
                         continue;
                     }
                     let value = protect_command_substitution_output(
