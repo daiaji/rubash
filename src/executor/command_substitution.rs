@@ -92,39 +92,25 @@ impl Executor {
     ) -> String {
         self.last_command_substitution_status.set(Some(0));
         self.last_command_substitution_parse_error.set(false);
-        let old_depth = self.shell_state.subshell_depth.get();
-        let saved_command = self.debug_trap_command.borrow().clone();
-        // A command substitution is a subshell boundary: an expansion error
-        // raised while expanding the substitution's own words (fast-path
-        // builtins expand on the shared executor) terminates only the
-        // substitution, not the enclosing script. Snapshot and restore the
-        // arithmetic error flags so the outer word-expansion check in
-        // command_execute does not observe errors that already killed the
-        // subshell (GNU: `x=$(echo $((b)))` under `set -u` prints the
-        // diagnostic, leaves x empty, and keeps running; issue #67).
-        // These fields are now in ShellState for proper isolation via clone.
-        let saved_expansion_error = self.shell_state.arithmetic_expansion_error.get();
-        let saved_nonfatal_error = self.shell_state.arithmetic_nonfatal_error.get();
-        let saved_fatal_error = self.shell_state.arithmetic_fatal_error.get();
-        let saved_nounset_error = self.shell_state.arithmetic_nounset_error.get();
-        let saved_last_category = self.shell_state.arithmetic_last_error_category.get();
-        // Same subshell boundary for a mid-expansion `bad substitution`
-        // (subst.c:10277): it kills the substitution's command list, never
-        // the enclosing word's command.
-        let saved_bad_substitution = self.shell_state.parameter_bad_substitution.replace(false);
-        self.shell_state.subshell_depth.set(old_depth + 1);
+        // A command substitution is a subshell boundary: GNU runs the body
+        // in a forked child (subst.c:7143 command_substitute ->
+        // execute_cmd.c:1576 execute_in_subshell), so no mutation of shell
+        // state — the arithmetic/bad-substitution latches (subst.c:10277),
+        // subshell_level, or the DEBUG-trap command text — can reach the
+        // parent. Fast-path builtins expand on this shared executor under
+        // `&self`, so the boundary is expressed as the typed interior
+        // snapshot/restore (issue #67: `x=$(echo $((b)))` under `set -u`
+        // prints the diagnostic, leaves x empty, keeps running).
+        let saved_state = self.shell_state.snapshot_interior();
+        self.shell_state
+            .subshell_depth
+            .set(saved_state.subshell_depth() + 1);
+        self.shell_state.parameter_bad_substitution.set(false);
         // Bash evaluates BASH_COMMAND in a command substitution against the
         // substitution's own command source, rather than the outer word.
-        *self.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
+        *self.shell_state.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
         let result = self.expand_command_substitution_inner(source, context);
-        *self.debug_trap_command.borrow_mut() = saved_command;
-        self.shell_state.subshell_depth.set(old_depth);
-        self.shell_state.arithmetic_expansion_error.set(saved_expansion_error);
-        self.shell_state.arithmetic_nonfatal_error.set(saved_nonfatal_error);
-        self.shell_state.arithmetic_fatal_error.set(saved_fatal_error);
-        self.shell_state.arithmetic_nounset_error.set(saved_nounset_error);
-        self.shell_state.arithmetic_last_error_category.set(saved_last_category);
-        self.shell_state.parameter_bad_substitution.set(saved_bad_substitution);
+        self.shell_state.restore_interior(&saved_state);
         result
     }
 
@@ -648,7 +634,7 @@ impl Executor {
         }
         // Keep the command source visible to BASH_COMMAND while the parsed
         // substitution body runs, including DEBUG trap actions.
-        *subshell.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
+        *subshell.shell_state.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
         subshell.stdout_capture = Some(Vec::new());
 
         // GNU subst.c:7356-7359 command_substitute: without inherit_errexit
@@ -799,7 +785,6 @@ impl Executor {
             error_trap_running: false,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             source_debug_suppressed: false,
-            debug_trap_command: std::cell::RefCell::new(None),
             debug_trap_function_line: None,
             last_command_substitution_status: Cell::new(None),
             comsub_stdin_writeback: Cell::new(None),

@@ -262,17 +262,17 @@ impl Executor {
         if let Some(redirect_cmd) = redirect_cmd {
             self.apply_inherited_command_output_redirects(redirect_cmd, &mut ast)?;
         }
-        let saved_trap_command = self.debug_trap_command.borrow().clone();
-        let has_command = self.debug_trap_command.borrow().is_none();
+        let saved_trap_command = self.shell_state.debug_trap_command.borrow().clone();
+        let has_command = self.shell_state.debug_trap_command.borrow().is_none();
         if has_command {
-            *self.debug_trap_command.borrow_mut() = self
+            *self.shell_state.debug_trap_command.borrow_mut() = self
                 .shell_state.env_vars
                 .get("__RUBASH_LAST_COMMAND")
                 .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_COMMAND"))
                 .cloned();
         }
         let result = self.execute_ast(&ast);
-        *self.debug_trap_command.borrow_mut() = saved_trap_command;
+        *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         match result {
             Ok(()) => {
                 self.exit_code = exit_status;
@@ -302,7 +302,7 @@ impl Executor {
             return Ok(false);
         }
         self.debug_trap_running = true;
-        *self.debug_trap_command.borrow_mut() = Some(command_text.to_string());
+        *self.shell_state.debug_trap_command.borrow_mut() = Some(command_text.to_string());
         let call_line = self
             .shell_state.env_vars
             .get("__RUBASH_CURRENT_LINE")
@@ -315,7 +315,7 @@ impl Executor {
             }
         }
         let result = self.execute_ast(&ast);
-        *self.debug_trap_command.borrow_mut() = None;
+        *self.shell_state.debug_trap_command.borrow_mut() = None;
         self.debug_trap_running = false;
         result?;
         let skip_command = self.exit_code == 2;
@@ -559,8 +559,8 @@ impl Executor {
         }
         self.error_trap_running = true;
         let saved_exit = self.exit_code;
-        let saved_trap_command = self.debug_trap_command.borrow().clone();
-        *self.debug_trap_command.borrow_mut() =
+        let saved_trap_command = self.shell_state.debug_trap_command.borrow().clone();
+        *self.shell_state.debug_trap_command.borrow_mut() =
             Some(crate::executor::command_text::bash_command_text(command));
         // GNU executes the ERR trap action with LINENO bound to the failed
         // command's line (trap3.sub: `false | false | false` on line 8 makes
@@ -577,7 +577,7 @@ impl Executor {
             }
         }
         let _ = self.execute_ast(&ast);
-        *self.debug_trap_command.borrow_mut() = saved_trap_command;
+        *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         self.error_trap_running = false;
         self.exit_code = saved_exit;
         Ok(())

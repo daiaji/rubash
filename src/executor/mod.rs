@@ -490,7 +490,6 @@ pub struct Executor {
     /// RETURN-trap action's own DEBUG fire are suppressed together
     /// (dbg-support.tests:98 emits only `debug lineno: 98 main`).
     source_debug_suppressed: bool,
-    debug_trap_command: std::cell::RefCell<Option<String>>,
     debug_trap_function_line: Option<usize>,
     /// Expanded form of the offset/length expression from the last failed
     /// substring arithmetic evaluation. `report_substring_arithmetic_error`

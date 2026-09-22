@@ -104,6 +104,76 @@ pub struct ShellState {
     /// substitution's command list, never the enclosing word's command.
     /// TODO: Move to ShellState::clone() for automatic isolation (requires &mut self API change)
     pub(crate) parameter_bad_substitution: Cell<bool>,
+    /// variables.c this_command_name / BASH_COMMAND source — the command
+    /// text the DEBUG trap reports. A command substitution evaluates it
+    /// against the substitution's own source; the clone boundary restores
+    /// the outer command automatically.
+    pub(crate) debug_trap_command: RefCell<Option<String>>,
+}
+
+/// Typed snapshot of the interior-mutable slice of ShellState.
+///
+/// Word expansion holds `&Executor`, so an in-place command substitution
+/// can only mutate state behind `Cell`/`RefCell` — plain fields are frozen
+/// under `&self`. The subshell boundary for a shared-executor `$( )`
+/// therefore only needs to save/restore this slice; every NEW interior-
+/// mutable field added to ShellState MUST join this snapshot (the fork
+/// path via `command_substitution_executor` covers it automatically
+/// through `Clone`, but this path does not).
+#[derive(Debug)]
+pub(crate) struct InteriorSnapshot {
+    subshell_depth: usize,
+    arithmetic_expansion_error: bool,
+    arithmetic_nonfatal_error: bool,
+    arithmetic_fatal_error: bool,
+    arithmetic_nounset_error: bool,
+    arithmetic_last_error_category:
+        Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
+    parameter_bad_substitution: bool,
+    debug_trap_command: Option<String>,
+}
+
+impl InteriorSnapshot {
+    pub(crate) fn subshell_depth(&self) -> usize {
+        self.subshell_depth
+    }
+}
+
+impl ShellState {
+    /// subst.c:7143 command_substitute / execute_cmd.c:1576
+    /// execute_in_subshell: a `$( )` body runs in a forked child, so none
+    /// of its state mutations may reach the parent. Shared-executor fast
+    /// paths can only touch interior-mutable fields, so saving this slice
+    /// reproduces the fork boundary for exactly what they can write.
+    pub(crate) fn snapshot_interior(&self) -> InteriorSnapshot {
+        InteriorSnapshot {
+            subshell_depth: self.subshell_depth.get(),
+            arithmetic_expansion_error: self.arithmetic_expansion_error.get(),
+            arithmetic_nonfatal_error: self.arithmetic_nonfatal_error.get(),
+            arithmetic_fatal_error: self.arithmetic_fatal_error.get(),
+            arithmetic_nounset_error: self.arithmetic_nounset_error.get(),
+            arithmetic_last_error_category: self.arithmetic_last_error_category.get(),
+            parameter_bad_substitution: self.parameter_bad_substitution.get(),
+            debug_trap_command: self.debug_trap_command.borrow().clone(),
+        }
+    }
+
+    /// Restore a snapshot taken by `snapshot_interior`.
+    pub(crate) fn restore_interior(&self, snapshot: &InteriorSnapshot) {
+        self.subshell_depth.set(snapshot.subshell_depth);
+        self.arithmetic_expansion_error
+            .set(snapshot.arithmetic_expansion_error);
+        self.arithmetic_nonfatal_error
+            .set(snapshot.arithmetic_nonfatal_error);
+        self.arithmetic_fatal_error.set(snapshot.arithmetic_fatal_error);
+        self.arithmetic_nounset_error
+            .set(snapshot.arithmetic_nounset_error);
+        self.arithmetic_last_error_category
+            .set(snapshot.arithmetic_last_error_category);
+        self.parameter_bad_substitution
+            .set(snapshot.parameter_bad_substitution);
+        *self.debug_trap_command.borrow_mut() = snapshot.debug_trap_command.clone();
+    }
 }
 
 impl Clone for ShellState {
@@ -148,6 +218,7 @@ impl Clone for ShellState {
             arithmetic_nounset_error: Cell::new(self.arithmetic_nounset_error.get()),
             arithmetic_last_error_category: Cell::new(self.arithmetic_last_error_category.get()),
             parameter_bad_substitution: Cell::new(self.parameter_bad_substitution.get()),
+            debug_trap_command: RefCell::new(self.debug_trap_command.borrow().clone()),
         }
     }
 }

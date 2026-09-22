@@ -53,7 +53,7 @@ impl Executor {
                     .unwrap_or_else(|| "1".to_string()),
             ),
             "BASH_COMMAND" => Some(
-                self.debug_trap_command
+                self.shell_state.debug_trap_command
                     .borrow()
                     .clone()
                     .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_COMMAND").cloned())
