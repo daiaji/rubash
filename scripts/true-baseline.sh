@@ -145,7 +145,11 @@ RB_PATH="$SHFIX"
 # scripts ENABLED and every suite shared one Windows %TEMP% — the redir
 # `to c` xN accumulation). Flags: /w share WSL->Win32, /p translate the
 # value as a Linux path into its Windows form.
-export WSLENV="__RUBASH_NO_UPSTREAM_SCRIPTS/w:TMPDIR/p"
+# MSYS=winsymlinks:nativestrict makes Git coreutils `ln -s`/`cp -s` create real
+# NTFS symlinks instead of copies, matching GNU ln semantics on the rb side
+# (globstar3.sub symlink traversal depends on it).
+export MSYS=winsymlinks:nativestrict
+export WSLENV="__RUBASH_NO_UPSTREAM_SCRIPTS/w:TMPDIR/p:LC_ALL/w:LC_COLLATE/w:LANG/w:MSYS/w"
 
 mkdir -p "$OUT"
 : > "$LOG"

@@ -58,7 +58,8 @@ RB_PATH="$SHFIX"
 
 # WSL -> Win32 env propagation is opt-in (see true-baseline.sh): without
 # WSLENV /w entries the __RUBASH_* and TMPDIR vars never reach rubash.exe.
-export WSLENV="__RUBASH_NO_UPSTREAM_SCRIPTS/w:TMPDIR/p"
+export MSYS=winsymlinks:nativestrict
+export WSLENV="__RUBASH_NO_UPSTREAM_SCRIPTS/w:TMPDIR/p:LC_ALL/w:LC_COLLATE/w:LANG/w:MSYS/w"
 
 mkdir -p "$OUT"
 : > "$LOG"

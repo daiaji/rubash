@@ -617,7 +617,7 @@ fn expand_multi_globstar(
         globskipdots,
         env_vars,
     );
-    matches.sort();
+    matches.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
     let matches = apply_globignore(matches, env_vars);
     if matches.is_empty() {
         return unmatched_expansion(word, nullglob, failglob);
@@ -641,7 +641,7 @@ fn star_descend(
         Err(_) => return,
     };
     let mut names: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
-    names.sort();
+    names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
     for name in names {
         if name.starts_with('.') && !dotglob {
             continue;
@@ -715,7 +715,7 @@ fn collect_multi_globstar_paths(
             Err(_) => return,
         };
         let mut names: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
-        names.sort();
+        names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
         for name in names {
             if (name.starts_with('.') && !dotglob) || name == "." || name == ".." {
                 continue;
@@ -727,13 +727,24 @@ fn collect_multi_globstar_paths(
                 .unwrap_or_else(|| physical.join(&name));
             let child_logical = join_path_segment(if logical == "." { "" } else { logical }, &name);
             let is_dir = child_physical.is_dir();
-            if index + 1 < segments.len() {
-                let is_symlink = std::fs::symlink_metadata(&child_physical)
-                    .map(|meta| meta.file_type().is_symlink())
-                    .unwrap_or(false);
-                if !is_dir || is_symlink {
-                    continue;
+            let is_symlink = std::fs::symlink_metadata(&child_physical)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_symlink {
+                // glob.c: `**` never descends through a symlinked directory,
+                // but the link itself is still emitted as a match
+                // (globstar3.sub: `c` for `**`, `c/` for `**/`).
+                if !dirs_only || is_dir {
+                    matches.push(if dirs_only {
+                        format!("{child_logical}/")
+                    } else {
+                        child_logical.clone()
+                    });
                 }
+                continue;
+            }
+            if index + 1 < segments.len() && !is_dir {
+                continue;
             }
             collect_multi_globstar_paths(
                 segments,
@@ -755,7 +766,7 @@ fn collect_multi_globstar_paths(
         Err(_) => return,
     };
     let mut names: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
-    names.sort();
+    names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
     for name in names {
         if (name.starts_with('.') && !dotglob) || name == "." || name == ".." {
             continue;
@@ -847,7 +858,7 @@ fn collect_multi_globstar(
                 };
                 let mut names: Vec<String> =
                     entries.iter().map(|entry| entry.name.clone()).collect();
-                names.sort();
+                names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
                 for name in names {
                     if name.starts_with('.') && !dotglob {
                         continue;
@@ -927,7 +938,7 @@ fn collect_globstar_matches(
     // results group by directory in traversal order rather than a global
     // byte sort over full paths (which would interleave `builtins.o` with
     // `builtins/...`).
-    names.sort();
+    names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
     let include_dotfiles =
         dotglob || suffix.starts_with('.') || globignore_patterns(env_vars).is_some();
     for name in names {
@@ -1783,9 +1794,9 @@ fn globsort_matches(
     if spec.kind == SORT_NONE || spec.kind == SORT_NAME || spec.kind == (SORT_NAME | SORT_REVERSE) {
         let reverse = spec.kind & SORT_REVERSE != 0;
         if reverse {
-            matches.sort_by(|a, b| b.cmp(a));
+            matches.sort_by(|a, b| crate::locale::strcoll_posixcmp(b, a));
         } else {
-            matches.sort();
+            matches.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
         }
         return;
     }
@@ -1826,9 +1837,9 @@ fn globsort_matches(
         .collect();
     let name_cmp = |a: &str, b: &str| {
         if reverse {
-            b.cmp(a)
+            crate::locale::strcoll_posixcmp(b, a)
         } else {
-            a.cmp(b)
+            crate::locale::strcoll_posixcmp(a, b)
         }
     };
     let indices: Vec<usize> = (0..matches.len()).collect();
@@ -1836,10 +1847,20 @@ fn globsort_matches(
     sorted.sort_by(|&ia, &ib| {
         let (na, nb) = (&matches[ia], &matches[ib]);
         let x = match base {
-            SORT_SIZE => stats[ia].0.cmp(&stats[ib].0),
-            SORT_MTIME => stats[ia].1.cmp(&stats[ib].1),
-            SORT_ATIME => stats[ia].2.cmp(&stats[ib].2),
-            SORT_CTIME => stats[ia].3.cmp(&stats[ib].3),
+            SORT_SIZE | SORT_MTIME | SORT_ATIME | SORT_CTIME => {
+                let key = |s: &(i64, i64, i64, i64)| match base {
+                    SORT_SIZE => s.0,
+                    SORT_MTIME => s.1,
+                    SORT_ATIME => s.2,
+                    _ => s.3,
+                };
+                let o = key(&stats[ia]).cmp(&key(&stats[ib]));
+                if reverse {
+                    o.reverse()
+                } else {
+                    o
+                }
+            }
             SORT_NUMERIC => {
                 let va = all_digits(na);
                 let vb = all_digits(nb);

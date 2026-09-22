@@ -462,9 +462,173 @@ pub fn decode_to_visible_text(text: &str) -> String {
     out
 }
 
+/// The active LC_COLLATE locale name.
+/// GNU setlocale category precedence: LC_ALL > LC_COLLATE > LANG > "C".
+fn collate_locale_name() -> String {
+    let locale_all = std::env::var("LC_ALL").unwrap_or_default();
+    let locale_collate = std::env::var("LC_COLLATE").unwrap_or_default();
+    let lang = std::env::var("LANG").unwrap_or_default();
+    if !locale_all.is_empty() {
+        locale_all
+    } else if !locale_collate.is_empty() {
+        locale_collate
+    } else if !lang.is_empty() {
+        lang
+    } else {
+        "C".to_string()
+    }
+}
+
+/// Strip the codeset and modifier suffixes and map to a host locale name:
+/// "en_US.UTF-8" -> "en-US" (Windows BCP-47) / "en_US.UTF-8" (POSIX).
+/// Returns None for the C/POSIX locale, where collation is plain strcmp.
+fn host_collate_name(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    if lower.is_empty() || lower == "c" || lower == "posix" {
+        return None;
+    }
+    let base = name.split(['.', '@']).next().unwrap_or(name);
+    #[cfg(windows)]
+    {
+        // glibc "en_US" -> BCP-47 "en-US"; a bare language ("en") is kept
+        // as a neutral name and resolved by CompareStringEx.
+        Some(base.replace('_', "-"))
+    }
+    #[cfg(not(windows))]
+    {
+        // POSIX setlocale wants the full "lang_TERRITORY.codeset" form; the
+        // unsuffixed "en_US" form is the most portable fallback.
+        Some(base.to_string())
+    }
+}
+
+/// GNU strcoll(3): compare `a` and `b` under the LC_COLLATE collation.
+/// C/POSIX and unresolvable locales fall back to bytewise strcmp, matching
+/// glibc's behavior when setlocale() cannot activate the named locale.
+pub fn strcoll(a: &str, b: &str) -> std::cmp::Ordering {
+    // An empty string orders identically under strcoll and strcmp.
+    if a.is_empty() || b.is_empty() {
+        return a.cmp(b);
+    }
+    let name = collate_locale_name();
+    let Some(host) = host_collate_name(&name) else {
+        return a.cmp(b);
+    };
+    platform_collate(a, b, &host).unwrap_or_else(|| a.cmp(b))
+}
+
+/// GNU strvec_posixcmp (lib/sh/stringvec.c:152-165): strcoll() first, then a
+/// bytewise tie-break on the first byte, then strcmp. This is the comparator
+/// used for glob result ordering via pathexp.c globsort_namecmp().
+pub fn strcoll_posixcmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let r = strcoll(a, b);
+    if r != Ordering::Equal {
+        return r;
+    }
+    match a.as_bytes().first().cmp(&b.as_bytes().first()) {
+        Ordering::Equal => a.cmp(b),
+        ord => ord,
+    }
+}
+
+#[cfg(windows)]
+fn platform_collate(a: &str, b: &str, locale: &str) -> Option<std::cmp::Ordering> {
+    use windows_sys::Win32::Globalization::{
+        CompareStringEx, CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN,
+        NORM_IGNORESYMBOLS,
+    };
+    let loc: Vec<u16> = locale.encode_utf16().chain(Some(0)).collect();
+    let aw: Vec<u16> = a.encode_utf16().collect();
+    let bw: Vec<u16> = b.encode_utf16().collect();
+    // NORM_IGNORESYMBOLS approximates glibc collation, where punctuation
+    // carries no primary weight (".a" ties with "a"); the residual ordering
+    // is then decided by strvec_posixcmp's first-byte/strcmp tie-break,
+    // which reproduces glibc's interleaved ".a a .aa aa" result.
+    let r = unsafe {
+        CompareStringEx(
+            loc.as_ptr(),
+            NORM_IGNORESYMBOLS,
+            aw.as_ptr(),
+            aw.len() as i32,
+            bw.as_ptr(),
+            bw.len() as i32,
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+        )
+    };
+    match r {
+        CSTR_LESS_THAN => Some(std::cmp::Ordering::Less),
+        CSTR_EQUAL => Some(std::cmp::Ordering::Equal),
+        CSTR_GREATER_THAN => Some(std::cmp::Ordering::Greater),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+fn platform_collate(a: &str, b: &str, locale: &str) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    use std::ffi::CString;
+    use std::sync::Mutex;
+    // Activate LC_COLLATE once per distinct locale name; glibc compares with
+    // the collation table installed by setlocale(LC_COLLATE, ...).
+    static ACTIVE: Mutex<Option<String>> = Mutex::new(None);
+    let mut active = ACTIVE.lock().ok()?;
+    if active.as_deref() != Some(locale) {
+        let cname = CString::new(locale).ok()?;
+        let ok = unsafe { libc::setlocale(libc::LC_COLLATE, cname.as_ptr()) };
+        if ok.is_null() {
+            return None;
+        }
+        *active = Some(locale.to_string());
+    }
+    drop(active);
+    let ca = CString::new(a).ok()?;
+    let cb = CString::new(b).ok()?;
+    let r = unsafe { libc::strcoll(ca.as_ptr(), cb.as_ptr()) };
+    Some(r.cmp(&0))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn platform_collate(_a: &str, _b: &str, _locale: &str) -> Option<std::cmp::Ordering> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_utf8_locale_name;
+    use super::{is_utf8_locale_name, strcoll, strcoll_posixcmp};
+    use std::cmp::Ordering;
+
+    #[test]
+    fn c_locale_collate_is_bytewise() {
+        // With no locale vars the collate category is C: strcmp order.
+        let saved = std::env::var("LC_ALL").ok();
+        std::env::remove_var("LC_ALL");
+        std::env::remove_var("LC_COLLATE");
+        std::env::remove_var("LANG");
+        assert_eq!(strcoll("B", "a"), Ordering::Less); // 0x42 < 0x61
+        assert_eq!(strcoll_posixcmp(".a", "a"), Ordering::Less);
+        if let Some(v) = saved {
+            std::env::set_var("LC_ALL", v);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn utf8_locale_collate_interleaves_punctuation() {
+        // glibc en_US.UTF-8 ignores punctuation at the primary weight:
+        // ".a" ties "a" and the posixcmp first-byte break orders it first.
+        std::env::set_var("LC_ALL", "en_US.UTF-8");
+        assert_eq!(strcoll(".a", "a"), Ordering::Equal);
+        assert_eq!(strcoll_posixcmp(".a", "a"), Ordering::Less);
+        assert_eq!(strcoll_posixcmp("a", ".aa"), Ordering::Less);
+        assert_eq!(strcoll_posixcmp("!x", "-x"), Ordering::Less);
+        assert_eq!(strcoll_posixcmp("-x", "[x]"), Ordering::Less);
+        assert_eq!(strcoll_posixcmp("[x]", "_x"), Ordering::Less);
+        assert_eq!(strcoll_posixcmp("_x", "x"), Ordering::Less);
+        std::env::remove_var("LC_ALL");
+    }
 
     #[test]
     fn utf8_charset_names_are_recognized_case_insensitively() {
