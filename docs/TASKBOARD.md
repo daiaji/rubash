@@ -40,7 +40,7 @@
 | Q1 | **B 类九族语义准入守卫替换**（审计文档 B1-B9，~90 行）| 等 Devin T5 批次落地（同域防冲突）| 每族 GNU 对拍 + 对应套件无回归 |
 | Q2 | **C 类八桩清除**（审计文档 C1-C8，~23 行）| 可立即 | 原守护场景在真实现下继续通过 |
 | Q3 | **niu 产品基线复跑**（niu.exe 47/2357 → 目标 ≥54/928 对齐）| 等 niu 分歧消除 agent 完成 | 双层台账对比表 |
-| Q4 | **winux 痕迹改名迁移**（ADR 3.8：WINUXSH_ROOT/WINUXSH_SHELL_PATH_STYLE/WINUXCMD 54 处/7 文件）| 可立即（避开 Devin WIP 文件）| grep 归零 + 双链兼容期 + 功能不回退 |
+| Q4 | **winux 痕迹改名迁移**（ADR 3.8：54 处/7 文件）| ✅ 完成（09-22，ccb3615a/f0bdaf45/473def11）：中性名优先（__RUBASH_PATH_STYLE/COREUTILS_PATH/SHELL_COREUTILS_DIR），旧名转兼容回退；WINUXSH_ROOT 导出标记 deprecated niu bridge；bash.rs 标注 AI invoker 入口；探针残留已清 |
 | Q5 | histexp 修复（!!/!str 透传，真账 74 行）| 排队 | histexp 切片归零 |
 | Q6 | alias 修复（eval/alias 展开失效，69 行）| 排队 | alias 切片归零 |
 | Q7 | redir/vredir fd→readonly 语义（41+27 行）| 排队 | 切片归零 |
