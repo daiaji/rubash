@@ -1,6 +1,6 @@
 use super::*;
+use crate::executor::markers::DATA_DOLLAR;
 use crate::executor::path::shell_directory_entries;
-use crate::executor::markers::{DATA_DOLLAR};
 
 impl Executor {
     /// Expands a command-substitution argument word. When the word was
@@ -68,7 +68,10 @@ impl Executor {
 
     fn expand_protected_tilde(&self, word: &str, was_quoted: Option<bool>) -> String {
         let expanded = if was_quoted == Some(true) && word.starts_with('~') {
-            self.expand_word(&format!("{}{word}", crate::executor::markers::QUOTED_WORD_PREFIX_STR))
+            self.expand_word(&format!(
+                "{}{word}",
+                crate::executor::markers::QUOTED_WORD_PREFIX_STR
+            ))
         } else {
             self.expand_word(word)
         };
@@ -248,10 +251,14 @@ impl Executor {
             }
             return String::new();
         }
+        // GNU applies alias expansion while reading the substitution body
+        // (parse.y alias_expand_token + push_string): expand the body text
+        // at stream level once here so every downstream word shortcut sees
+        // the same expanded words; the real-parser path splices for itself.
         let word_source = strip_command_substitution_comments(source);
+        let word_source = self.comsub_body_alias_splice(&word_source);
         let word_parts = split_shell_words_with_quote_info(&word_source);
         let words: Vec<String> = word_parts.iter().map(|(word, _)| word.clone()).collect();
-        let words = self.expand_aliases(&words);
 
         // Bash parses compound command substitutions as a complete command
         // list. Word-based shortcuts cannot preserve reserved-word boundaries
@@ -463,14 +470,18 @@ impl Executor {
 
         if words.first().map(String::as_str) == Some("umask") {
             return self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("__RUBASH_UMASK")
                 .cloned()
                 .unwrap_or_else(|| "0022".to_string());
         }
 
         if words.first().map(String::as_str) == Some("ulimit") {
-            return crate::builtins::ulimit::command_substitution(&words[1..], &self.shell_state.env_vars);
+            return crate::builtins::ulimit::command_substitution(
+                &words[1..],
+                &self.shell_state.env_vars,
+            );
         }
 
         if words.first().map(String::as_str) == Some("pwd") {
@@ -479,7 +490,12 @@ impl Executor {
                     .map(|path| path.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
             }
-            return self.shell_state.env_vars.get("PWD").cloned().unwrap_or_default();
+            return self
+                .shell_state
+                .env_vars
+                .get("PWD")
+                .cloned()
+                .unwrap_or_default();
         }
 
         if words.first().map(String::as_str) == Some("type")
@@ -603,7 +619,8 @@ impl Executor {
         // line counter so body diagnostics report the original script line
         // instead of restarting at 1 (subst.c comsub handling).
         let body_start_line = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
@@ -625,6 +642,15 @@ impl Executor {
 
         let saved_dir = env::current_dir().ok();
         let mut subshell = self.command_substitution_executor();
+        // The body was alias-expanded at stream level by
+        // comsub_body_alias_splice above (parse.y alias_expand_token on the
+        // fresh input); the child must not expand those words a second time.
+        if self.alias_expansion_enabled() || self.posix_mode_enabled() {
+            subshell
+                .shell_state
+                .env_vars
+                .insert("__RUBASH_ALIAS_STREAMED".to_string(), "1".to_string());
+        }
         // Trap mutation needs the Bash command-substitution trap lifecycle.
         // Keep the compatibility adjustment scoped to parsed bodies that
         // actually invoke trap, preserving specialized substitution modes.
@@ -645,12 +671,15 @@ impl Executor {
         // counter would keep -e dead even after `set -e`. POSIX mode
         // enables inherit_errexit (set-e1.sub).
         let posix_mode = subshell
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_POSIX_MODE")
             .map(String::as_str)
             == Some("1");
-        let inherit_errexit =
-            crate::builtins::shopt::option_enabled(&subshell.shell_state.env_vars, "inherit_errexit");
+        let inherit_errexit = crate::builtins::shopt::option_enabled(
+            &subshell.shell_state.env_vars,
+            "inherit_errexit",
+        );
         // Builtins inside the body that write the process stdout directly
         // consult the thread-local capture — which belongs to an enclosing
         // pipeline stage when this substitution runs inside one, leaking
@@ -662,7 +691,11 @@ impl Executor {
             } else {
                 subshell.suppress_errexit = 0;
                 subshell.shell_state.env_vars.remove("__RUBASH_ERREXIT");
-                crate::builtins::set::set_shell_option(&mut subshell.shell_state.env_vars, "errexit", false);
+                crate::builtins::set::set_shell_option(
+                    &mut subshell.shell_state.env_vars,
+                    "errexit",
+                    false,
+                );
                 subshell.execute_ast(&ast)
             };
             let mut status = command_substitution_result_status(result, subshell.exit_code);
@@ -689,7 +722,8 @@ impl Executor {
         ) {
             if parent_input == child_input {
                 if let Some(child_offset) = subshell
-                    .shell_state.env_vars
+                    .shell_state
+                    .env_vars
                     .get(FUNCTION_STDIN_OFFSET)
                     .and_then(|value| value.parse::<usize>().ok())
                 {
@@ -744,6 +778,11 @@ impl Executor {
         shell_state.arithmetic_nounset_error.set(false);
         shell_state.arithmetic_last_error_category.set(None);
         shell_state.parameter_bad_substitution.set(false);
+        // The substitution body is fresh parser input (subst.c:7143
+        // command_substitute re-reads the collected text): GNU expands its
+        // aliases at that read, so the driver's streamed-batch marker must
+        // not reach the child's executor-level expansion.
+        shell_state.env_vars.remove("__RUBASH_ALIAS_STREAMED");
         Executor {
             shell_state,
             fd_table: self.fd_table.clone(),

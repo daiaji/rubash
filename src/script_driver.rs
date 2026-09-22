@@ -14,7 +14,10 @@ use std::rc::Rc;
 use crate::executor::{ExecuteError, Executor};
 use crate::history::SessionHistory;
 use crate::history_expand::{HistChars, HistCtx};
-use crate::lexer::{has_unclosed_input_syntax, tokenize, tokenize_with_initial_posix, TokenKind};
+use crate::lexer::{
+    expand_aliases_in_source, has_unclosed_input_syntax, tokenize, tokenize_with_initial_posix,
+    AliasLookup, TokenKind,
+};
 use crate::parser::{parse, CommandNode};
 
 /// bashhist.c: does this script turn history on? Detects the long-form
@@ -46,6 +49,35 @@ pub fn script_uses_history(contents: &str) -> bool {
         }
     }
     false
+}
+
+/// Does this script turn alias expansion on? `shopt -s expand_aliases` is
+/// a runtime command, but its result must be visible to the READER of the
+/// following lines (GNU reads and executes one complete command at a
+/// time), so scripts mentioning the option take the grouped driver where
+/// each group is lexed against the alias table live at that point.
+pub fn script_uses_aliases(contents: &str) -> bool {
+    contents.contains("expand_aliases")
+}
+
+/// GNU parse.y alias_expand_token + push_string, run over the text of one
+/// command group. The lookup yields (value, AL_EXPANDNEXT); alias values
+/// store '$' as DATA_DOLLAR when the word carried it in data position.
+fn expand_group_aliases(executor: &Executor, source: &str) -> String {
+    if !executor.alias_expansion_enabled() || executor.shell_state.aliases.is_empty() {
+        return source.to_string();
+    }
+    let lookup = move |word: &str| {
+        executor.shell_state.aliases.get(word).map(|alias| {
+            (
+                alias
+                    .value
+                    .replace(crate::executor::markers::DATA_DOLLAR, "$"),
+                alias.expand_next,
+            )
+        })
+    };
+    expand_aliases_in_source(source, &lookup as &AliasLookup<'_>)
 }
 
 /// shell.c run_pending_command style driver for scripts with history on:
@@ -98,23 +130,32 @@ pub fn run_script_with_history(
                     is_body = true;
                 }
             } else {
-                let declared = stdin_heredoc_declarations(text);
+                let expanded_line = expand_group_aliases(executor, text);
+                let declared = stdin_heredoc_declarations(&expanded_line);
                 // Only line-spanning substitutions need the paren gate: a
                 // heredoc declared inside $( ) or <( ) keeps the group open
                 // past its terminator until the substitution closes.
                 saw_heredoc = saw_heredoc
                     || (!declared.is_empty()
-                        && (text.contains("$(") || text.contains("<(") || text.contains(">(")));
+                        && (expanded_line.contains("$(")
+                            || expanded_line.contains("<(")
+                            || expanded_line.contains(">(")));
                 pending_heredocs.extend(declared);
             }
             if !is_body {
-                paren_depth += line_paren_delta(text);
+                paren_depth += line_paren_delta(&expand_group_aliases(executor, text));
             }
             group.push((text.to_string(), is_body));
             pending.push_str(raw);
+            // GNU expands aliases while reading (parse.y alias_expand_token
+            // + push_string), so a group boundary is decided on the
+            // alias-expanded text: `alias foo="echo 'Error:"` + `foo bar'`
+            // is ONE complete command, while `foo x` keeps the quote open
+            // through the following lines.
+            let expanded_pending = expand_group_aliases(executor, &pending);
             if pending_heredocs.is_empty()
                 && (!saw_heredoc || paren_depth <= 0)
-                && !stdin_source_needs_more(&pending)
+                && !stdin_source_needs_more(&expanded_pending)
             {
                 break;
             }
@@ -282,16 +323,30 @@ fn run_history_group(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let exec_text = expand_group_aliases(executor, &exec_text);
     if exec_text.trim().is_empty() {
         return executor.last_exit_code();
     }
-    run_source_with_line_offset(
+    // The group's words are final: executor-level alias expansion would
+    // expand them a second time. Inner re-parses (eval, command
+    // substitution, source, traps) suspend the marker and expand their own
+    // input, matching GNU's per-stream alias handling.
+    executor
+        .shell_state
+        .env_vars
+        .insert("__RUBASH_ALIAS_STREAMED".to_string(), "1".to_string());
+    let status = run_source_with_line_offset(
         executor,
         &exec_text,
         false,
         start_line.saturating_sub(1),
         redirect_cmd,
-    )
+    );
+    executor
+        .shell_state
+        .env_vars
+        .remove("__RUBASH_ALIAS_STREAMED");
+    status
 }
 
 /// Join the recorded line texts with GNU history_delimiting_chars rules:
@@ -474,33 +529,104 @@ fn line_paren_delta(line: &str) -> i64 {
     depth
 }
 
-pub fn stdin_heredoc_declarations(line: &str) -> Vec<(String, bool)> {
-    let words = line.split_whitespace().collect::<Vec<_>>();
-    let mut declarations = Vec::new();
-    let mut index = 0;
-    while index < words.len() {
-        let word = words[index];
-        let (delimiter, strip_tabs) = if word == "<<" || word == "<<-" {
-            (words.get(index + 1).copied(), word == "<<-")
-        } else if let Some(delimiter) = word.strip_prefix("<<-") {
-            (Some(delimiter), true)
-        } else if let Some(delimiter) = word.strip_prefix("<<") {
-            (Some(delimiter), false)
-        } else {
-            index += 1;
+/// Net heredoc bodies still unread after processing `text`, which may span
+/// multiple physical lines (an alias value can carry an entire heredoc:
+/// `alias 'heredoc=cat <<EOF\nhello\nworld\nEOF'` — GNU reads the pushed
+/// text on the same input stream, so the body lines inside it satisfy the
+/// declaration and the next SOURCE line is normal input, parse.y:2055
+/// push_string + here_document_to_fd). Lines consumed as body text are
+/// never scanned for `<<` operators.
+pub fn stdin_heredoc_declarations(text: &str) -> Vec<(String, bool)> {
+    let mut pending: Vec<(String, bool)> = Vec::new();
+    for line in text.split('\n') {
+        if let Some((delimiter, strip_tabs)) = pending.first().cloned() {
+            let candidate = if strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+            if candidate == delimiter {
+                pending.remove(0);
+            }
             continue;
-        };
-        if let Some(delimiter) = delimiter {
-            let delimiter = delimiter
-                .trim_matches('\'')
-                .trim_matches('"')
-                .trim_start_matches('\\')
-                .to_string();
-            if !delimiter.is_empty() {
-                declarations.push((delimiter, strip_tabs));
+        }
+        pending.extend(scan_heredoc_operators(line));
+    }
+    pending
+}
+
+/// `<<`/`<<-` operator declarations on one physical line. GNU parse.y
+/// read_token: `<<` inside quotes is word text, not a redirection —
+/// `alias lb='cat <<E2'` declares no heredoc. Unquoted < > | & ; ( ) are
+/// token breaks (`x<<EOF` attaches EOF to x), `#` starts a comment only at
+/// a word boundary, `$(...)`/`<(...)`/backquote bodies are reparsed so a
+/// `<<` inside them is live syntax, and the delimiter is remembered
+/// dequoted (quoting only suppresses body expansion, never the match).
+fn scan_heredoc_operators(line: &str) -> Vec<(String, bool)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut declarations = Vec::new();
+    let mut expect_delim: Option<bool> = None;
+    let mut i = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            ' ' | '\t' => i += 1,
+            '#' => break,
+            '<' => {
+                if chars.get(i + 1) == Some(&'<') {
+                    match chars.get(i + 2) {
+                        Some(&'<') => i += 3, // <<< herestring: no body
+                        Some(&'-') => {
+                            expect_delim = Some(true);
+                            i += 3;
+                        }
+                        _ => {
+                            expect_delim = Some(false);
+                            i += 2;
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            '>' | '|' | '&' | ';' | '(' | ')' => i += 1,
+            _ => {
+                // One word, honoring quoting; comparison text is dequoted.
+                let mut word = String::new();
+                while i < chars.len() {
+                    match chars[i] {
+                        ' ' | '\t' | '<' | '>' | '|' | '&' | ';' | '(' | ')' => break,
+                        '\\' => {
+                            i += 1;
+                            if i < chars.len() {
+                                word.push(chars[i]);
+                                i += 1;
+                            }
+                        }
+                        '\'' | '"' => {
+                            let q = chars[i];
+                            i += 1;
+                            while i < chars.len() && chars[i] != q {
+                                if q == '"' && chars[i] == '\\' && i + 1 < chars.len() {
+                                    i += 1;
+                                }
+                                word.push(chars[i]);
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        _ => {
+                            word.push(chars[i]);
+                            i += 1;
+                        }
+                    }
+                }
+                if let Some(strip_tabs) = expect_delim.take() {
+                    if !word.is_empty() {
+                        declarations.push((word, strip_tabs));
+                    }
+                }
             }
         }
-        index += 1;
     }
     declarations
 }

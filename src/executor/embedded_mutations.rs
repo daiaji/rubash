@@ -1,6 +1,6 @@
 use super::*;
+use crate::executor::markers::DATA_DOLLAR;
 use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
-use crate::executor::markers::{DATA_DOLLAR};
 
 // The quoted-null carrier (GNU subst.c CTLNUL): an empty quoted span
 // ('', "", an unset "$e", a no-output "$( : )") in a ${var+word}
@@ -43,7 +43,8 @@ fn expansion_ws_marked(alternate: bool, preserve_quotes: bool, in_double: bool) 
 // strips it before the value reaches storage. U+E309 is disjoint from the
 // DATA_* quote sentinels (E301-E308) and survives to split_storage_words,
 // where it glues its whitespace into the element word.
-pub(crate) const COMPOUND_EXPANSION_WS_TAG: char = crate::executor::markers::COMPOUND_EXPANSION_WS_TAG;
+pub(crate) const COMPOUND_EXPANSION_WS_TAG: char =
+    crate::executor::markers::COMPOUND_EXPANSION_WS_TAG;
 
 pub(in crate::executor) fn mark_expansion_whitespace(value: &str, preserve_quotes: bool) -> String {
     if !preserve_quotes {
@@ -166,8 +167,13 @@ impl Executor {
         preserve_quotes: bool,
     ) -> String {
         self.apply_parameter_assignment_expansions_in_word(word);
-        let saved_parameter_state = word_contains_current_shell_command_substitution(word)
-            .then(|| (self.shell_state.env_vars.clone(), self.shell_state.pipestatus.clone()));
+        let saved_parameter_state =
+            word_contains_current_shell_command_substitution(word).then(|| {
+                (
+                    self.shell_state.env_vars.clone(),
+                    self.shell_state.pipestatus.clone(),
+                )
+            });
         let expanded = self.expand_embedded_parameters_ordered_mut(
             word,
             saved_parameter_state.as_ref(),
@@ -563,12 +569,18 @@ impl Executor {
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         let value = mark_expansion_whitespace(&protected, preserve_quotes);
                         if matches!(context, SubstitutionQuoteContext::HereDocument) {
-                            output.push_str(&value.replace(crate::executor::markers::PROTECTED_BACKSLASH, crate::executor::markers::DATA_BACKSLASH_STR));
+                            output.push_str(&value.replace(
+                                crate::executor::markers::PROTECTED_BACKSLASH,
+                                crate::executor::markers::DATA_BACKSLASH_STR,
+                            ));
                         } else {
                             output.push_str(&value);
                         }
                     } else if matches!(context, SubstitutionQuoteContext::HereDocument) {
-                        output.push_str(&protected.replace(crate::executor::markers::PROTECTED_BACKSLASH, crate::executor::markers::DATA_BACKSLASH_STR));
+                        output.push_str(&protected.replace(
+                            crate::executor::markers::PROTECTED_BACKSLASH,
+                            crate::executor::markers::DATA_BACKSLASH_STR,
+                        ));
                     } else {
                         output.push_str(&protected);
                     }
@@ -629,8 +641,7 @@ impl Executor {
                     // GNU param_expand resolves one `${}` expansion once:
                     // memoize array-element fetches for this fragment so a
                     // subscript's side effects run once (AEPV_MEMO).
-                    let _memo_frame =
-                        crate::executor::expand_braced_indices::AepvMemoFrame::new();
+                    let _memo_frame = crate::executor::expand_braced_indices::AepvMemoFrame::new();
                     // Record this fragment's site (word pointer + `$`
                     // offset) so layered re-checks of the same `${}`
                     // dedup subscript side effects (SUB_RES_XPASS). When
@@ -639,17 +650,13 @@ impl Executor {
                     // enclosing fragment's site), it inherits that site
                     // instead of re-keying on the synthetic string.
                     let whole_braced =
-                        crate::executor::parameter_ops::braced_parameter_spans_whole_word(
-                            word,
-                        ) && crate::executor::expand_braced_indices::sub_site_active();
+                        crate::executor::parameter_ops::braced_parameter_spans_whole_word(word)
+                            && crate::executor::expand_braced_indices::sub_site_active();
                     let this_frag = frag_index;
                     frag_index += 1;
-                    let _site_guard = (!whole_braced)
-                        .then(|| {
-                            crate::executor::expand_braced_indices::SubSiteGuard::new(
-                                this_frag,
-                            )
-                        });
+                    let _site_guard = (!whole_braced).then(|| {
+                        crate::executor::expand_braced_indices::SubSiteGuard::new(this_frag)
+                    });
                     if let Some(value) = self.expand_current_shell_braced_substitution(&mut chars) {
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
@@ -730,8 +737,11 @@ impl Executor {
                                     output.push_str(&value);
                                 }
                             } else {
-                                let actual_fatal =
-                                    self.shell_state.arithmetic_last_error_category.take().is_some();
+                                let actual_fatal = self
+                                    .shell_state
+                                    .arithmetic_last_error_category
+                                    .take()
+                                    .is_some();
                                 if (actual_fatal
                                     || crate::executor::arithmetic::arithmetic_expansion_is_fatal(
                                         &expression,
@@ -786,8 +796,10 @@ impl Executor {
                         continue;
                     }
 
-                    let (source, closed) =
-                        collect_command_substitution_source_ex(&mut chars, &self.shell_state.aliases);
+                    let (source, closed) = collect_command_substitution_source_ex(
+                        &mut chars,
+                        &self.shell_state.aliases,
+                    );
                     if !closed {
                         // GNU parse.y parse_comsub: an unclosed `$(` reports
                         // `unexpected EOF` and the expansion fails, aborting
@@ -841,7 +853,8 @@ impl Executor {
                         }
                     } else {
                         let value = self
-                            .shell_state.positional_params
+                            .shell_state
+                            .positional_params
                             .get(index - 1)
                             .map(String::as_str)
                             .unwrap_or("");
@@ -1064,9 +1077,12 @@ impl Executor {
             return expand(self);
         };
 
-        let current_env = std::mem::replace(&mut self.shell_state.env_vars, saved_parameter_env.clone());
-        let current_pipestatus =
-            std::mem::replace(&mut self.shell_state.pipestatus, saved_parameter_pipestatus.clone());
+        let current_env =
+            std::mem::replace(&mut self.shell_state.env_vars, saved_parameter_env.clone());
+        let current_pipestatus = std::mem::replace(
+            &mut self.shell_state.pipestatus,
+            saved_parameter_pipestatus.clone(),
+        );
         let expanded = expand(self);
         self.shell_state.env_vars = current_env;
         self.shell_state.pipestatus = current_pipestatus;
@@ -1151,7 +1167,8 @@ impl Executor {
         // command substitutions — diagnostics inside the body report the
         // original script line of the substitution (comsub2.tests: line 68).
         let body_start_line = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
@@ -1178,22 +1195,36 @@ impl Executor {
         // re-enables it. The flag lives in env_vars, so save/restore around
         // the body like uw_restore_errexit does.
         let inherit_errexit = self.posix_mode_enabled()
-            || crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "inherit_errexit");
+            || crate::builtins::shopt::option_enabled(
+                &self.shell_state.env_vars,
+                "inherit_errexit",
+            );
         let saved_errexit_flag = self.shell_state.env_vars.get("__RUBASH_ERREXIT").cloned();
         let saved_errexit_opt =
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit");
         if !inherit_errexit {
             self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
-            crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "errexit", false);
+            crate::builtins::set::set_shell_option(
+                &mut self.shell_state.env_vars,
+                "errexit",
+                false,
+            );
         }
 
+        // The body's alias expansion already ran at stream level in
+        // comsub_body_alias_splice (parse.y alias_expand_token on the fresh
+        // input); executor-level expansion must not fire a second time.
+        let saved_alias_streamed = self.mark_alias_streamed();
         let (captured, body_reply, result);
         if pipe_output {
             self.shell_state.local_var_scopes.push(HashMap::new());
             self.shell_state.local_attr_scopes.push(HashMap::new());
             self.shell_state.local_typed_scopes.push(HashMap::new());
             if let Some(scope) = self.shell_state.local_var_scopes.last_mut() {
-                scope.insert("REPLY".to_string(), self.shell_state.env_vars.get("REPLY").cloned());
+                scope.insert(
+                    "REPLY".to_string(),
+                    self.shell_state.env_vars.get("REPLY").cloned(),
+                );
             }
             if let Some(typed) = self.shell_state.local_typed_scopes.last_mut() {
                 typed.insert(
@@ -1218,10 +1249,9 @@ impl Executor {
             // Direct-stdout builtins inside the body consult the thread-local
             // capture, which belongs to an enclosing pipeline stage when this
             // substitution runs inside one; give the body its own capture.
-            let (thread_captured, r) =
-                crate::executor::shell_options::capture_stdout(|| {
-                    self.execute_current_shell_body(&ast)
-                });
+            let (thread_captured, r) = crate::executor::shell_options::capture_stdout(|| {
+                self.execute_current_shell_body(&ast)
+            });
             let mut cap = self.stdout_capture.take().unwrap_or_default();
             cap.extend_from_slice(&thread_captured);
             self.stdout_capture = saved_capture;
@@ -1229,11 +1259,14 @@ impl Executor {
             body_reply = None;
             result = r;
         }
+        self.resume_alias_streamed(saved_alias_streamed);
 
         if !inherit_errexit {
             match saved_errexit_flag {
                 Some(value) => {
-                    self.shell_state.env_vars.insert("__RUBASH_ERREXIT".to_string(), value);
+                    self.shell_state
+                        .env_vars
+                        .insert("__RUBASH_ERREXIT".to_string(), value);
                 }
                 None => {
                     self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
@@ -1310,7 +1343,12 @@ impl Executor {
         } else {
             source.trim()
         };
-        let words = self.expand_aliases(&split_shell_words(source));
+        // GNU applies alias expansion while reading the substitution body
+        // (parse.y alias_expand_token + push_string): expand once at stream
+        // level for this body's own word scan; downstream real-parser paths
+        // receive the raw source and splice for themselves at their own
+        // parse boundary.
+        let words = split_shell_words(&self.comsub_body_alias_splice(source));
         // Store leading newlines for the heredoc path to adjust warning
         // line numbers: when `$(` is at end of line, the comsub body starts
         // on the next line, and the `cat` command line is
@@ -1340,10 +1378,11 @@ impl Executor {
         }
         self.set_positional_params(saved_positional_params);
         if command_substitution_words_contain_here_string(&words) {
-            let alias_source = words.join(" ");
-            if let Some(output) =
-                self.run_ast_command_substitution_with_context(&alias_source, context)
-            {
+            // The words were already stream-expanded above; pass the raw
+            // source so run_ast's own splice performs the single expansion
+            // (re-expanding joined words would expand the alias a second
+            // time — parse.y never re-reads pushed text twice).
+            if let Some(output) = self.run_ast_command_substitution_with_context(source, context) {
                 return output;
             }
         }
@@ -1408,7 +1447,8 @@ impl Executor {
         // current word, so body diagnostics must report the original script
         // line instead of restarting at 1.
         let body_start_line = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
@@ -1436,6 +1476,11 @@ impl Executor {
         let saved_state = self.shell_state.clone();
         let saved_exit_code = self.exit_code;
         let saved_dir = env::current_dir().ok();
+        // The body is fresh parser input whose alias expansion GNU applies
+        // at its read (subst.c:7143 parse_and_execute); it already ran at
+        // stream level in comsub_body_alias_splice above, so mark the inner
+        // execution streamed — saved_state rolls the marker back below.
+        self.mark_alias_streamed();
         self.shell_state
             .subshell_depth
             .set(saved_state.subshell_depth.get() + 1);
@@ -1449,7 +1494,12 @@ impl Executor {
         // propagates to the outer assignment, which then checks -e.
         // POSIX mode is the exception: `set -o posix; z=$(false;echo posix)`
         // exits (set-e1.sub), so keep errexit active there.
-        let posix_mode = self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
+        let posix_mode = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_POSIX_MODE")
+            .map(String::as_str)
+            == Some("1");
         let inherit_errexit =
             crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "inherit_errexit");
         // Direct-stdout builtins inside the body consult the thread-local

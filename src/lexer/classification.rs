@@ -1,4 +1,4 @@
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 pub(super) fn is_keyword(word: &str) -> bool {
     matches!(
         word,
@@ -153,9 +153,19 @@ pub(super) fn assignment_rhs_is_fully_single_quoted(raw: &str) -> bool {
 }
 
 /// Rewrite a wholly single-quoted assignment RHS into protected literal data:
-/// drop the quote delimiters and carry `$`/backtick as the walker's literal
-/// markers (\x1f / \x1a), which the parameter-expansion and storage layers
-/// restore on the way out. The `name=` prefix is copied verbatim.
+/// drop the quote delimiters and carry `$`/backtick/`"` as the walker's literal
+/// markers (\x1f / \x1a / \x18), which the parameter-expansion and storage
+/// layers restore on the way out. The `name=` prefix is copied verbatim.
+///
+/// GNU parse.y:5305 read_token_word treats every byte inside a single-quoted
+/// span as literal data and subst.c:4807 dequote_string removes only the
+/// quote delimiters, so a `"` there is data. The `name=` prefix sits outside
+/// the quotes, so the word is never fully single-quoted: a bare `"` would be
+/// re-read as a quote delimiter by the expansion walker and silently dropped
+/// (`echo a='x"y'` printed `a=xy`; GNU prints `a=x"y`). It therefore travels
+/// as DATA_DQUOTE, the same carrier the normal dequote path emits for `"`
+/// inside single quotes when the word has content outside them
+/// (lexer/quotes.rs saw_outside_single arm).
 pub(super) fn protect_fully_single_quoted_assignment(raw: &str) -> String {
     let mut out = String::new();
     let mut chars = raw.chars();
@@ -170,6 +180,7 @@ pub(super) fn protect_fully_single_quoted_assignment(raw: &str) -> String {
             '\'' => {}
             '$' => out.push(DATA_DOLLAR),
             '`' => out.push(crate::executor::markers::DATA_BACKTICK),
+            '"' => out.push(crate::executor::markers::DATA_DQUOTE),
             _ => out.push(ch),
         }
     }
@@ -191,7 +202,10 @@ pub(super) fn mark_quoted_assignment_value(raw: &str, value: &str) -> String {
         rhs.to_string()
     };
 
-    format!("{name}={}{rhs}", crate::executor::markers::QUOTED_WORD_VALUE_PREFIX_STR)
+    format!(
+        "{name}={}{rhs}",
+        crate::executor::markers::QUOTED_WORD_VALUE_PREFIX_STR
+    )
 }
 
 pub(super) fn quoted_literal_tilde(raw: &str, value: &str) -> bool {

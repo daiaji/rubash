@@ -6,8 +6,9 @@ use rubash::executor::{ExecuteError, Executor};
 use rubash::lexer::{has_unclosed_input_syntax, tokenize_with_initial_posix};
 use rubash::parser::parse;
 use rubash::script_driver::{
-    run_script_with_history, run_source, run_source_with_line_offset, script_uses_history,
-    stdin_heredoc_declarations, stdin_script_errexit_enabled, stdin_source_needs_more,
+    run_script_with_history, run_source, run_source_with_line_offset, script_uses_aliases,
+    script_uses_history, stdin_heredoc_declarations, stdin_script_errexit_enabled,
+    stdin_source_needs_more,
 };
 use std::env;
 use std::fs;
@@ -695,7 +696,14 @@ fn run_command_string_with_init(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
     let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
-    let status = run_source_with_line_offset(executor, command, interactive, line_offset, None);
+    // bash -c text goes through the same grouped driver when it enables
+    // aliases: `bash -c 'alias a=b\na'` must see the definition before the
+    // reader expands `a` (GNU reads command-by-command, parse.y:3249).
+    let status = if script_uses_aliases(command) {
+        run_script_with_history(executor, command, None)
+    } else {
+        run_source_with_line_offset(executor, command, interactive, line_offset, None)
+    };
     finish_shell(executor, status, interactive)
 }
 
@@ -763,7 +771,7 @@ fn run_script_file_with_init(
         let _ = run_init_file(executor, init_file);
     }
     let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
-    let status = if script_uses_history(&contents) {
+    let status = if script_uses_history(&contents) || script_uses_aliases(&contents) {
         run_script_with_history(executor, &contents, None)
     } else {
         run_source(executor, &contents, interactive)

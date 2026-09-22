@@ -172,7 +172,8 @@ impl Executor {
             }
         }
         let dir = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("TMPDIR")
             .filter(|value| !value.contains('\0'))
             .cloned()
@@ -225,13 +226,15 @@ impl Executor {
         }
         let closed_by_paren = source.contains(crate::executor::markers::IFS_GLUE);
         let source = source.replace(crate::executor::markers::IFS_GLUE, "");
+        let source = self.comsub_body_alias_splice(&source);
         if heredoc_header_closes_command_substitution(&source) {
             // GNU parse.y:4563-4567: when the `)` that closes a command
             // substitution sits on the heredoc header line (`cat << EOF)`),
             // the heredoc has not been gathered yet, so bash warns and then
             // gathers it anyway (heredoc7.sub line 17).
             let start_line = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("__RUBASH_CURRENT_LINE")
                 .and_then(|line| line.parse::<usize>().ok())
                 .unwrap_or(1);
@@ -241,7 +244,8 @@ impl Executor {
             );
         }
         let comsub_start_line = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or(1)
@@ -328,8 +332,10 @@ impl Executor {
 
         let closed_by_paren = source.contains(crate::executor::markers::IFS_GLUE);
         let source = source.replace(crate::executor::markers::IFS_GLUE, "");
+        let source = self.comsub_body_alias_splice(&source);
         let comsub_start_line = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or(1)
@@ -528,9 +534,7 @@ impl Executor {
                 // Bare `cat` (or flag/`-` operands) reads fd 0 — the shared
                 // FUNCTION_STDIN cursor — which this shortcut cannot model;
                 // fall back to real execution (external_cat owns it).
-                if words.len() <= 1
-                    || words[1..].iter().any(|word| word.starts_with('-'))
-                {
+                if words.len() <= 1 || words[1..].iter().any(|word| word.starts_with('-')) {
                     return None;
                 }
                 let mut output = String::new();
@@ -585,9 +589,7 @@ impl Executor {
                 Some(bytes_to_shell_text(&stdout))
             }
             "cat" => {
-                if words.len() <= 1
-                    || words[1..].iter().any(|word| word.starts_with('-'))
-                {
+                if words.len() <= 1 || words[1..].iter().any(|word| word.starts_with('-')) {
                     return None;
                 }
                 let mut output = String::new();

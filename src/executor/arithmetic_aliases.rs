@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 
 impl Executor {
     pub(in crate::executor) fn reparse_reserved_word_aliases(
@@ -144,7 +144,11 @@ impl Executor {
     /// error`, not `((: a[$(...)]`). The evaluator records that text in
     /// __RUBASH_ARITH_SUBSCRIPT_EXPR (lvalue.rs / value.rs).
     fn report_subscript_eval_failure(&self) -> bool {
-        let Some(subscript) = self.shell_state.env_vars.get("__RUBASH_ARITH_SUBSCRIPT_EXPR") else {
+        let Some(subscript) = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_ARITH_SUBSCRIPT_EXPR")
+        else {
             return false;
         };
         let subscript = subscript.clone();
@@ -225,7 +229,11 @@ impl Executor {
         &mut self,
         label: Option<&str>,
     ) -> bool {
-        let Some(value) = self.shell_state.env_vars.remove("__RUBASH_ARITH_NAMEREF_ERROR") else {
+        let Some(value) = self
+            .shell_state
+            .env_vars
+            .remove("__RUBASH_ARITH_NAMEREF_ERROR")
+        else {
             return false;
         };
         match label {
@@ -356,10 +364,7 @@ impl Executor {
                 let expanded_inner = self.arith_display_expand(&inner);
                 output.push('[');
                 for inner_ch in expanded_inner.chars() {
-                    if matches!(
-                        inner_ch,
-                        '[' | ']' | '$' | '`' | '~' | '\\' | '\'' | '"'
-                    ) {
+                    if matches!(inner_ch, '[' | ']' | '$' | '`' | '~' | '\\' | '\'' | '"') {
                         output.push('\\');
                     }
                     output.push(inner_ch);
@@ -423,7 +428,8 @@ impl Executor {
                         output.push_str(&self.script_name_value());
                     } else {
                         output.push_str(
-                            self.shell_state.positional_params
+                            self.shell_state
+                                .positional_params
                                 .get(index - 1)
                                 .map(String::as_str)
                                 .unwrap_or(""),
@@ -496,7 +502,7 @@ impl Executor {
     }
 
     pub(crate) fn expand_aliases(&self, words: &[String]) -> Vec<String> {
-        if !self.alias_expansion_enabled() {
+        if !self.alias_expansion_enabled() || self.alias_streamed() {
             return words.to_vec();
         }
 
@@ -531,7 +537,7 @@ impl Executor {
         words: &[String],
         raws: &[Option<&str>],
     ) -> Vec<String> {
-        if !self.alias_expansion_enabled() {
+        if !self.alias_expansion_enabled() || self.alias_streamed() {
             return words.to_vec();
         }
 
@@ -562,7 +568,7 @@ impl Executor {
         &self,
         words: &[String],
     ) -> Vec<String> {
-        if !self.alias_expansion_enabled() {
+        if !self.alias_expansion_enabled() || self.alias_streamed() {
             return words.to_vec();
         }
 
@@ -586,63 +592,41 @@ impl Executor {
         expanded
     }
 
-    /// GNU parse.y:4529-4534 (parse_command_substitution): the substitution
-    /// body is parsed with alias expansion active (posix mode forces it on;
-    /// with `shopt expand_aliases` the net behavior still expands the body's
-    /// command-word aliases). Bash implements this with alias_expand_token's
-    /// push_string/RE_READ_TOKEN loop; splicing the alias value into the
-    /// body text before the body parse gives the same token stream — the
-    /// alias value becomes real parser words whose `$` expansions happen at
-    /// execution (comsub21.sub: `echo ${ my_alias; }` prints $DATE's value,
-    /// not the literal word).
+    /// GNU parse.y alias_expand_token + push_string over a fresh parser
+    /// input (command-substitution body, eval string, trap action): the
+    /// whole input is re-read as one token stream, so command-position
+    /// words expand against the alias table live NOW — an alias defined
+    /// inside the input is not yet visible to it (GNU parses the whole
+    /// string before executing: `eval 'alias echo="echo a"; echo b'`
+    /// prints `b`, `$(alias echo="echo a"; echo b)` captures `b`).
+    ///
+    /// This replaces the earlier first-word-only splice: a body like
+    /// `x | y` expands both command positions, a trailing-blank alias
+    /// chains through AL_EXPANDNEXT, and a self-referencing alias does
+    /// not re-expand inside its own pushed text (AL_BEINGEXPANDED), all
+    /// handled by lexer::expand_aliases_in_source. The executor-level
+    /// word expanders are suppressed for the parsed result via
+    /// __RUBASH_ALIAS_STREAMED so nothing expands a second time.
     pub(in crate::executor) fn comsub_body_alias_splice(&self, source: &str) -> String {
-        if !(self.alias_expansion_enabled() || self.posix_mode_enabled()) {
-            return source.to_string();
-        }
-        let trimmed = source.trim_start_matches([' ', '\t', '\n']);
-        let first_end = trimmed
-            .find(|ch: char| ch.is_whitespace() || ch == ';' || ch == '\n')
-            .unwrap_or(trimmed.len());
-        if first_end == 0 {
-            return source.to_string();
-        }
-        let first = &trimmed[..first_end];
-        // Only a plain word can be an alias invocation; quoted or expanded
-        // words never are (parse.y alias_expand_token).
-        if first.contains('$')
-            || first.contains('`')
-            || first.contains('\\')
-            || first.starts_with('\'')
-            || first.starts_with('"')
+        if !(self.alias_expansion_enabled() || self.posix_mode_enabled())
+            || self.shell_state.aliases.is_empty()
         {
             return source.to_string();
         }
-        let Some(alias) = self.shell_state.aliases.get(first) else {
-            return source.to_string();
+        let lookup = |word: &str| {
+            self.shell_state
+                .aliases
+                .get(word)
+                .map(|alias| (alias.value.replace(DATA_DOLLAR, "$"), alias.expand_next))
         };
-        // AL_BEINGEXPANDED: a body already expanding this alias does not
-        // recurse (parse.y alias_expand_token cycle guard).
-        if self.shell_state.expanding_aliases.iter().any(|seen| seen == first) {
-            return source.to_string();
-        }
-        let mut spliced = alias.value.replace(DATA_DOLLAR, "$");
-        let rest = &trimmed[first_end..];
-        if !rest.is_empty()
-            && !spliced.ends_with(' ')
-            && !spliced.ends_with('\t')
-            && !spliced.ends_with('\n')
-        {
-            spliced.push(' ');
-        }
-        spliced.push_str(rest);
-        spliced
+        crate::lexer::expand_aliases_in_source(source, &lookup as &crate::lexer::AliasLookup<'_>)
     }
 
     pub(in crate::executor) fn execute_parser_level_alias(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        if !self.alias_expansion_enabled() {
+        if !self.alias_expansion_enabled() || self.alias_streamed() {
             return Ok(false);
         }
 
@@ -655,7 +639,12 @@ impl Executor {
             return Ok(false);
         };
 
-        if self.shell_state.expanding_aliases.iter().any(|alias| alias == word) {
+        if self
+            .shell_state
+            .expanding_aliases
+            .iter()
+            .any(|alias| alias == word)
+        {
             return Ok(false);
         }
 
@@ -814,14 +803,16 @@ impl Executor {
 
     fn alias_defined_on_current_line(&self, word: &str) -> bool {
         let Some(current_line) = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
         else {
             return false;
         };
         let key = format!("__RUBASH_ALIAS_LINE_{word}");
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .get(&key)
             .and_then(|line| line.parse::<usize>().ok())
             == Some(current_line)

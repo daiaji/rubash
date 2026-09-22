@@ -2,6 +2,7 @@
 //!
 //! Transforms raw input strings into tokens for the parser.
 
+mod alias_stream;
 pub(crate) mod ansi;
 mod brace_scan;
 mod classification;
@@ -24,11 +25,13 @@ use continuation::{
     ends_with_unquoted_backslash, has_unclosed_compound_assignment, has_unclosed_quotes,
 };
 
+pub(crate) use alias_stream::{expand_aliases_in_source, AliasLookup};
 pub(crate) use continuation::has_unclosed_command_substitution;
 use heredoc::heredoc_delimiters;
 use scanner::Lexer;
 pub(crate) use skip::skip_parenthesized_unit_corrected;
 
+use crate::executor::markers::DATA_DOLLAR;
 pub(crate) use ansi::decode_ansi_c_quoted;
 pub(crate) use quotes::remove_shell_quotes;
 pub(crate) use quotes::{
@@ -36,7 +39,6 @@ pub(crate) use quotes::{
     ANSI_C_QUOTE_MARKER, ANSI_C_QUOTE_MARKER_STR, PARAM_NAME_END_MARKER,
 };
 pub use token::{Token, TokenKind};
-use crate::executor::markers::{DATA_DOLLAR};
 
 pub(crate) const QUOTED_HEREDOC_MARKER: &str = crate::executor::markers::QUOTED_HEREDOC_MARKER;
 
@@ -642,7 +644,6 @@ pub fn has_unclosed_input_syntax(input: &str) -> bool {
             && !skip::command_substitutions_balanced(input))
 }
 
-
 /// Rotate the `)`-that-closed-on-the-header-line segment of a command
 /// substitution's heredoc past the gathered body, mirroring GNU
 /// print_comsub's reprint order. Returns None when the input carries no such
@@ -705,7 +706,8 @@ fn relocate_comsub_heredoc_paren(input: &str) -> Option<String> {
                 && chars.get(index + 1) == Some(&'<')
                 && chars.get(index + 2) != Some(&'<') =>
             {
-                let (next, closure) = heredoc_scan::skip_heredoc_in_chars_with_closure(&chars, index);
+                let (next, closure) =
+                    heredoc_scan::skip_heredoc_in_chars_with_closure(&chars, index);
                 if let Some((paren, header_end)) = closure {
                     // `)` + its header-line tail move past the gathered body:
                     // `$(cat <<EOF)\nbody\nEOF` reads as GNU's reprint

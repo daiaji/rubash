@@ -3,9 +3,54 @@ use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 impl Executor {
     pub(crate) fn alias_expansion_enabled(&self) -> bool {
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .get("__RUBASH_SHOPT_STATE")
-            .is_some_and(|value| value.split(DATA_DOLLAR).any(|name| name == "expand_aliases"))
+            .is_some_and(|value| {
+                value
+                    .split(DATA_DOLLAR)
+                    .any(|name| name == "expand_aliases")
+            })
+    }
+
+    /// True while executing a command batch whose source text was already
+    /// alias-expanded by the grouped script driver (lexer::alias_stream,
+    /// GNU parse.y alias_expand_token + push_string). Executor-level word
+    /// expansion must not expand those words a second time
+    /// (`echo` -> `echo a` -> `echo a a`).
+    pub(crate) fn alias_streamed(&self) -> bool {
+        self.shell_state
+            .env_vars
+            .contains_key("__RUBASH_ALIAS_STREAMED")
+    }
+
+    /// An inner parse whose source is NOT pre-expanded (source files read
+    /// incrementally like GNU's reader_loop) lifts the streamed marker for
+    /// the duration and restores it afterwards.
+    pub(crate) fn suspend_alias_streamed(&mut self) -> Option<String> {
+        self.shell_state.env_vars.remove("__RUBASH_ALIAS_STREAMED")
+    }
+
+    /// Mark the current execution's source as already alias-expanded at the
+    /// input-stream level (comsub_body_alias_splice / expand_group_aliases).
+    /// Returns the previous marker for resume_alias_streamed.
+    pub(crate) fn mark_alias_streamed(&mut self) -> Option<String> {
+        self.shell_state
+            .env_vars
+            .insert("__RUBASH_ALIAS_STREAMED".to_string(), "1".to_string())
+    }
+
+    pub(crate) fn resume_alias_streamed(&mut self, saved: Option<String>) {
+        match saved {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_ALIAS_STREAMED".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_ALIAS_STREAMED");
+            }
+        }
     }
 
     pub(in crate::executor) fn apply_case_assignment_attributes(
@@ -105,7 +150,12 @@ impl Executor {
             if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &current) {
                 return None;
             }
-            let cell = self.shell_state.env_vars.get(&current).cloned().unwrap_or_default();
+            let cell = self
+                .shell_state
+                .env_vars
+                .get(&current)
+                .cloned()
+                .unwrap_or_default();
             if cell.is_empty() || (!is_shell_name(&cell) && parse_array_subscript(&cell).is_none())
             {
                 return Some(cell);
@@ -207,11 +257,13 @@ impl Executor {
         // are the saved VarAttrs in the outermost frame that localized the
         // name — the same frame holding its saved value.
         let saved_attrs = self
-            .shell_state.local_var_scopes
+            .shell_state
+            .local_var_scopes
             .iter()
             .position(|scope| scope.contains_key(&fallback))
             .and_then(|index| {
-                self.shell_state.local_attr_scopes
+                self.shell_state
+                    .local_attr_scopes
                     .get(index)
                     .and_then(|scope| scope.get(&fallback))
                     .copied()
@@ -349,7 +401,10 @@ impl Executor {
         {
             if let Some(storage) = self.parameter_array_storage(array_name) {
                 let values = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name) {
-                    assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.shell_state.env_vars, array_name))
+                    assoc_hash_ordered_values(
+                        &storage,
+                        assoc_nbuckets(&self.shell_state.env_vars, array_name),
+                    )
                 } else {
                     array_values(&storage)
                 };
@@ -366,7 +421,8 @@ impl Executor {
         // element 0 from the array storage, so `${a}` must return empty.
         if is_marked_array_var(&self.shell_state.env_vars, &name) {
             return self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get(&name)
                 .and_then(|value| self.scalar_parameter_value(&name, value));
         }
@@ -377,7 +433,8 @@ impl Executor {
         {
             return Some(value.clone());
         }
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .get(&name)
             .and_then(|value| self.scalar_parameter_value(&name, value))
     }
@@ -402,7 +459,8 @@ impl Executor {
 
     pub(in crate::executor) fn mark_exported(&mut self, name: &str) {
         let mut exported: Vec<String> = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(EXPORTED_VARS)
             .map(|value| {
                 value
@@ -416,7 +474,8 @@ impl Executor {
         if !exported.iter().any(|exported_name| exported_name == name) {
             exported.push(name.to_string());
         }
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert(EXPORTED_VARS.to_string(), exported.join(DATA_DOLLAR_STR));
     }
 
@@ -432,7 +491,12 @@ impl Executor {
             || ((command == "declare" || command == "typeset")
                 && Self::declare_applies_persistent_attribute(cmd))
             || (command == "eval" && cmd.assignment_keys().any(|name| name.ends_with('+')))
-            || (self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
+            || (self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_POSIX_MODE")
+                .map(String::as_str)
+                == Some("1")
                 && (is_posix_special_builtin(command) || command == "source"))
     }
 
@@ -455,7 +519,11 @@ impl Executor {
     }
 
     pub(in crate::executor) fn posix_mode_enabled(&self) -> bool {
-        self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
+        self.shell_state
+            .env_vars
+            .get("__RUBASH_POSIX_MODE")
+            .map(String::as_str)
+            == Some("1")
     }
 
     pub(in crate::executor) fn restore_temporary_assignments(
@@ -495,7 +563,9 @@ impl Executor {
                 continue;
             }
             if let Some(value) = value {
-                self.shell_state.env_vars.insert(name.clone(), value.clone());
+                self.shell_state
+                    .env_vars
+                    .insert(name.clone(), value.clone());
                 set_process_env(&name, value);
             } else {
                 self.shell_state.env_vars.remove(&name);

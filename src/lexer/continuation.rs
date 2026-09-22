@@ -987,7 +987,12 @@ pub(crate) fn has_unclosed_command_substitution(input: &str) -> bool {
         index += 1;
     }
 
-    depth > 0 || backtick || ansi_single
+    // parameter_depth covers both ${param...} (GNU reads past newlines in
+    // parse_matched_pair looking for the closing `}`) and the nofork
+    // command substitution `${ command; }` (parser.h:83 FUNSUB_CHAR,
+    // parse.y:5407 PST_FUNSUBST close) — comsub2.tests splits
+    // `echo ${ printf ...` + `}` across lines and must keep reading.
+    depth > 0 || backtick || ansi_single || parameter_depth > 0
 }
 
 fn skip_backtick_substitution(chars: &[char], mut index: usize) -> usize {

@@ -45,6 +45,10 @@ impl Executor {
         };
 
         let mut stderr = Vec::new();
+        // A sourced file is fresh parser input: GNU expands its aliases
+        // while reading it (bashhist.c reader -> parse.y), so the driver's
+        // streamed-batch marker lifts for the sourced execution.
+        let saved_alias_streamed = self.suspend_alias_streamed();
         let result = crate::builtins::source::execute_named_with_io_and_redirects(
             self,
             &expanded.words[0],
@@ -52,6 +56,7 @@ impl Executor {
             &mut stderr,
             cmd,
         );
+        self.resume_alias_streamed(saved_alias_streamed);
         let had_diagnostic = !stderr.is_empty();
         if had_diagnostic {
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;

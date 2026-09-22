@@ -58,10 +58,14 @@ impl Executor {
         };
         let command_uses_this_shell = command_name.contains("THIS_SH");
         let expanded_command_name = self.expand_word(command_name);
-        let expanded_is_this_shell = self.shell_state.env_vars.get("THIS_SH").is_some_and(|this_sh| {
-            shell_path_to_windows(this_sh, &self.shell_state.env_vars)
-                == shell_path_to_windows(&expanded_command_name, &self.shell_state.env_vars)
-        });
+        let expanded_is_this_shell =
+            self.shell_state
+                .env_vars
+                .get("THIS_SH")
+                .is_some_and(|this_sh| {
+                    shell_path_to_windows(this_sh, &self.shell_state.env_vars)
+                        == shell_path_to_windows(&expanded_command_name, &self.shell_state.env_vars)
+                });
         if !command_uses_this_shell && !expanded_is_this_shell {
             if let Some(script_path) =
                 direct_windows_shell_script_path(&expanded_command_name, &self.shell_state.env_vars)
@@ -87,7 +91,10 @@ impl Executor {
         // loses the unread portion of the parent's input stream.  Keep the
         // recursion guard for ordinary nested scripts, where no virtual
         // input needs to be transferred.
-        if self.shell_state.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_SCRIPT_NAME")
             && !self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
             && self.fd_table.input_snapshot(0).is_none()
             && !command_name.contains("THIS_SH")
@@ -133,7 +140,8 @@ impl Executor {
         // than one whole-file parse. Gate on the exec-model child only: a
         // fork-model script child inherits the parent's history list, which
         // the driver's fresh session would discard.
-        let uses_history_driver = crate::script_driver::script_uses_history(&source);
+        let uses_history_driver = crate::script_driver::script_uses_history(&source)
+            || crate::script_driver::script_uses_aliases(&source);
         let mut ast = if uses_history_driver {
             crate::parser::Ast {
                 commands: Vec::new(),
@@ -159,10 +167,16 @@ impl Executor {
 
         let saved_env = self.shell_state.env_vars.clone();
         let this_shell_invocation = cmd.words.first().is_some_and(|command| {
-            self.shell_state.env_vars.get("THIS_SH").is_some_and(|this_sh| {
-                shell_path_to_windows(this_sh, &self.shell_state.env_vars)
-                    == shell_path_to_windows(&self.expand_word(command), &self.shell_state.env_vars)
-            })
+            self.shell_state
+                .env_vars
+                .get("THIS_SH")
+                .is_some_and(|this_sh| {
+                    shell_path_to_windows(this_sh, &self.shell_state.env_vars)
+                        == shell_path_to_windows(
+                            &self.expand_word(command),
+                            &self.shell_state.env_vars,
+                        )
+                })
         });
         // Save parent state BEFORE the this_shell_invocation block clears it.
         let saved_shell_state = this_shell_invocation.then(|| self.shell_state.clone());
@@ -285,6 +299,16 @@ impl Executor {
         self.evalerror_pending.set(false);
         self.evalerror_line.set(None);
         self.parameter_assignment_failure.set(false);
+        // A parse error inside the child dies with it (GNU shell.c: the
+        // child exits 2 and the parent's reader is untouched). The flag
+        // lives on Executor outside shell_state, so save/reset/restore it
+        // here — a stale parent value would otherwise abort the child's
+        // first grouped command, and a child error would leak back into
+        // the parent's next parse check (heredoc3.sub -> heredoc10.sub).
+        let saved_parse_error = self.parse_error_occurred;
+        self.parse_error_occurred = false;
+        let saved_comsub_parse_error = self.last_command_substitution_parse_error.get();
+        self.last_command_substitution_parse_error.set(false);
         // GNU's this_command_name belongs to the executing command only;
         // the in-process ${THIS_SH} child is a fresh shell whose own
         // commands set their own command name, so the parent's word (the
@@ -293,12 +317,16 @@ impl Executor {
         let saved_assignment_command_name = self.assignment_command_name.take();
 
         if let (Some(input), _) = self.function_call_stdin(cmd)? {
-            self.shell_state.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
+                .insert(FUNCTION_STDIN.to_string(), input);
+            self.shell_state
+                .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
             self.shell_state.env_vars.remove(INHERIT_PROCESS_STDIN);
         } else {
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert(INHERIT_PROCESS_STDIN.to_string(), "1".to_string());
         }
         // Process-side job state, taken only after the last fallible call
@@ -328,7 +356,9 @@ impl Executor {
             // every new shell invocation. OPTIND is not exported, so
             // child_shell_environment doesn't carry it over; set it here
             // so getopts in the child starts fresh.
-            self.shell_state.env_vars.insert("OPTIND".to_string(), "1".to_string());
+            self.shell_state
+                .env_vars
+                .insert("OPTIND".to_string(), "1".to_string());
         }
         if !this_shell_invocation {
             self.shell_state.subshell_depth.set(saved_depth + 1);
@@ -401,6 +431,9 @@ impl Executor {
         self.shell_state.last_background_pid = saved_last_background_pid;
         self.shell_state.job_table = saved_job_table;
         self.background_children = saved_background_children;
+        self.parse_error_occurred = saved_parse_error;
+        self.last_command_substitution_parse_error
+            .set(saved_comsub_parse_error);
         self.shell_state.pipestatus = saved_pipestatus;
         self.set_positional_params(saved_positional_params);
         self.shell_state.functions = saved_functions;
@@ -494,7 +527,8 @@ impl Executor {
         let mut child = exported
             .iter()
             .filter_map(|name| {
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .get(name)
                     .map(|value| (name.clone(), value.clone()))
             })
@@ -524,7 +558,6 @@ impl Executor {
         child.insert(EXPORTED_VARS.to_string(), exported.join(DATA_DOLLAR_STR));
         child
     }
-
 }
 
 fn direct_windows_shell_script_path(
