@@ -314,7 +314,7 @@ impl Executor {
     /// is running). `command_text` is the text of the command about to run,
     /// exposed to the trap action through BASH_COMMAND like Bash does.
     pub(crate) fn run_debug_trap(&mut self, command_text: &str) -> Result<bool, ExecuteError> {
-        if self.debug_trap_running {
+        if self.debug_trap_running || self.host_internal_depth.get() > 0 {
             return Ok(false);
         }
         let Some(action) =
@@ -356,7 +356,7 @@ impl Executor {
     /// Runs the RETURN trap action when a function (or sourced script)
     /// returns. Mirrors Bash's `trap ... RETURN` hook used by debuggers.
     pub(crate) fn run_return_trap(&mut self) -> Result<(), ExecuteError> {
-        if self.return_trap_running {
+        if self.return_trap_running || self.host_internal_depth.get() > 0 {
             return Ok(());
         }
         let Some(action) =
@@ -409,7 +409,7 @@ impl Executor {
     /// substitution-internal commands do not fire, with functrace they do
     /// (dbg-support.tests caller echoes carry the debug lines).
     pub(crate) fn debug_trap_in_scope(&self) -> bool {
-        if self.source_debug_suppressed {
+        if self.source_debug_suppressed || self.host_internal_depth.get() > 0 {
             return false;
         }
         if self.shell_state.subshell_depth.get() > 0 {
@@ -438,6 +438,9 @@ impl Executor {
     /// so nothing fires (dbg-support.tests:96/97: no `return lineno` when
     /// functrace is off, but `return lineno: 98 main` at the top level).
     pub(crate) fn return_trap_in_scope(&self) -> bool {
+        if self.host_internal_depth.get() > 0 {
+            return false;
+        }
         if self.shell_state.function_depth == 0 {
             return true;
         }
@@ -599,6 +602,7 @@ impl Executor {
             || command.and_or().is_some()
             || self.suppress_errexit != 0
             || self.error_trap_running
+            || self.host_internal_depth.get() > 0
             || (self.shell_state.function_depth > 0
                 && !crate::builtins::set::shell_option_enabled(
                     &self.shell_state.env_vars,

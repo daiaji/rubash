@@ -488,6 +488,13 @@ pub struct Executor {
     /// RETURN-trap action's own DEBUG fire are suppressed together
     /// (dbg-support.tests:98 emits only `debug lineno: 98 main`).
     source_debug_suppressed: bool,
+    /// Depth of `with_traps_suspended` scopes currently active. GNU has no
+    /// notion of host housekeeping commands: when an embedding host runs
+    /// internal commands through execute_ast (startup/shutdown hooks,
+    /// rc cleanup, plugin probes), they are not script commands and must
+    /// not fire the user's DEBUG/RETURN/ERR traps — the script's own
+    /// commands already reached EOF (engine sinking list S2).
+    pub(crate) host_internal_depth: std::cell::Cell<usize>,
     debug_trap_function_line: Option<usize>,
     /// Expanded form of the offset/length expression from the last failed
     /// substring arithmetic evaluation. `report_substring_arithmetic_error`

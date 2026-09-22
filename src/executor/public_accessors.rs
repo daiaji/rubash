@@ -287,6 +287,25 @@ impl Executor {
         self.shell_state.session_history.clone()
     }
 
+    /// Run `body` with user trap delivery (DEBUG/RETURN/ERR) suspended.
+    ///
+    /// GNU has no notion of host housekeeping commands: when an embedding
+    /// host runs internal commands through `execute_ast` — startup or
+    /// shutdown hook probes, rc cleanup such as `unset HISTFILE`, plugin
+    /// existence checks — those commands must not fire the script's
+    /// traps. Without this boundary, commands a host issues after the
+    /// script reached EOF emit extra DEBUG/RETURN trap lines that GNU
+    /// Bash never produces (engine sinking list S2: the one-line
+    /// dbg-support/dbg-support2 product-layer diffs).
+    pub fn with_traps_suspended<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.host_internal_depth
+            .set(self.host_internal_depth.get() + 1);
+        let result = body(self);
+        self.host_internal_depth
+            .set(self.host_internal_depth.get().saturating_sub(1));
+        result
+    }
+
     pub(crate) fn push_bash_source(&mut self, source: String) {
         let source = if self
             .shell_state.env_vars

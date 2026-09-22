@@ -207,6 +207,7 @@ impl Executor {
             error_trap_running: false,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             source_debug_suppressed: false,
+            host_internal_depth: std::cell::Cell::new(0),
             debug_trap_function_line: None,
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),

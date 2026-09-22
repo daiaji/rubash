@@ -713,6 +713,7 @@ impl Executor {
             error_trap_running: false,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             source_debug_suppressed: false,
+            host_internal_depth: std::cell::Cell::new(self.host_internal_depth.get()),
             debug_trap_function_line: None,
             last_command_substitution_status: Cell::new(None),
             comsub_stdin_writeback: Cell::new(None),
