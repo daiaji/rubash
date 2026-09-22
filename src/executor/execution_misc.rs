@@ -783,6 +783,26 @@ pub(in crate::executor) fn restore_command_substitution_output(value: &str) -> S
         .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
 }
 
+/// The command-substitution dispatchers return transport text; a body that
+/// ran the real parser/executor path can still carry marker pairs and C0
+/// DATA_* sentinels. A consumer materializing final text (heredoc bodies,
+/// embedded expansion) must decode to visible text — subst.c
+/// command_substitute yields the command's raw stdout bytes — before
+/// re-protecting for its own downstream boundary, or the carriers leak
+/// into the output (e.g. `cat <<EOF` with `` `echo '\`'` ``).
+pub(in crate::executor) fn substitution_result_visible_text(value: &str) -> String {
+    // The dispatcher's output can nest the raw-byte marker pair inside
+    // literal-char escapes (E400+E000/E4xx), which the char-level decoder
+    // resolves to a live E000+payload pair again. Decode to visible text,
+    // then run the byte-level marker pass so the re-formed pair yields its
+    // payload byte (a C0 carrier byte), and finally restore that carrier to
+    // the literal character it marks (DATA_BACKTICK -> `, etc).
+    let visible = crate::locale::decode_to_visible_text(value);
+    let bytes =
+        crate::executor::substitution_metadata::decode_raw_byte_markers(visible.as_bytes());
+    restore_command_substitution_output(&String::from_utf8_lossy(&bytes))
+}
+
 pub(in crate::executor) fn decode_command_substitution_payload(value: &str) -> String {
     let mut output = String::new();
     let mut rest = value;
@@ -817,7 +837,12 @@ mod command_substitution_payload_tests {
     fn decodes_c0_payload_without_utf8_loss() {
         assert_eq!(
             decode_command_substitution_payload("a__RUBASH_CSB1_15;b"),
-            format!("{}{}{}", "a", crate::executor::markers::PROTECTED_BACKSLASH_STR, "b")
+            format!(
+                "{}{}{}",
+                "a",
+                crate::executor::markers::PROTECTED_BACKSLASH_STR,
+                "b"
+            )
         );
     }
 

@@ -562,9 +562,11 @@ impl Executor {
                     source.push(source_ch);
                 }
                 if closed {
-                    let expanded = self
-                        .expand_command_substitution_mut_typed_with_context(&source, context)
-                        .text_lossy();
+                    let expanded = substitution_result_visible_text(
+                        &self
+                            .expand_command_substitution_mut_typed_with_context(&source, context)
+                            .text_lossy(),
+                    );
                     let protected = protect_command_substitution_output(&expanded);
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         let value = mark_expansion_whitespace(&protected, preserve_quotes);
@@ -813,9 +815,10 @@ impl Executor {
                         self.shell_state.arithmetic_expansion_error.set(true);
                         continue;
                     }
-                    let value = protect_command_substitution_output(
-                        &self.expand_command_substitution_mut_with_context(&source, context),
-                    );
+                    let value =
+                        protect_command_substitution_output(&substitution_result_visible_text(
+                            &self.expand_command_substitution_mut_with_context(&source, context),
+                        ));
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                     } else {

@@ -878,12 +878,19 @@ pub(crate) fn has_unclosed_command_substitution(input: &str) -> bool {
             && !parameter_single
         {
             parameter_depth += 1;
+            // parse.y parse_matched_pair: inside `${...}` a `#` is parameter
+            // operator text (the length operator in `${#x}`), never a
+            // comment introducer — comment_start must clear here like every
+            // other consumed non-space character, or `${#x}` is swallowed
+            // to EOL and the `}` is never matched.
+            comment_start = false;
             index += 2;
             continue;
         }
         if ch == '}' && parameter_depth > 0 {
             parameter_depth = parameter_depth.saturating_sub(1);
             parameter_single = false;
+            comment_start = false;
             index += 1;
             continue;
         }

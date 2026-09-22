@@ -1953,3 +1953,76 @@ fn cmdsub_inline_filters_run_real_commands_for_unmodeled_flags() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
+
+#[test]
+fn command_substitution_literal_arithmetic_text_is_not_stubbed() {
+    // rubash#117: the removed contains("128")+contains('+')+contains('1')
+    // stub hijacked any body carrying those characters into a hardcoded
+    // "129". `$(echo 1280+1)` must reach the real parser and echo the
+    // literal text, while `$(echo $((128+1)))` computes through the real
+    // arithmetic path.
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("echo \"$(echo 1280+1)\" \"$(echo $((128+1)))\"")
+        .output()
+        .expect("run command-substitution stub probe");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1280+1 129\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn set_option_pipeline_in_substitution_uses_real_line_count() {
+    // rubash#117: the removed `set -o -B ... wc -l` stub hardcoded "4"; the
+    // body must run the real pipeline. GNU emits more than 3 `set -o`
+    // lines (builtins.tests sigone expectation).
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("n=$(set -o -B 2>&1 | wc -l); if [ \"$n\" -gt 3 ]; then echo ok; else echo \"bad:$n\"; fi")
+        .output()
+        .expect("run set-option pipeline probe");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn parameter_length_brace_is_not_an_unclosed_substitution() {
+    // The continuation scanner's `${` branch must not treat the `#` in
+    // `${#x}` as a comment introducer (parse.y parse_matched_pair: inside
+    // `${...}` `#` is the length operator). A swallowed `}` reported
+    // "unexpected EOF while looking for matching ')'" and killed the
+    // script.
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("x=abcd; echo ${#x}; y=${#x}z; echo $y")
+        .output()
+        .expect("run parameter-length brace probe");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "4\n4z\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn alias_injected_operator_body_routes_to_real_parser() {
+    // The whitelist must judge the alias-spliced body text: alias `p`
+    // expands to a pipeline, so the substitution must run the real
+    // parser/executor, not a word-level shortcut. The fixture also covers
+    // the heredoc embedded-expansion decode boundary (`x\"y` must not leak
+    // C0 carrier bytes).
+    let script = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/comsub_alias_injected_operator.sh"
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(script)
+        .output()
+        .expect("run alias-injected operator probe");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n[x\\\"y]\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}

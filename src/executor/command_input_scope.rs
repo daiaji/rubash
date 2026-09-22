@@ -289,9 +289,16 @@ impl Executor {
             return String::new();
         }
         let prepared = prepare_unquoted_heredoc_expansion(body);
-        decode_stdin_body_enq(&self.expand_embedded_parameters_mut_with_context(
+        let expanded = self.expand_embedded_parameters_mut_with_context(
             &prepared,
             SubstitutionQuoteContext::HereDocument,
+        );
+        // Same decode boundary as the &self expand_heredoc_body below: the
+        // mutable walker's substitution splices re-protect their output, so
+        // C0 carriers and payload escapes must restore here or they leak as
+        // raw bytes into the heredoc text.
+        decode_stdin_body_enq(&decode_command_substitution_payload(
+            &restore_command_substitution_output(&expanded),
         ))
     }
 

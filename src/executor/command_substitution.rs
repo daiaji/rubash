@@ -203,136 +203,38 @@ impl Executor {
         if let Some(output) = self.command_substitution_heredoc_output(source) {
             return output;
         }
-        if source.contains("128") && source.contains('+') && source.contains('1') {
-            return "129".to_string();
-        }
-        if source.starts_with("set -o -B") && source.contains("wc -l") {
-            // TODO(builtins/set.def/execute_cmd.c): Command substitution
-            // should execute the whole pipeline. The upstream builtins.tests
-            // only checks that this set option parse emits more than 3 lines.
-            return "4".to_string();
-        }
-
         if source == "type -p e" {
             return "./e".to_string();
         }
-        // POSIX Interp 221 (parse.y dolbrace): the pairing of a `${...}`
-        // body depends on each word's own quote state — a `'` inside a
-        // double-quoted `${...}` is literal data (the first `}` closes),
-        // while unquoted it opens a nested single quote. The word-based
-        // shortcuts below split the body with a generic quote scanner that
-        // strips quotes inside `${...}` bodies and loses the per-word quote
-        // state the pairing depends on (`echo ${IFS+'}'z}` arrives at the
-        // echo shortcut as the corrupted word `${IFS+}z}`; posixexp2.tests
-        // cases 11/12 differ exactly this way). Route substitution bodies
-        // whose raw text carries a quote inside a parameter expansion
-        // through the real parser, which lexes each word with the dolbrace
-        // state machine — the same route GNU subst.c always takes.
-        if source.contains("${") && source.contains('\'') {
+        // GNU applies alias expansion while reading the substitution body
+        // (parse.y alias_expand_token + push_string): expand the body text
+        // at stream level once here so the whitelist below judges the same
+        // words the real parser would see — an alias body can inject
+        // operators or quotes the raw source did not carry.
+        let word_source = strip_command_substitution_comments(source);
+        let word_source = self.comsub_body_alias_splice(&word_source);
+
+        // rubash#117 whitelist admission: GNU subst.c:7143
+        // command_substitute routes every body through parse_and_execute —
+        // there are no word-level shortcuts upstream. A shortcut here is
+        // only equivalent when the body is provably a single simple command
+        // of literal words (no quoting, no expansion, no operators), where
+        // parsing cannot change the outcome. Everything else falls through
+        // to the real parser/executor: a false positive only costs speed,
+        // while the blacklist guards this replaced kept producing silent
+        // semantic bugs for the next uncovered character class.
+        if !command_substitution_body_is_trivial(&word_source) {
             if let Some(output) = self.command_list_substitution_output(source, context) {
                 return output;
             }
             return String::new();
         }
 
-        // split_shell_words drops the quote delimiters themselves, so a body
-        // whose quotes must survive into the output reaches the word-based
-        // shortcuts corrupted: `$(echo '{"a":1}')` arrives at echo as the
-        // bare word `{a:1}` and `\"` inside double quotes degrades to a
-        // literal backslash. GNU subst.c always parses the body and lets the
-        // real lexer own quote state, so route bodies with semantically
-        // visible quotes through the real parser/executor too. Top-level
-        // quote delimiters only group words — stripping them matches bash —
-        // so those bodies keep the fast paths that the heredoc old-style
-        // backtick literal and the IFS `read` splitting depend on.
-        if command_substitution_quotes_are_semantic(source) {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
-                return output;
-            }
-            return String::new();
-        }
-        // GNU applies alias expansion while reading the substitution body
-        // (parse.y alias_expand_token + push_string): expand the body text
-        // at stream level once here so every downstream word shortcut sees
-        // the same expanded words; the real-parser path splices for itself.
-        let word_source = strip_command_substitution_comments(source);
-        let word_source = self.comsub_body_alias_splice(&word_source);
         let word_parts = split_shell_words_with_quote_info(&word_source);
         let words: Vec<String> = word_parts.iter().map(|(word, _)| word.clone()).collect();
 
-        // Bash parses compound command substitutions as a complete command
-        // list. Word-based shortcuts cannot preserve reserved-word boundaries
-        // such as `if x; then ...`, so route these forms through the real AST
-        // parser before dispatching a simple command shortcut.
-        if source.contains(">&2") || source.contains("2>") {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
-                return output;
-            }
-            return String::new();
-        }
-
-        if command_substitution_needs_command_list(source, &words) {
-            if command_substitution_has_unclosed_compound(source) {
-                self.last_command_substitution_parse_error.set(true);
-                self.last_command_substitution_status.set(Some(2));
-                return String::new();
-            }
-            if let Some(output) = self.command_list_substitution_output(source, context) {
-                return output;
-            }
-            return String::new();
-        }
-
-        if let Some((output, status)) = self.command_substitution_pipeline_output(&words) {
-            self.last_command_substitution_status.set(Some(status));
-            return output;
-        }
-
-        // GNU subst.c parses the whole substitution body into a command list
-        // before executing it. The single-command shortcuts below treat a
-        // pipeline/redirection operator as a literal argument (`$(echo | f a b)`
-        // echoes `| f a b`, issue #70), so anything still carrying operators
-        // must run through the real parser/executor instead. The `kill -l` and
-        // `trap -l` pipelines have their own operator-aware shortcuts further
-        // down and keep bypassing this route (builtins.tests sigone).
-        if command_substitution_words_have_operators(&words)
-            && !matches!(
-                (
-                    words.first().map(String::as_str),
-                    words.get(1).map(String::as_str),
-                    words.get(2).map(String::as_str),
-                ),
-                (Some("kill"), Some("-l"), Some("|")) | (Some("trap"), Some("-l"), Some("|"))
-            )
-        {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
-                return output;
-            }
-            return String::new();
-        }
-
         if let Some(output) = self.timed_command_substitution_output(&words) {
             return output;
-        }
-
-        if words
-            .iter()
-            .any(|word| matches!(word.as_str(), ";" | "&&" | "||" | "|"))
-        {
-            // subst.c command_substitute: the whole source is parsed and
-            // executed as a command list (`echo "" ; echo ""` is two echo
-            // commands, not one echo with `; echo ""` in its arguments).
-            // The single-command shortcuts below assume a lone command word,
-            // so route multi-command sources through the real executor.
-            // The bare `|` arm also catches pipelines the fast-path above
-            // bailed on (unsupported filter stage, non-external first
-            // stage): without it, `f a b | wc -l` reached the function and
-            // single-command shortcuts with `| wc -l` still in the
-            // argument list.
-            if let Some(output) = self.command_list_substitution_output(source, context) {
-                return output;
-            }
-            return String::new();
         }
 
         if words.first().map(String::as_str) == Some("echo") {
@@ -517,9 +419,6 @@ impl Executor {
         if words.first().map(String::as_str) == Some("kill")
             && words.get(1).map(String::as_str) == Some("-l")
         {
-            if words.get(2).map(String::as_str) == Some("|") {
-                return crate::builtins::kill::list_first_signal_for_sed().to_string();
-            }
             if let Some(word) = words.get(2) {
                 // The spec may reference variables set by a running trap
                 // action ($(kill -l $BASH_TRAPSIG) in trap9.sub), so expand
@@ -535,16 +434,7 @@ impl Executor {
             }
         }
 
-        if words.first().map(String::as_str) == Some("trap")
-            && words.get(1).map(String::as_str) == Some("-l")
-            && words.get(2).map(String::as_str) == Some("|")
-        {
-            return crate::builtins::trap::list_first_signal_for_sed().to_string();
-        }
-
-        if words.first().map(String::as_str) == Some("mktemp")
-            && !command_substitution_words_have_redirects(&words)
-        {
+        if words.first().map(String::as_str) == Some("mktemp") {
             if let Some(path) = self.mktemp_command_substitution(&words) {
                 return path;
             }
@@ -879,90 +769,27 @@ fn command_has_parse_error(command: &CommandNode) -> bool {
             .is_some_and(|pipeline| pipeline.stages.iter().any(command_has_parse_error))
 }
 
-fn command_substitution_words_have_redirects(words: &[String]) -> bool {
-    words.iter().any(|word| {
-        matches!(
-            word.as_str(),
-            "<" | ">" | ">>" | ">|" | "1>" | "1>>" | "1>|" | "2>" | "2>>" | "2>|"
-        )
-    })
+/// rubash#117 whitelist admission for the word-level command-substitution
+/// shortcuts. GNU subst.c:7143 command_substitute sends every body through
+/// parse_and_execute; a shortcut is only equivalent when the body is
+/// provably a single simple command of literal words — no quoting
+/// (`'` `"` `\` `` ` ``), no expansion (`$` `~` glob `[` `*` `?`), no
+/// operators or redirections (`;` `|` `&` `<` `>` `(` `)` `{` `}`), no
+/// comment/negation introducers (`#` `!`), and no control or non-ASCII
+/// bytes (which can carry in-band markers). Anything else must reach the
+/// real parser/executor.
+fn command_substitution_body_is_trivial(source: &str) -> bool {
+    let source = source.trim();
+    !source.is_empty()
+        && source.bytes().all(|byte| {
+            matches!(byte,
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
+                | b' ' | b'\t'
+                | b'_' | b'-' | b'+' | b'=' | b'.' | b',' | b'/' | b':' | b'@'
+                | b'%' | b'^')
+        })
 }
 
-/// True when the substitution body carries a quote character whose literal
-/// value must survive into the substitution output: a quote nested inside
-/// the other quote type (`echo "'a'"`, `echo 'say "hi"'`) or a backslash
-/// escape inside double quotes (`echo "a\"b"`). Top-level quote delimiters
-/// merely group words — the word-splitting shortcuts strip them with
-/// output identical to bash — and must keep the fast paths (the heredoc
-/// old-style backtick literal and the IFS `read` splitting regress if
-/// those bodies detour through the full executor).
-fn command_substitution_quotes_are_semantic(source: &str) -> bool {
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escaped = false;
-    for ch in source.chars() {
-        if escaped {
-            escaped = false;
-            if ch == '\'' || ch == '"' {
-                // `\'` / `\"` produce a literal quote character
-                return true;
-            }
-            continue;
-        }
-        match ch {
-            '\\' if !in_single => {
-                if in_double {
-                    // a backslash inside double quotes is escape-special
-                    // (`\"`, `\\`, `\$`) and must reach the real lexer
-                    return true;
-                }
-                escaped = true;
-            }
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '\'' | '"' => return true,
-            _ => {}
-        }
-    }
-    false
-}
-
-fn command_substitution_needs_command_list(source: &str, words: &[String]) -> bool {
-    let starts_compound = matches!(
-        words.first().map(String::as_str),
-        Some("if" | "for" | "case" | "while" | "until" | "{" | "(")
-    );
-    // A newline is a command separator in the body (GNU subst.c parses the
-    // whole body: old-style `echo ab\ncd` runs two commands, while the word
-    // shortcuts below treat the newline as plain whitespace).
-    starts_compound || source.contains(';') || source.contains('\n')
-}
-
-fn command_substitution_has_unclosed_compound(source: &str) -> bool {
-    let words = split_shell_words(source);
-    // split_shell_words keeps shell punctuation attached to its word, so a
-    // terminator followed by `;` (`done; echo x`, `fi; echo y`, `esac;;`)
-    // arrives as a single word like "done;". Strip the trailing separators
-    // before comparing, otherwise a closed compound is misread as unclosed
-    // and the whole substitution is rejected without reaching the real
-    // parser.
-    let bare: Vec<String> = words
-        .iter()
-        .map(|word| word.trim_end_matches(';').to_string())
-        .collect();
-    match bare.first().map(String::as_str) {
-        Some("if") => {
-            bare.iter().any(|word| word == "then") && !bare.iter().any(|word| word == "fi")
-        }
-        Some("for" | "while" | "until" | "select") => {
-            bare.iter().any(|word| word == "do") && !bare.iter().any(|word| word == "done")
-        }
-        Some("case") => {
-            bare.iter().any(|word| word == "in") && !bare.iter().any(|word| word == "esac")
-        }
-        _ => false,
-    }
-}
 fn strip_command_substitution_comments(source: &str) -> String {
     let mut output = String::with_capacity(source.len());
     let mut single = false;
@@ -1032,42 +859,5 @@ fn command_substitution_result_status(result: Result<(), ExecuteError>, exit_cod
         Err(ExecuteError::Return(status)) => status,
         Err(ExecuteError::ExitCode(status)) | Err(ExecuteError::ExpansionFailure(status)) => status,
         Err(_) => 1,
-    }
-}
-
-#[cfg(test)]
-mod unclosed_compound_tests {
-    use super::command_substitution_has_unclosed_compound;
-
-    #[test]
-    fn closed_loop_followed_by_semicolon_command_is_not_unclosed() {
-        // regression: `done; echo x` made the precheck report an unclosed
-        // compound ("done;" != "done") and reject the substitution without
-        // reaching the real parser
-        assert!(!command_substitution_has_unclosed_compound(
-            "for i in 1 2 3; do echo $i; done; echo x"
-        ));
-        assert!(!command_substitution_has_unclosed_compound(
-            "if true; then echo a; fi; echo ''"
-        ));
-        assert!(!command_substitution_has_unclosed_compound(
-            "while false; do :; done; echo ''"
-        ));
-        assert!(!command_substitution_has_unclosed_compound(
-            "case x in a) echo y;; esac; echo z"
-        ));
-    }
-
-    #[test]
-    fn genuinely_unclosed_compound_is_still_detected() {
-        assert!(command_substitution_has_unclosed_compound(
-            "for i in 1 2 3; do echo $i"
-        ));
-        assert!(command_substitution_has_unclosed_compound(
-            "if true; then echo a"
-        ));
-        assert!(command_substitution_has_unclosed_compound(
-            "case x in a) echo y;;"
-        ));
     }
 }

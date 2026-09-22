@@ -260,10 +260,11 @@ impl Executor {
                     source.push(source_ch);
                 }
                 if closed {
-                    let value =
-                        protect_command_substitution_output(&self.expand_command_substitution(
+                    let value = protect_command_substitution_output(
+                        &substitution_result_visible_text(&self.expand_command_substitution(
                             &decode_backtick_substitution_source(&source),
-                        ));
+                        )),
+                    );
                     if preserve_quotes && !in_double {
                         output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                     } else {
@@ -486,9 +487,10 @@ impl Executor {
                             _ => source.push(source_ch),
                         }
                     }
-                    let value = protect_command_substitution_output(
-                        &self.expand_command_substitution(&source),
-                    );
+                    let value =
+                        protect_command_substitution_output(&substitution_result_visible_text(
+                            &self.expand_command_substitution(&source),
+                        ));
                     if preserve_quotes && !in_double {
                         output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                     } else {
