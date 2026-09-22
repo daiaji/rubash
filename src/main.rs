@@ -697,9 +697,12 @@ fn run_command_string_with_init(
         .unwrap_or(0);
     let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
     // bash -c text goes through the same grouped driver when it enables
-    // aliases: `bash -c 'alias a=b\na'` must see the definition before the
-    // reader expands `a` (GNU reads command-by-command, parse.y:3249).
-    let status = if script_uses_aliases(command) {
+    // aliases or history: `bash -c 'alias a=b\na'` must see the definition
+    // before the reader expands `a` (GNU reads command-by-command,
+    // parse.y:3249), and `bash -c 'set -H\necho !!'` must expand history on
+    // the lines read after `set -H` runs (bashhist.c pre_process_line is
+    // applied per input line as the parser pulls it).
+    let status = if script_uses_history(command) || script_uses_aliases(command) {
         run_script_with_history(executor, command, None)
     } else {
         run_source_with_line_offset(executor, command, interactive, line_offset, None)

@@ -2129,3 +2129,35 @@ fn history_builtin_rejects_extra_and_malformed_arguments() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
+
+#[test]
+fn c_command_multiline_set_h_enables_history_expansion() {
+    // GNU shell.c run_one_command -> parse_and_execute reads a `-c`
+    // string line-by-line; bashhist.c pre_process_line applies history
+    // expansion to each line AS IT IS READ, so a `set -o history` +
+    // `set -H` on earlier lines takes effect for later lines. The whole
+    // first line is read before `set -H` runs, so a single-line
+    // `;`-joined command keeps `!!` literal.
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("set -o history\nset -H\necho alpha\necho !!")
+        .output()
+        .expect("run -c history expansion probe");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "alpha\necho alpha\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "echo echo alpha\n"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("set -o history; set -H; echo alpha; echo !!")
+        .output()
+        .expect("run -c single-line history probe");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "alpha\n!!\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
