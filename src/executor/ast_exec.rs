@@ -101,6 +101,28 @@ impl Executor {
         // else the jump keeps unwinding to the caller — an enclosing `( )`
         // command node (execute_subshell_command_with_redirects), pipeline
         // stage, command substitution, or the process top level.
+        // The region-close check at the loop bottom is unreachable from the
+        // ~20 early `continue` dispatch paths (background `&`, `time`,
+        // `!`, alias-introduced compounds, ...), so a `subshell_end` command
+        // executed through any of them left the saved parent state dropped
+        // unrestored — leaking jobs, variables, aliases and every other
+        // ShellState field into the parent (GNU: the forked child simply
+        // exits; nothing crosses the boundary). Run the same close before
+        // each early continue/return so the boundary is path-independent.
+        macro_rules! close_subshell_region_if_ended {
+            ($command:expr) => {
+                if $command.subshell_end {
+                    self.evalerror_pending.set(false);
+                    self.evalerror_line.set(None);
+                    if let Some(saved_state) = subshell_state.take() {
+                        self.restore_flat_subshell(saved_state, subshell_cwd.take());
+                        if let Some(saved) = subshell_fd_table.take() {
+                            self.fd_table = saved;
+                        }
+                    }
+                }
+            };
+        }
         macro_rules! handle_exit_code {
             ($code:expr, $command:expr) => {{
                 let code = $code;
@@ -328,28 +350,33 @@ impl Executor {
                 let command_text = crate::executor::command_text::bash_command_source_text(command);
                 if self.run_debug_trap(&command_text)? {
                     index += 1;
+                    close_subshell_region_if_ended!(command);
                     continue;
                 }
             }
 
             if let Some(next_index) = self.execute_time_prefixed_command_sequence(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_introduced_compound_source(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = crate::builtins::source::execute_simple_if(self, ast, index)?
             {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_simple_loop(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
@@ -357,66 +384,79 @@ impl Executor {
                 crate::builtins::source::execute_pipe_into_source(self, ast, index)?
             {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_escaped_pipe(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_introduced_inversion(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_introduced_time(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_introduced_function(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_introduced_brace_group(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_introduced_subshell(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_introduced_for(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_introduced_select(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_introduced_case(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_introduced_coproc(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_alias_heredoc(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) = self.execute_inverted_pipeline(ast, index)? {
                 index = next_index;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
@@ -461,6 +501,7 @@ impl Executor {
                 } else {
                     index += 1;
                 }
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
@@ -519,6 +560,7 @@ impl Executor {
                 } else {
                     index += 1;
                 }
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
@@ -559,6 +601,7 @@ impl Executor {
                     Err(error) => return Err(error),
                 }
                 index += 1;
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 
@@ -611,6 +654,7 @@ impl Executor {
                 } else {
                     index += 1;
                 }
+                close_subshell_region_if_ended!(command);
                 continue;
             }
 

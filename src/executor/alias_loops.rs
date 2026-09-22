@@ -113,6 +113,8 @@ impl Executor {
             executor.shell_state.loop_depth += 1;
             let result = executor.execute_ast(&body);
             executor.shell_state.loop_depth -= 1;
+            // GNU execute_cmd.c:3838 REAP() (execute_while_or_until).
+            executor.reap_dead_jobs_after_loop_body();
             match result {
                 Ok(()) => {
                     last_body_status = executor.exit_code;

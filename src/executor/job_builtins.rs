@@ -226,7 +226,7 @@ impl Executor {
                     // wait -n consumes the job (delete_job); the status stays
                     // in completed_statuses as the bgpids equivalent so a
                     // later operand-addressed `wait -n $pid` still reports it.
-                    self.job_table.remove_job_by_pid_preserve_status(pid);
+                    self.shell_state.job_table.remove_job_by_pid_preserve_status(pid);
                     self.forget_background_runtime(pid);
                     if let Some(wait_var) = &request.assign_var {
                         let arrayref = self.wait_var_arrayref();
@@ -238,7 +238,7 @@ impl Executor {
                 // Any candidate still running? GNU blocks in wait_for
                 // (ANY_PID) until a child exits; we poll the Child handles.
                 let alive = if candidates.is_empty() {
-                    self.job_table.jobs.values().any(|job| {
+                    self.shell_state.job_table.jobs.values().any(|job| {
                         job.background
                             && job
                                 .pids
@@ -261,9 +261,9 @@ impl Executor {
             }
         }
 
-        if cmd.words.len() == 1 && self.job_table.jobs.values().any(|job| job.background) {
+        if cmd.words.len() == 1 && self.shell_state.job_table.jobs.values().any(|job| job.background) {
             let pids = self
-                .job_table
+                .shell_state.job_table
                 .jobs
                 .values()
                 .filter(|job| job.background)
@@ -431,7 +431,7 @@ impl Executor {
     /// order (GNU jobs.c:3456 wait_for_any_job scans slots, not the operand
     /// list). An empty candidate list means "any background job".
     fn first_completed_wait_candidate(&self, candidates: &[u32]) -> Option<(u32, i32)> {
-        for job in self.job_table.jobs.values() {
+        for job in self.shell_state.job_table.jobs.values() {
             if !job.background {
                 continue;
             }
@@ -441,18 +441,37 @@ impl Executor {
             if !candidates.is_empty() && !candidates.contains(&pid) {
                 continue;
             }
-            if let Some(status) = self.job_table.completed_statuses.get(&pid) {
+            if let Some(status) = self.shell_state.job_table.completed_statuses.get(&pid) {
                 return Some((pid, *status));
             }
         }
         // Numeric operands may name a saved reaped pid whose job entry is
         // already gone (bgpids; wait.def check_nonjobs).
         for pid in candidates {
-            if let Some(status) = self.job_table.completed_statuses.get(pid) {
+            if let Some(status) = self.shell_state.job_table.completed_statuses.get(pid) {
                 return Some((*pid, *status));
             }
         }
         None
+    }
+
+    /// GNU execute_cmd.c:2975-2983 REAP(): after each loop body the shell
+    /// silently reaps dead jobs when it is non-interactive or job control is
+    /// off — `for/while/until/select/(( ;; ))` iterations call this.
+    pub(in crate::executor) fn reap_dead_jobs_after_loop_body(&mut self) {
+        let interactive = self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_INTERACTIVE");
+        let job_control = crate::builtins::set::shell_option_enabled(
+            &self.shell_state.env_vars,
+            "monitor",
+        );
+        if !interactive || !job_control {
+            self.shell_state
+                .job_table
+                .reap_dead_jobs(self.shell_state.last_background_pid);
+        }
     }
 
     pub(in crate::executor) fn refresh_background_jobs(&mut self) -> Result<(), ExecuteError> {
@@ -473,7 +492,7 @@ impl Executor {
         for (pid, status) in finished {
             self.background_children.remove(&pid);
             self.join_coproc_stderr_forwarder(pid)?;
-            self.job_table.mark_completed(pid, status);
+            self.shell_state.job_table.mark_completed(pid, status);
             self.run_sigchld_trap_for_reaped_child()?;
             if !protected_coprocs.contains(&pid) {
                 self.retire_completed_coproc(pid);
@@ -586,8 +605,6 @@ impl Executor {
 
     fn forget_background_runtime(&mut self, pid: u32) {
         self.background_children.remove(&pid);
-        self.shell_state.background_jobs.remove(&pid);
-        self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
         // Close the coproc endpoint fds for this pid before dropping the
         // pipe maps, mirroring retire_completed_coproc's fd cleanup so the
         // high fds 63/60 become reusable for the next coproc (coproc.tests
@@ -623,11 +640,11 @@ impl Executor {
         pid: u32,
         _retain_for_explicit_wait: bool,
     ) -> Result<Option<i32>, ExecuteError> {
-        if let Some(status) = self.job_table.completed_statuses.get(&pid).copied() {
+        if let Some(status) = self.shell_state.job_table.completed_statuses.get(&pid).copied() {
             self.join_coproc_stderr_forwarder(pid)?;
             // Waiting consumes the jobs-table entry, but the completed status
             // remains available for a later explicit wait of the same PID.
-            self.job_table.remove_job_by_pid_preserve_status(pid);
+            self.shell_state.job_table.remove_job_by_pid_preserve_status(pid);
             self.forget_background_runtime(pid);
             return Ok(Some(status));
         }
@@ -636,11 +653,11 @@ impl Executor {
         };
         let status = child.wait()?.code().unwrap_or(1);
         self.join_coproc_stderr_forwarder(pid)?;
-        self.job_table.mark_completed(pid, status);
+        self.shell_state.job_table.mark_completed(pid, status);
         self.run_sigchld_trap_for_reaped_child()?;
         // Remove the visible job after any wait, while retaining the exit
         // status for repeated explicit PID waits.
-        self.job_table.remove_job_by_pid_preserve_status(pid);
+        self.shell_state.job_table.remove_job_by_pid_preserve_status(pid);
         self.forget_background_runtime(pid);
         Ok(Some(status))
     }
@@ -652,14 +669,18 @@ impl Executor {
         stderr: &mut Vec<u8>,
     ) -> Result<(String, i32), ExecuteError> {
         let jobs = if requested_jobs.is_empty() {
+            // GNU builtins/jobs.def + jobs.c list_*_jobs: every listing form
+            // calls cleanup_dead_jobs first, so dead jobs already notified
+            // are gone before a line is printed.
+            self.shell_state.job_table.cleanup_dead_jobs();
             self.ordered_background_jobs()
         } else {
             let mut selected = Vec::new();
             let mut status = 0;
             for job in requested_jobs {
                 if let Some(pid) = self.resolve_background_job(job) {
-                    if let Some(job_id) = self.job_table.pid_to_job.get(&pid).copied() {
-                        if let Some(entry) = self.job_table.jobs.get(&job_id) {
+                    if let Some(job_id) = self.shell_state.job_table.pid_to_job.get(&pid).copied() {
+                        if let Some(entry) = self.shell_state.job_table.jobs.get(&job_id) {
                             selected.push((
                                 self.background_job_number(pid),
                                 pid,
@@ -676,13 +697,25 @@ impl Executor {
                     status = 1;
                 }
             }
-            return Ok((self.render_background_jobs(options, selected), status));
+            let output = self.render_background_jobs(options, selected);
+            // jobs.c:2231 list_one_job: explicit jobspec listing is followed
+            // by cleanup_dead_jobs — a listed dead job leaves the table.
+            self.shell_state.job_table.cleanup_dead_jobs();
+            return Ok((output, status));
         };
-        Ok((self.render_background_jobs(options, jobs), 0))
+        let output = self.render_background_jobs(options, jobs);
+        // jobs.def:137-141 JSTATE_ANY (plain `jobs`, `-l`, `-p`, `-n`): after
+        // the listing, notify_and_cleanup removes the terminated jobs just
+        // reported — the next `jobs`/`disown` must not see them. `-r`/`-s`
+        // (JSTATE_RUNNING/JSTATE_STOPPED) skip this second cleanup.
+        if !options.running_only && !options.stopped_only {
+            self.shell_state.job_table.cleanup_dead_jobs();
+        }
+        Ok((output, 0))
     }
 
     fn ordered_background_jobs(&self) -> Vec<(usize, u32, String)> {
-        self.job_table
+        self.shell_state.job_table
             .jobs
             .values()
             .filter(|job| job.background)
@@ -704,10 +737,10 @@ impl Executor {
         let mut output = String::new();
         for (job_number, pid, source) in jobs {
             let state_text_opt = self
-                .job_table
+                .shell_state.job_table
                 .pid_to_job
                 .get(&pid)
-                .and_then(|job_id| self.job_table.jobs.get(job_id))
+                .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
                 .map(|job| match job.state {
                     crate::jobs::ProcessState::Running => "Running".to_string(),
                     crate::jobs::ProcessState::Stopped => "Stopped".to_string(),
@@ -727,18 +760,37 @@ impl Executor {
                     continue;
                 }
             }
-            if options.changed_only && self.shell_state.last_notified_job_ids.contains(&job_number) {
+            let job_id = self.shell_state.job_table.pid_to_job.get(&pid).copied();
+            // GNU jobs.c J_NOTIFIED is a per-job flag, not a positional
+            // index — job numbers shift as earlier jobs are removed.
+            if options.changed_only
+                && job_id
+                    .and_then(|id| self.shell_state.job_table.jobs.get(&id))
+                    .is_some_and(|entry| entry.notified)
+            {
                 continue;
             }
             let state_text = state_text_opt.unwrap_or_else(|| "Unknown".to_string());
+
+            // GNU jobs.c:2118-2120 pretty_print_pipeline: the trailing ` &`
+            // is printed only while the job is RUNNING and not foreground —
+            // the stored command text never contains it.
+            let job_background = job_id
+                .and_then(|id| self.shell_state.job_table.jobs.get(&id))
+                .is_some_and(|entry| entry.background);
+            let async_suffix = if state_text == "Running" && job_background {
+                " &"
+            } else {
+                ""
+            };
 
             // GNU jobs.c:2207 pretty_print_job: the job flag column is `+`
             // for the current job, `-` for the previous job, and a space
             // otherwise; a second space follows for the standard format and
             // the state field pads to LONGEST_SIGNAL_DESC (27, jobs.h:43).
-            let marker = match self.job_table.pid_to_job.get(&pid) {
-                Some(job_id) if self.job_table.current_job() == Some(*job_id) => '+',
-                Some(job_id) if self.job_table.previous_job() == Some(*job_id) => '-',
+            let marker = match self.shell_state.job_table.pid_to_job.get(&pid) {
+                Some(job_id) if self.shell_state.job_table.current_job() == Some(*job_id) => '+',
+                Some(job_id) if self.shell_state.job_table.previous_job() == Some(*job_id) => '-',
                 _ => ' ',
             };
 
@@ -747,15 +799,20 @@ impl Executor {
 "));
             } else if options.long {
                 output.push_str(&format!(
-                    "[{job_number}]{marker}  {pid} {state_text:<27}{source} &
+                    "[{job_number}]{marker}  {pid} {state_text:<27}{source}{async_suffix}
 "
                 ));
             } else {
-                output.push_str(&format!("[{job_number}]{marker}  {state_text:<27}{source} &
+                output.push_str(&format!("[{job_number}]{marker}  {state_text:<27}{source}{async_suffix}
 "));
             }
-            if options.changed_only {
-                self.shell_state.last_notified_job_ids.insert(job_number);
+            // jobs.c:2219 pretty_print_job — printing a job's status IS
+            // the notification, for every listing mode (plain `jobs`,
+            // `-l`, `-n`); the flag is cleared on the next state change.
+            if let Some(entry) =
+                job_id.and_then(|id| self.shell_state.job_table.jobs.get_mut(&id))
+            {
+                entry.notified = true;
             }
         }
         output
@@ -775,20 +832,18 @@ impl Executor {
             crate::builtins::disown::DisownAction::Complete(status) => status,
             crate::builtins::disown::DisownAction::All => {
                 let pids: Vec<u32> = self
-                    .shell_state.background_jobs
-                    .keys()
-                    .copied()
+                    .shell_state.job_table
+                    .jobs
+                    .values()
+                    .flat_map(|job| job.pids.iter().copied())
                     .chain(self.background_children.keys().copied())
                     .collect();
                 self.background_children.clear();
-                self.shell_state.background_jobs.clear();
-                self.shell_state.background_job_order.clear();
                 for pid in pids {
                     self.close_coproc_endpoints(pid);
                     self.fd_table.close(pid);
-                    self.job_table.remove_job_by_pid(pid);
                 }
-                self.job_table.clear_jobs();
+                self.shell_state.job_table.clear_jobs();
                 0
             }
             crate::builtins::disown::DisownAction::Current => {
@@ -808,11 +863,9 @@ impl Executor {
                 for job in jobs {
                     if let Some(pid) = self.resolve_background_job(&job) {
                         self.background_children.remove(&pid);
-                        self.shell_state.background_jobs.remove(&pid);
-                        self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
                         self.close_coproc_endpoints(pid);
                         self.fd_table.close(pid);
-                        self.job_table.remove_job_by_pid(pid);
+                        self.shell_state.job_table.remove_job_by_pid(pid);
                     } else {
                         writeln!(
                             stderr,
@@ -833,37 +886,36 @@ impl Executor {
         let Some(pid) = self.shell_state.last_background_pid else {
             return false;
         };
-        if !self.background_children.contains_key(&pid) && !self.shell_state.background_jobs.contains_key(&pid)
+        if !self.background_children.contains_key(&pid)
+            && !self.shell_state.job_table.pid_to_job.contains_key(&pid)
         {
             return false;
         }
 
         self.background_children.remove(&pid);
-        self.shell_state.background_jobs.remove(&pid);
-        self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
         self.close_coproc_endpoints(pid);
         self.fd_table.close(pid);
-        self.job_table.remove_job_by_pid(pid);
+        self.shell_state.job_table.remove_job_by_pid(pid);
         true
     }
 
     pub(in crate::executor) fn resolve_background_job(&self, job: &str) -> Option<u32> {
         if job.starts_with('%') {
-            let job_id = self.job_table.resolve_jobspec(job)?;
-            return self.job_table.jobs.get(&job_id)?.pids.last().copied();
+            let job_id = self.shell_state.job_table.resolve_jobspec(job)?;
+            return self.shell_state.job_table.jobs.get(&job_id)?.pids.last().copied();
         }
         let pid = job.parse::<u32>().ok()?;
-        (self.job_table.pid_to_job.contains_key(&pid)
-            || self.job_table.completed_statuses.contains_key(&pid))
+        (self.shell_state.job_table.pid_to_job.contains_key(&pid)
+            || self.shell_state.job_table.completed_statuses.contains_key(&pid))
         .then_some(pid)
     }
 
     fn background_job_number(&self, pid: u32) -> usize {
-        self.job_table
+        self.shell_state.job_table
             .pid_to_job
             .get(&pid)
             .and_then(|job_id| {
-                self.job_table
+                self.shell_state.job_table
                     .jobs
                     .keys()
                     .position(|candidate| candidate == job_id)
@@ -942,8 +994,8 @@ impl Executor {
         // GNU fg_bg.def:154-160 — a job started without job control
         // (J_JOBCONTROL unset, e.g. spawned before `set -m`) cannot be
         // foregrounded; refuse instead of waiting on it.
-        if !self.job_table.job_control_for_pid(pid) {
-            let job_id = self.job_table.job_id_for_pid(pid).unwrap_or(0);
+        if !self.shell_state.job_table.job_control_for_pid(pid) {
+            let job_id = self.shell_state.job_table.job_id_for_pid(pid).unwrap_or(0);
             writeln!(
                 stderr,
                 "{}fg: job {} started without job control",
@@ -954,22 +1006,18 @@ impl Executor {
         }
 
         let Some(mut child) = self.background_children.remove(&pid) else {
-            self.shell_state.background_jobs.remove(&pid);
-            self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
             self.close_coproc_endpoints(pid);
             self.fd_table.close(pid);
             self.write_job_not_found("fg", job, stderr)?;
             return Ok(1);
         };
-        self.shell_state.background_jobs.remove(&pid);
-        self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
         self.close_coproc_endpoints(pid);
         self.fd_table.close(pid);
         let status = child.wait()?.code().unwrap_or(1);
-        self.job_table.mark_completed(pid, status);
+        self.shell_state.job_table.mark_completed(pid, status);
         self.run_sigchld_trap_for_reaped_child()?;
-        let status = self.job_table.wait_pid(pid).unwrap_or(status);
-        self.job_table.remove_job_by_pid(pid);
+        let status = self.shell_state.job_table.wait_pid(pid).unwrap_or(status);
+        self.shell_state.job_table.remove_job_by_pid(pid);
         Ok(status)
     }
 
@@ -989,8 +1037,8 @@ impl Executor {
         let mut status = 0;
         for job in requested {
             if let Some(pid) = self.resolve_requested_background_job(job) {
-                if !self.job_table.job_control_for_pid(pid) {
-                    let job_id = self.job_table.job_id_for_pid(pid).unwrap_or(0);
+                if !self.shell_state.job_table.job_control_for_pid(pid) {
+                    let job_id = self.shell_state.job_table.job_id_for_pid(pid).unwrap_or(0);
                     writeln!(
                         stderr,
                         "{}bg: job {} started without job control",
@@ -1000,9 +1048,9 @@ impl Executor {
                     status = 1;
                     continue;
                 }
-                self.job_table.mark_running(pid);
-                if let Some(job_id) = self.job_table.pid_to_job.get(&pid).copied() {
-                    if let Some(entry) = self.job_table.jobs.get_mut(&job_id) {
+                self.shell_state.job_table.mark_running(pid);
+                if let Some(job_id) = self.shell_state.job_table.pid_to_job.get(&pid).copied() {
+                    if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
                         entry.background = true;
                         entry.foreground = false;
                     }
@@ -1023,8 +1071,8 @@ impl Executor {
     }
 
     fn current_background_pid(&self) -> Option<u32> {
-        let job_id = self.job_table.current_job()?;
-        self.job_table.jobs.get(&job_id)?.pids.last().copied()
+        let job_id = self.shell_state.job_table.current_job()?;
+        self.shell_state.job_table.jobs.get(&job_id)?.pids.last().copied()
     }
 
     fn write_job_not_found(
@@ -1599,7 +1647,7 @@ impl Executor {
         }
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         let job_names: Vec<String> = self
-            .job_table
+            .shell_state.job_table
             .jobs
             .values()
             .filter(|job| job.background)

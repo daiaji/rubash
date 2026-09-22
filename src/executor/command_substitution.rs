@@ -747,7 +747,6 @@ impl Executor {
         Executor {
             shell_state,
             fd_table: self.fd_table.clone(),
-            job_table: self.job_table.clone(),
             exit_code: self.exit_code,
             parse_error_occurred: false,
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout

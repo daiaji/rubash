@@ -460,17 +460,15 @@ impl Executor {
         let child = spawn_result?;
         let pid = child.id();
         self.background_children.insert(pid, child);
-        self.job_table
+        self.shell_state.job_table
             .register_process(pid, display_source.clone(), true);
-        self.job_table.set_job_control(
+        self.shell_state.job_table.set_job_control(
             pid,
             crate::builtins::set::shell_option_enabled(
                 &self.shell_state.env_vars,
                 "monitor",
             ),
         );
-        self.shell_state.background_jobs.insert(pid, display_source);
-        self.shell_state.background_job_order.push(pid);
         self.shell_state.last_background_pid = Some(pid);
         self.exit_code = 0;
         Ok(())
@@ -895,6 +893,9 @@ impl Executor {
                 }
             }
 
+            // GNU execute_cmd.c:3267 REAP() runs once per arith-for
+            // iteration, after the test succeeds and before the body.
+            self.reap_dead_jobs_after_loop_body();
             ran_body = true;
             self.shell_state.loop_depth += 1;
             let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_BODY);
@@ -1476,18 +1477,18 @@ impl Executor {
                     }
                     self.background_children.insert(pid, crate::fd::SpawnedChild::from(child_proc));
                     let job_id =
-                        self.job_table
+                        self.shell_state.job_table
                             .register_process(pid, bash_command_source_text(cmd), true);
-                    self.job_table.set_job_control(
+                    self.shell_state.job_table.set_job_control(
                         pid,
                         crate::builtins::set::shell_option_enabled(
                             &self.shell_state.env_vars,
                             "monitor",
                         ),
                     );
-                    self.shell_state.background_jobs
-                        .insert(pid, bash_command_source_text(cmd));
-                    self.shell_state.background_job_order.push(pid);
+                    // GNU coproc.c: the coproc is an async child, so $!
+                    // (last_made_pid) tracks it like any `&` spawn.
+                    self.shell_state.last_background_pid = Some(pid);
                     // GNU sh_openpipe moves the pipe ends to the highest free
                     // fds below 64 (move_to_high_fd with maxfd 64): rpipe
                     // 63/62 and wpipe 61/60, of which the parent keeps 63 and
@@ -1522,7 +1523,7 @@ impl Executor {
                         },
                         true,
                     );
-                    self.job_table.attach_coproc_endpoint(job_id, pid);
+                    self.shell_state.job_table.attach_coproc_endpoint(job_id, pid);
                     // Store the file descriptors in env for COPROC array
                     let stdin_key = format!("__RUBASH_COPROC_STDIN_{}", pid);
                     let stdout_key = format!("__RUBASH_COPROC_STDOUT_{}", pid);

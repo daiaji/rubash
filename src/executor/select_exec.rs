@@ -152,7 +152,10 @@ impl Executor {
             }
             set_process_env(&select_command.variable, selected);
 
-            match self.execute_select_body(&select_command.body)? {
+            let body_flow = self.execute_select_body(&select_command.body)?;
+            // GNU execute_cmd.c:3606 REAP() (execute_select_command).
+            self.reap_dead_jobs_after_loop_body();
+            match body_flow {
                 SelectBodyFlow::ContinueLoop => continue,
                 SelectBodyFlow::BreakLoop => break,
             }

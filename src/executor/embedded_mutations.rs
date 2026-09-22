@@ -1425,17 +1425,20 @@ impl Executor {
             return None;
         }
 
-        let saved_env = self.shell_state.env_vars.clone();
-        let saved_pipestatus = self.shell_state.pipestatus.clone();
-        let saved_functions = self.shell_state.functions.clone();
-        let saved_function_redirects = self.shell_state.function_definition_redirects.clone();
-        let saved_function_def_infos = self.shell_state.function_def_infos.clone();
-        let saved_aliases = self.shell_state.aliases.clone();
+        // subst.c:7143 command_substitute / execute_cmd.c:1576
+        // execute_in_subshell: the body runs in a forked child, so NO shell
+        // state — variables, functions, aliases, positional params, the job
+        // registry (`$( sleep 5 & )` jobs stay invisible to the parent),
+        // coproc names, scopes, RNG, or expansion-error latches — may leak
+        // back. The typed ShellState clone is the whole boundary; process
+        // resources (cwd, OS env, exit code, captures) are handled
+        // separately below.
+        let saved_state = self.shell_state.clone();
         let saved_exit_code = self.exit_code;
-        let saved_positional_params = self.shell_state.positional_params.clone();
         let saved_dir = env::current_dir().ok();
-        let saved_depth = self.shell_state.subshell_depth.get();
-        self.shell_state.subshell_depth.set(saved_depth + 1);
+        self.shell_state
+            .subshell_depth
+            .set(saved_state.subshell_depth.get() + 1);
 
         let saved_capture = self.stdout_capture.take();
         self.stdout_capture = Some(Vec::new());
@@ -1472,17 +1475,7 @@ impl Executor {
             Err(_) => 1,
         };
 
-        self.restore_shell_env(saved_env);
-        self.shell_state.pipestatus = saved_pipestatus;
-        self.shell_state.functions = saved_functions;
-        self.shell_state.function_definition_redirects = saved_function_redirects;
-        self.shell_state.function_def_infos = saved_function_def_infos;
-        self.shell_state.aliases = saved_aliases;
-        if let Some(saved_dir) = saved_dir {
-            let _ = env::set_current_dir(saved_dir);
-        }
-        self.shell_state.subshell_depth.set(saved_depth);
-        self.set_positional_params(saved_positional_params);
+        self.restore_flat_subshell(saved_state, saved_dir);
         self.exit_code = saved_exit_code;
         self.last_command_substitution_status.set(Some(status));
 
@@ -1512,8 +1505,11 @@ impl Executor {
         let mut call = CommandNode::new();
         call.words = words.to_vec();
 
-        let saved_env = self.shell_state.env_vars.clone();
-        let saved_pipestatus = self.shell_state.pipestatus.clone();
+        // `$(f)` runs the function inside the substitution's subshell — a
+        // forked child in GNU — so variable/scope/job mutations of the call
+        // die with the substitution. Whole-state clone, not a field list.
+        let saved_state = self.shell_state.clone();
+        let saved_dir = env::current_dir().ok();
         let saved_exit_code = self.exit_code;
         let saved_capture = self.stdout_capture.take();
         self.stdout_capture = Some(Vec::new());
@@ -1534,8 +1530,7 @@ impl Executor {
             }
             Err(_) => 1,
         };
-        self.shell_state.env_vars = saved_env;
-        self.shell_state.pipestatus = saved_pipestatus;
+        self.restore_flat_subshell(saved_state, saved_dir);
         self.exit_code = saved_exit_code;
         self.last_command_substitution_status.set(Some(status));
 

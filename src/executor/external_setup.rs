@@ -854,7 +854,7 @@ impl Executor {
         self.shell_state.env_vars
             .insert(PROCSUB_SEQ_KEY.to_string(), seq.wrapping_add(1).to_string());
         let pid = self.shell_pid.wrapping_add(0x4000_0000).wrapping_add(seq);
-        self.job_table.completed_statuses.insert(pid, status);
+        self.shell_state.job_table.completed_statuses.insert(pid, status);
         self.shell_state.last_background_pid = Some(pid);
     }
 

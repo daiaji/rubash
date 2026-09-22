@@ -176,7 +176,6 @@ mod redirection;
 mod select_exec;
 mod support_names;
 
-use crate::jobs::JobTable;
 use crate::shell::state::ShellState;
 use alias_helpers::*;
 use assignment_helpers::*;
@@ -457,7 +456,6 @@ pub struct Executor {
     /// per-command/expansion transients that must never be cloned.
     pub(crate) shell_state: ShellState,
     fd_table: FdTable,
-    job_table: JobTable,
     exit_code: i32,
     parse_error_occurred: bool,
     /// GNU exit.def:52 (sourced_logout): ~/.bash_logout runs at most once

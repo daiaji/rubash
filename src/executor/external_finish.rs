@@ -162,11 +162,8 @@ impl Executor {
         // regardless of mode. Without this, jobs started inside
         // `${THIS_SH} script` children leak into the parent table and later
         // `wait %N`/`jobs` block on or report them (jobs.tests hang).
-        let saved_background_jobs = self.shell_state.background_jobs.clone();
-        let saved_background_job_order = self.shell_state.background_job_order.clone();
         let saved_coproc_names = self.shell_state.coproc_names.clone();
         let saved_last_background_pid = self.shell_state.last_background_pid;
-        let saved_last_notified_job_ids = self.shell_state.last_notified_job_ids.clone();
         let saved_functions = self.shell_state.functions.clone();
         let saved_function_redirects = self.shell_state.function_definition_redirects.clone();
         let saved_function_def_infos = self.shell_state.function_def_infos.clone();
@@ -214,11 +211,10 @@ impl Executor {
             self.shell_state.function_definition_redirects = HashMap::new();
             self.shell_state.function_def_infos = imported_def_infos;
             self.shell_state.aliases = HashMap::new();
-            // Exec-model child (fresh process): empty job table.
-            self.shell_state.background_jobs.clear();
-            self.shell_state.background_job_order.clear();
+            // Exec-model child (fresh process): empty job table — the
+            // registry itself is emptied by the mem::take below; here only
+            // the non-registry bookkeeping is reset.
             self.shell_state.coproc_names.clear();
-            self.shell_state.last_notified_job_ids.clear();
             self.shell_state.last_background_pid = None;
             // A fresh shell invocation entering a script derives
             // SIG_HARD_IGNORE from the inherited dispositions (trap.c
@@ -302,9 +298,9 @@ impl Executor {
         // wait only covers its own children), and the child's own spawned
         // processes are orphaned on restore like real grandchildren.
         let saved_job_table = if this_shell_invocation {
-            std::mem::take(&mut self.job_table)
+            std::mem::take(&mut self.shell_state.job_table)
         } else {
-            self.job_table.clone()
+            self.shell_state.job_table.clone()
         };
         let saved_background_children = std::mem::take(&mut self.background_children);
         self.set_env("__RUBASH_SCRIPT_NAME", script);
@@ -375,12 +371,9 @@ impl Executor {
         if let Some(saved_shell_state) = saved_shell_state {
             self.shell_state = saved_shell_state;
         }
-        self.shell_state.background_jobs = saved_background_jobs;
-        self.shell_state.background_job_order = saved_background_job_order;
         self.shell_state.coproc_names = saved_coproc_names;
         self.shell_state.last_background_pid = saved_last_background_pid;
-        self.shell_state.last_notified_job_ids = saved_last_notified_job_ids;
-        self.job_table = saved_job_table;
+        self.shell_state.job_table = saved_job_table;
         self.background_children = saved_background_children;
         self.shell_state.pipestatus = saved_pipestatus;
         self.set_positional_params(saved_positional_params);

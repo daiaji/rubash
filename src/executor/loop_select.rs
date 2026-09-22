@@ -156,6 +156,10 @@ impl Executor {
             self.shell_state.loop_depth += 1;
             let result = self.execute_ast(&body);
             self.shell_state.loop_depth -= 1;
+            // GNU execute_cmd.c:3105 REAP(): dead background jobs are
+            // silently reaped after every `for` body in a non-interactive
+            // or non-job-control shell.
+            self.reap_dead_jobs_after_loop_body();
             match result {
                 Ok(()) => {}
                 Err(ExecuteError::Break(level)) if level <= 1 => {

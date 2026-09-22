@@ -33,7 +33,7 @@ impl Executor {
                 || operand
                     .parse::<u32>()
                     .ok()
-                    .is_some_and(|pid| self.job_table.pid_to_job.contains_key(&pid))
+                    .is_some_and(|pid| self.shell_state.job_table.pid_to_job.contains_key(&pid))
         });
         if !should_handle {
             let mut stderr = Vec::new();
@@ -93,16 +93,14 @@ impl Executor {
                 continue;
             }
             if request.signal == 18 {
-                self.job_table.mark_running(pid);
+                self.shell_state.job_table.mark_running(pid);
             } else if matches!(request.signal, 19 | 20) {
-                self.job_table.mark_stopped(pid);
+                self.shell_state.job_table.mark_stopped(pid);
             } else if operand.starts_with('%') {
-                self.job_table.mark_completed(pid, 128 + request.signal);
-                self.shell_state.background_jobs.remove(&pid);
-                self.shell_state.background_job_order.retain(|job_pid| *job_pid != pid);
+                self.shell_state.job_table.mark_completed(pid, 128 + request.signal);
                 self.close_coproc_endpoints(pid);
                 self.fd_table.close(pid);
-                self.job_table.remove_job_by_pid(pid);
+                self.shell_state.job_table.remove_job_by_pid(pid);
             }
             continue;
         }

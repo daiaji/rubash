@@ -14,7 +14,7 @@
 //! that motivated this structure came from exactly such a list).
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::builtins::alias::Alias;
@@ -75,14 +75,16 @@ pub struct ShellState {
     pub(crate) random_state: RandomGen,
     /// execute_cmd.c subshell_level.
     pub(crate) subshell_depth: Cell<usize>,
-    /// jobs.c bookkeeping — descriptions only; process handles are
-    /// Executor resources and never cloned.
+    /// jobs.c bookkeeping — the job registry (jobs.c `jobs` array /
+    /// `job_table`): bash-observable job identity, pipeline pids, states,
+    /// and notification bits. Process handles are Executor resources and
+    /// never cloned. GNU jobs.c last_made_pid ($!).
+    pub(crate) job_table: crate::jobs::table::JobTable,
     pub(crate) last_background_pid: Option<u32>,
-    pub(crate) background_jobs: HashMap<u32, String>,
-    pub(crate) background_job_order: Vec<u32>,
+    /// pids of coproc processes → bound array variable name (coproc.c
+    /// coproc_setvars keeps c_name so coproc_unsetvars can unbind even on
+    /// bind failure).
     pub(crate) coproc_names: HashMap<u32, String>,
-    /// jobs.c job-notification dedup set.
-    pub(crate) last_notified_job_ids: HashSet<usize>,
     /// pcomplete.c completion spec registry.
     pub(crate) completion_specs: CompletionRegistry,
     /// bashhist.c per-session history list. Cloned deeply (not the Rc) so a
@@ -202,11 +204,9 @@ impl Clone for ShellState {
             dollar_vars_changed_by_set: self.dollar_vars_changed_by_set,
             random_state: self.random_state.clone_state(),
             subshell_depth: Cell::new(self.subshell_depth.get()),
+            job_table: self.job_table.clone(),
             last_background_pid: self.last_background_pid,
-            background_jobs: self.background_jobs.clone(),
-            background_job_order: self.background_job_order.clone(),
             coproc_names: self.coproc_names.clone(),
-            last_notified_job_ids: self.last_notified_job_ids.clone(),
             completion_specs: self.completion_specs.clone(),
             session_history: self
                 .session_history

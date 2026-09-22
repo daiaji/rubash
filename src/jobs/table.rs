@@ -156,6 +156,9 @@ impl JobTable {
             process.state = ProcessState::Completed;
             process.exit_status = Some(status);
         }
+        // jobs.c:2219 contract — waitchld clears J_NOTIFIED on a state
+        // change so the next `jobs -n` reports this job again.
+        job.notified = false;
         self.recompute_job(job_id);
     }
 
@@ -188,6 +191,7 @@ impl JobTable {
             if let Some(process) = job.processes.get_mut(&pid) {
                 process.state = ProcessState::Stopped;
             }
+            job.notified = false;
         }
         self.recompute_job(job_id);
     }
@@ -230,6 +234,71 @@ impl JobTable {
             .last()
             .and_then(|pid| job.processes.get(pid))
             .and_then(|process| process.exit_status);
+    }
+
+    /// jobs.c:1303 cleanup_dead_jobs — delete dead jobs the user was
+    /// already notified about (POSIX: a terminated job leaves the list once
+    /// `jobs` reports it). Completed statuses stay in `completed_statuses`
+    /// (the bgpids equivalent) so a later operand-addressed `wait $pid`
+    /// still reports the exit status.
+    pub fn cleanup_dead_jobs(&mut self) {
+        let dead_notified: Vec<JobId> = self
+            .jobs
+            .iter()
+            .filter(|(_, job)| job.state == ProcessState::Completed && job.notified)
+            .map(|(job_id, _)| *job_id)
+            .collect();
+        for job_id in dead_notified {
+            if let Some(job) = self.jobs.remove(&job_id) {
+                for pid in &job.pids {
+                    self.pid_to_job.remove(pid);
+                }
+            }
+            if self.current_job == Some(job_id) {
+                self.current_job = self.previous_job;
+            }
+            if self.previous_job == Some(job_id) {
+                self.previous_job = None;
+            }
+        }
+    }
+
+    /// jobs.c:3652 reap_dead_jobs — non-interactive shells (and shells
+    /// without job control) remove dead jobs without printing:
+    /// mark_dead_jobs_as_notified + cleanup_dead_jobs. GNU calls this via
+    /// the REAP() macro after every loop body (execute_cmd.c:2979,
+    /// for/select/while/until/arith-for) and from compact_jobs_list.
+    ///
+    /// jobs.c:5179-5230 mark_dead_jobs_as_notified keeps CHILD_MAX
+    /// (DEFAULT_CHILD_MAX 4096, jobs.c:92) dead processes unnotified so
+    /// `wait` can still report their statuses, and never marks the job
+    /// holding last_asynchronous_pid ($!) — so REAP is a no-op for any
+    /// realistic script unless a listing already reported the job.
+    pub fn reap_dead_jobs(&mut self, last_asynchronous_pid: Option<u32>) {
+        const CHILD_MAX: usize = 4096;
+        let dead_processes: usize = self
+            .jobs
+            .values()
+            .filter(|job| job.state == ProcessState::Completed)
+            .map(|job| job.pids.len())
+            .sum();
+        if dead_processes > CHILD_MAX {
+            let mut keep = dead_processes;
+            for job in self.jobs.values_mut() {
+                if job.state != ProcessState::Completed {
+                    continue;
+                }
+                if keep <= CHILD_MAX {
+                    break;
+                }
+                if job.pids.last().copied() == last_asynchronous_pid {
+                    continue;
+                }
+                job.notified = true;
+                keep = keep.saturating_sub(job.pids.len());
+            }
+        }
+        self.cleanup_dead_jobs();
     }
 
     pub fn reap_finished<I>(&mut self, statuses: I)

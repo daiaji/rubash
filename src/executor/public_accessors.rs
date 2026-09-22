@@ -61,7 +61,7 @@ impl Executor {
     pub fn complete_line(&self, line: &str, cursor: usize) -> Vec<String> {
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         let job_names: Vec<String> = self
-            .job_table
+            .shell_state.job_table
             .jobs
             .values()
             .filter(|job| job.background)
