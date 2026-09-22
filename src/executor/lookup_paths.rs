@@ -3,7 +3,8 @@ use super::*;
 impl Executor {
     pub(in crate::executor) fn command_path(&self, name: &str, force_path: bool) -> Option<String> {
         if !force_path {
-            if let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name) {
+            if let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
+            {
                 return Some(path);
             }
         }
@@ -18,14 +19,16 @@ impl Executor {
         }
         if name == "e"
             && self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("PATH")
                 .map(String::as_str)
                 .unwrap_or_default()
                 .is_empty()
         {
             if let Some(pwd) = self.shell_state.env_vars.get("PWD") {
-                let candidate = shell_path_to_windows(&format!("{pwd}/e"), &self.shell_state.env_vars);
+                let candidate =
+                    shell_path_to_windows(&format!("{pwd}/e"), &self.shell_state.env_vars);
                 if candidate.is_file() {
                     return Some("./e".to_string());
                 }
@@ -36,7 +39,8 @@ impl Executor {
     }
 
     pub(in crate::executor) fn is_enabled_shell_builtin_name(&self, name: &str) -> bool {
-        is_shell_builtin_name(name) && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, name)
+        is_shell_builtin_name(name)
+            && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, name)
     }
 
     pub(in crate::executor) fn command_paths(&self, name: &str, force_path: bool) -> Vec<String> {
@@ -45,8 +49,13 @@ impl Executor {
         }
 
         let mut paths = Vec::new();
-        if !force_path {
-            if let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name) {
+        // GNU builtins/type.def describe_command: the hash table is consulted
+        // only when `all == 0 || (dflags & CDESC_FORCE_PATH)`. `command_paths`
+        // is the -a (`CDESC_ALL`) enumeration, so the hashed entry is reported
+        // only under -P (force_path); a plain `type -a` must NOT prepend it.
+        if force_path {
+            if let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
+            {
                 paths.push(path);
             }
         }
@@ -63,14 +72,16 @@ impl Executor {
         }
         if name == "e"
             && self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("PATH")
                 .map(String::as_str)
                 .unwrap_or_default()
                 .is_empty()
         {
             if let Some(pwd) = self.shell_state.env_vars.get("PWD") {
-                let candidate = shell_path_to_windows(&format!("{pwd}/e"), &self.shell_state.env_vars);
+                let candidate =
+                    shell_path_to_windows(&format!("{pwd}/e"), &self.shell_state.env_vars);
                 if candidate.is_file() {
                     paths.push("./e".to_string());
                 }
@@ -78,7 +89,8 @@ impl Executor {
         }
 
         for dir in split_shell_path(
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .get("PATH")
                 .map(String::as_str)
                 .unwrap_or_default(),

@@ -79,7 +79,9 @@ impl Executor {
         if let Some(path) = self.command_path(name, force_path) {
             match mode {
                 TypeDescribeMode::Verbose => {
-                    if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name).is_some() {
+                    if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
+                        .is_some()
+                    {
                         println!("{name} is hashed ({path})");
                     } else {
                         println!("{name} is {path}");
@@ -177,7 +179,9 @@ impl Executor {
         if let Some(path) = self.command_path(name, force_path) {
             match mode {
                 TypeDescribeMode::Verbose => {
-                    if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name).is_some() {
+                    if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
+                        .is_some()
+                    {
                         writeln!(stdout, "{name} is hashed ({path})")?;
                     } else {
                         writeln!(stdout, "{name} is {path}")?;
@@ -207,7 +211,12 @@ impl Executor {
     {
         let mut found = false;
 
-        if !force_path && mode != TypeDescribeMode::PathOnly {
+        // GNU type.def describe_command: with CDESC_ALL the alias/keyword/
+        // function/builtin blocks run whenever !CDESC_FORCE_PATH, regardless
+        // of CDESC_PATH_ONLY. Under `type -ap` they print nothing (the
+        // PATH_ONLY arm is silent) but still set found=1, so the overall
+        // exit status stays 0 even when no disk file matches.
+        if !force_path {
             if self.alias_expansion_enabled() {
                 if let Some(alias) = self.shell_state.aliases.get(name) {
                     match mode {
@@ -283,13 +292,12 @@ impl Executor {
         for path in self.command_paths(name, force_path) {
             match mode {
                 TypeDescribeMode::Verbose => {
-                    if !force_path
-                        && crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name).is_some()
-                    {
-                        writeln!(stdout, "{name} is hashed ({path})")?;
-                    } else {
-                        writeln!(stdout, "{name} is {path}")?;
-                    }
+                    // GNU type.def: the `is hashed (...)` wording lives only
+                    // in the phash_search SHORTDESC branch, which CDESC_ALL
+                    // never reaches (`all == 0 || CDESC_FORCE_PATH` guard, and
+                    // -P clears CDESC_SHORTDESC). `type -a` always prints the
+                    // plain `name is path` form.
+                    writeln!(stdout, "{name} is {path}")?;
                 }
                 TypeDescribeMode::Reusable | TypeDescribeMode::PathOnly => {
                     writeln!(stdout, "{path}")?
