@@ -683,6 +683,18 @@ pub struct Executor {
     /// entry; keyed by node address, valid only within that command's
     /// execution span.
     redirect_target_memo: RefCell<HashMap<String, String>>,
+    /// GNU execute_cmd.c: external commands (and the forced fork of a
+    /// wordless `{var}` command, execute_null_command:4203-4278) run
+    /// do_redirections in the child — the `{var}` bind never reaches the
+    /// parent environment. The generic fd_var application in
+    /// execute_command records (resolved name, prior env_vars entry, prior
+    /// typed-store entry) here so execute_external can undo the binding and
+    /// release the descriptor after the child finishes.
+    fd_var_external_undo: Vec<(
+        String,
+        Option<String>,
+        Option<crate::shell::variables::Variable>,
+    )>,
     stdout_capture: Option<Vec<u8>>,
     stderr_capture: Option<Vec<u8>>,
     host_external_command_handler: Option<HostExternalCommandHandler>,

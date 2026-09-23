@@ -158,6 +158,14 @@ impl Executor {
         cmd: &CommandNode,
         conditional_command: &ConditionalCommand,
     ) -> Result<(), ExecuteError> {
+        // GNU redir.c do_redirections → redir_varassign: `[[ ]] {fd}<f`
+        // allocates and assigns the dynamic fd like any other command.
+        // This path bypasses the simple-command dispatch, so apply the
+        // fd_var redirects here.
+        if self.apply_dynamic_fd_var_redirects(cmd, true)? {
+            self.exit_code = 1;
+            return Ok(());
+        }
         self.apply_no_output_builtin_redirects(cmd)?;
         // GNU execute_cmd.c execute_cond_command -> redir.c
         // do_redirections/undo_redirections: the command's output
@@ -339,6 +347,15 @@ impl Executor {
                 status = 1;
             }
         }
+        // GNU execute_cmd.c execute_null_command (4203-4278): a wordless
+        // command carrying a REDIR_VARASSIGN redirect force-forks — the fd
+        // allocation and variable bind happen in the child, so the parent
+        // keeps the file side effects but never sees the variable value.
+        // Apply the redirects for their side effects, then undo the binds.
+        if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+            status = 1;
+        }
+        self.undo_child_fd_var_redirects();
         match self.apply_no_output_builtin_redirects_with_status(cmd) {
             Ok(redirect_failed) => {
                 if redirect_failed {

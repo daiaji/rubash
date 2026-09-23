@@ -432,6 +432,21 @@ impl Executor {
             return self.execute_empty_words_command(&cmd);
         }
 
+        // GNU redir.c do_redirections → redir_varassign (redir.c:1133-1166):
+        // a `{var}` redirection allocates a fresh descriptor and assigns
+        // its number to var for every simple command — builtins, functions
+        // and external commands alike — before the command runs. Apply
+        // them once here, ahead of dispatch; a failed redirect aborts the
+        // command (do_redirections returns on the first error). `exec`
+        // owns its fd_var redirects itself (execute_stdio_only_exec_redirect
+        // applies them in list order with persistent semantics), so it is
+        // excluded here.
+        if cmd.words.first().map(String::as_str) != Some("exec")
+            && self.apply_dynamic_fd_var_redirects(&cmd, true)?
+        {
+            return Ok(());
+        }
+
         // GNU execute_cmd.c execute_simple_command: array-style assignment
         // prefixes like `var[0]=X` are recognized as assignment words by
         // assignment() (general.c:480) and separated from command words at
@@ -454,13 +469,7 @@ impl Executor {
             return Ok(());
         }
 
-        // `exec {fd}...` mutates the shell's persistent descriptor table.
-        // Do not materialize its input redirect through the external-command
-        // path: that would consume the source virtual fd before exec can
-        // duplicate or move it.
-        if is_dynamic_fd_exec_command(&cmd)
-            || !command_needs_process_substitution_materialization(&cmd)
-        {
+        if !command_needs_process_substitution_materialization(&cmd) {
             return self.execute_materialized_command(&cmd, ProcessSubstitutionFiles::default());
         }
 
@@ -767,22 +776,6 @@ fn parse_error_source_display(source: &str) -> String {
         .trim()
         .replace(";then", "; then")
         .replace("then<W", "then <W")
-}
-
-fn is_dynamic_fd_exec_command(cmd: &CommandNode) -> bool {
-    cmd.words.first().map(String::as_str) == Some("exec")
-        && cmd.words.get(1).is_some_and(|word| {
-            let Some(name) = word
-                .strip_prefix('{')
-                .and_then(|word| word.strip_suffix('}'))
-            else {
-                return false;
-            };
-            !name.is_empty()
-                && name
-                    .chars()
-                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-        })
 }
 
 fn unterminated_extglob(raw: &str) -> bool {

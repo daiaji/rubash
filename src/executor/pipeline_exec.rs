@@ -196,10 +196,17 @@ impl Executor {
             return Ok(false);
         }
         let word = command.words[0].trim();
-        let Some(inner) = word
-            .strip_prefix('{')
-            .and_then(|value| value.strip_suffix('}'))
-        else {
+        let Some(after_open) = word.strip_prefix('{') else {
+            return Ok(false);
+        };
+        // GNU parse.y: `{` is a reserved word only when followed by a blank.
+        // A glued `{fdq}` is an ordinary word (command not found, braces
+        // kept in the diagnostic); only the lexer-collapsed `{ list; }`
+        // form — whitespace after the opener — re-tokenizes here.
+        if !after_open.starts_with(char::is_whitespace) {
+            return Ok(false);
+        }
+        let Some(inner) = after_open.strip_suffix('}') else {
             return Ok(false);
         };
         let inner = inner.trim().trim_end_matches(';').trim();

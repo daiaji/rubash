@@ -276,6 +276,10 @@ impl Executor {
             self.command_with_process_substitution_files(cmd)?;
         self.apply_default_external_stdin_file(&mut cmd, &mut process_substitutions)?;
         let result = self.execute_external_inner(&cmd);
+        // GNU execute_cmd.c: external commands fork before do_redirections
+        // — a `{var}` bind happened only in the child, so the parent's
+        // variable is untouched and the allocated descriptor dies there.
+        self.undo_child_fd_var_redirects();
         self.finish_process_substitutions(process_substitutions)?;
         result
     }
