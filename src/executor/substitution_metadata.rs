@@ -121,23 +121,12 @@ fn push_escaped_text_with_carriers(output: &mut String, text: &str) {
 }
 
 fn is_carrier_byte(byte: u32) -> bool {
-    use crate::executor::markers::{
-        CTLESC, DATA_BACKSLASH, DATA_BACKTICK, DATA_DOLLAR, DATA_SQUOTE, PARAM_NAME_END_MARKER,
-        PROTECTED_ESCAPED_SQUOTE,
-    };
-    // 0x0c: former PATSUB_QUOTED_VALUE_END carrier byte (now U+E311);
-    // still entry-encoded so a user \f can never alias a transport marker.
-    [
-        0x0c,
-        CTLESC as u32,
-        PARAM_NAME_END_MARKER as u32,
-        DATA_BACKSLASH as u32,
-        PROTECTED_ESCAPED_SQUOTE as u32,
-        DATA_SQUOTE as u32,
-        DATA_BACKTICK as u32,
-        DATA_DOLLAR as u32,
-    ]
-    .contains(&byte)
+    // Same canonical tagged set as is_assignment_carrier_byte
+    // (lexer/ansi.rs) and bytes_to_assignment_shell_text: {0x0c, 0x11, 0x13}
+    // plus the whole 0x14..=0x1f carrier block. A raw byte in this range is
+    // always user data here — bytes_to_shell_text converts bytes to text —
+    // so it must be marker-tagged before any carrier consumer can claim it.
+    crate::lexer::ansi::is_assignment_carrier_byte(byte)
 }
 
 pub(in crate::executor) struct SubstitutionOutput {
@@ -408,17 +397,10 @@ fn utf8_sequence_len(lead: u8) -> Option<usize> {
     }
 }
 pub(crate) fn bytes_to_assignment_shell_text(bytes: &[u8]) -> String {
-    let text = bytes_to_shell_text(bytes);
-    let mut output = String::with_capacity(text.len());
-    for ch in text.chars() {
-        let codepoint = ch as u32;
-        if (0x14..=0x1f).contains(&codepoint) {
-            push_raw_byte_marker(&mut output, codepoint as u8);
-        } else {
-            output.push(ch);
-        }
-    }
-    output
+    // bytes_to_shell_text already marker-tags every carrier byte
+    // (is_carrier_byte covers 0x0c/0x11/0x13 plus the whole 0x14..=0x1f
+    // block), so the storage-domain encoding is the general encoding.
+    bytes_to_shell_text(bytes)
 }
 
 pub(crate) fn bytes_to_shell_text(bytes: &[u8]) -> String {

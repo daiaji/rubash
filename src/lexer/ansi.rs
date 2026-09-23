@@ -22,25 +22,19 @@ pub(crate) fn is_assignment_carrier_byte(byte: u32) -> bool {
     // 0x0c is a plain data byte (the former PATSUB_QUOTED_VALUE_END carrier
     // moved to U+E311); it stays encoded so user \f input never collides
     // with residual text-layer consumers.
-    use crate::executor::markers::{
-        CTLESC, DATA_BACKSLASH, DATA_BACKTICK, DATA_DOLLAR, DATA_DQUOTE, DATA_SQUOTE, IFS_GLUE,
-        PARAM_NAME_END_MARKER, PROTECTED_ESCAPED_SQUOTE, QUOTED_WORD_PREFIX, STORAGE_WORD_PREFIX,
-    };
-    [
-        0x0c,
-        CTLESC as u32,
-        PARAM_NAME_END_MARKER as u32,
-        DATA_BACKSLASH as u32,
-        PROTECTED_ESCAPED_SQUOTE as u32,
-        DATA_SQUOTE as u32,
-        DATA_DQUOTE as u32,
-        DATA_BACKTICK as u32,
-        QUOTED_WORD_PREFIX as u32,
-        IFS_GLUE as u32,
-        STORAGE_WORD_PREFIX as u32,
-        DATA_DOLLAR as u32,
-    ]
-    .contains(&byte)
+    // The tagged set must cover every text-layer carrier byte so a decoded
+    // data byte can never be claimed by a carrier consumer. This is the same
+    // set bytes_to_assignment_shell_text (substitution_metadata.rs) stores:
+    // {0x0c, CTLESC(0x11), PARAM_NAME_END_MARKER(0x13)} plus the whole
+    // 0x14..=0x1f carrier block — including PROTECTED_BACKSLASH(0x15),
+    // PROTECTED_LITERAL_BACKSLASH(0x19), and SUBSCRIPT_CARRIER /
+    // PARSE_ERROR_FIELD_SEP / HEREDOC_WARNED_BODY_PREFIX(0x1e). An
+    // incomplete list is what made $'\025'/$'\031'/$'\036' decode to a raw
+    // char that the backslash/subscript restores then mangled
+    // (unicode1.sub U+00000015/U+00000019/U+0000001E).
+    use crate::executor::markers::{CTLESC, PARAM_NAME_END_MARKER};
+    [0x0c, CTLESC as u32, PARAM_NAME_END_MARKER as u32].contains(&byte)
+        || (0x14..=0x1f).contains(&byte)
 }
 
 pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {

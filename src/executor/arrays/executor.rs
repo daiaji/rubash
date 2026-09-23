@@ -318,9 +318,7 @@ impl Executor {
             return Some(values);
         }
         if !quoted_array_word {
-            if let Some((name, offset, length)) = word
-                .strip_prefix("${")
-                .and_then(|word| word.strip_suffix('}'))
+            if let Some((name, offset, length)) = crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
                 .and_then(|name| self.parse_parameter_substring(name))
             {
                 if let Some(array_name) = name
@@ -336,9 +334,7 @@ impl Executor {
             }
         }
         if quoted_array_word {
-            if let Some((name, offset, length)) = word
-                .strip_prefix("${")
-                .and_then(|word| word.strip_suffix('}'))
+            if let Some((name, offset, length)) = crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
                 .and_then(|name| self.parse_parameter_substring(name))
             {
                 if let Some(indirect_name) = name.strip_prefix('!') {
@@ -485,6 +481,13 @@ impl Executor {
                 }
             }
         }
+        // The [@]/[*] element list requires the word to be ONE `${}` span;
+        // a trailing `[@]}` on a glued multi-expansion word (`${x}${a[@]}`)
+        // must not admit it (whole_word_braced_parameter_body — see
+        // iquote.sub `"${del:0:1}${a#d}"`).
+        if !crate::executor::parameter_ops::braced_parameter_spans_whole_word(word) {
+            return None;
+        }
         let name = word.strip_prefix("${").and_then(|word| {
             if quoted_array_word {
                 word.strip_suffix("[@]}")
@@ -511,9 +514,7 @@ impl Executor {
         word: &str,
         quoted_array_word: bool,
     ) -> Option<Vec<String>> {
-        let (var_name, transform) = word
-            .strip_prefix("${")
-            .and_then(|word| word.strip_suffix('}'))
+        let (var_name, transform) = crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
             .and_then(parse_parameter_transform)?;
         let (array_name, starred) = var_name
             .strip_suffix("[@]")
@@ -623,10 +624,7 @@ impl Executor {
         word: &str,
         quoted_array_word: bool,
     ) -> Option<Vec<String>> {
-        let inner = word
-            .strip_prefix("${")
-            .and_then(|word| word.strip_suffix('}'));
-        let inner = inner?;
+        let inner = crate::executor::parameter_ops::whole_word_braced_parameter_body(word)?;
 
         // array_modified_word_values only handles `name[@]`/`name[*]`
         // targets; validate that before expanding the pattern/replacement
@@ -733,9 +731,8 @@ impl Executor {
         word: &str,
         quoted_array_word: bool,
     ) -> Option<Vec<String>> {
-        let indirect_name = word
-            .strip_prefix("${!")
-            .and_then(|word| word.strip_suffix('}'))?;
+        let indirect_name = crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
+            .and_then(|body| body.strip_prefix('!'))?;
         // A nameref indirection yields the referenced NAME itself, not the
         // target's value (GNU parameter_brace_expand_indir subst.c:7896
         // returns the nameref cell verbatim); leave those to the scalar

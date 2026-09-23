@@ -1671,7 +1671,9 @@ impl Executor {
                                     &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&text),
                                 )
                             } else {
-                                text.into_bytes()
+                                crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                                    &text,
+                                )
                             };
                             output.push_str(
                                 &crate::executor::substitution_metadata::bytes_to_shell_text(

@@ -1376,7 +1376,13 @@ impl Executor {
             if let Some(output) = self.run_function_command_substitution(&words) {
                 self.set_positional_params(saved_positional_params);
                 let status = self.last_command_substitution_status.get().unwrap_or(0);
-                return SubstitutionOutput::readback(output.into_bytes(), status, context);
+                // Shell text -> raw capture bytes: decode marker pairs once
+                // so readback/assignment_text encode exactly once.
+                return SubstitutionOutput::readback(
+                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(&output),
+                    status,
+                    context,
+                );
             }
         }
         self.set_positional_params(saved_positional_params);
@@ -1392,7 +1398,11 @@ impl Executor {
         if command_substitution_uses_specialized_path(self, source, &words) {
             let output = self.expand_command_substitution_with_context(source, context);
             let status = self.last_command_substitution_status.get().unwrap_or(0);
-            return SubstitutionOutput::readback(output.into_bytes(), status, context);
+            return SubstitutionOutput::readback(
+                crate::executor::substitution_metadata::shell_text_to_raw_bytes(&output),
+                status,
+                context,
+            );
         }
         // A command list (`echo a; echo b`, `a && b`) must run as an AST, not
         // through the single-command specialized dispatch below: routing
@@ -1418,14 +1428,22 @@ impl Executor {
         if is_specialized_command_substitution_word(&words) {
             let output = self.expand_command_substitution_with_context(source, context);
             let status = self.last_command_substitution_status.get().unwrap_or(0);
-            return SubstitutionOutput::readback(output.into_bytes(), status, context);
+            return SubstitutionOutput::readback(
+                crate::executor::substitution_metadata::shell_text_to_raw_bytes(&output),
+                status,
+                context,
+            );
         }
         if let Some(output) = self.run_ast_command_substitution_with_context(source, context) {
             return output;
         }
         let output = self.expand_command_substitution_with_context(source, context);
         let status = self.last_command_substitution_status.get().unwrap_or(0);
-        SubstitutionOutput::readback(output.into_bytes(), status, context)
+        SubstitutionOutput::readback(
+            crate::executor::substitution_metadata::shell_text_to_raw_bytes(&output),
+            status,
+            context,
+        )
     }
 
     pub(in crate::executor) fn expand_command_substitution_mut_with_context(

@@ -3,7 +3,14 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 impl Executor {
     pub(in crate::executor) fn set_fd_input_text(&mut self, fd: u32, input: String, dynamic: bool) {
-        self.set_fd_input_bytes(fd, input.into_bytes(), dynamic);
+        // input is shell text: decode marker pairs back to the raw bytes
+        // the fd byte channel carries (set_fd_input_bytes re-encodes for
+        // the text env mirror, so into_bytes() here would double-encode).
+        self.set_fd_input_bytes(
+            fd,
+            crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
+            dynamic,
+        );
     }
 
     pub(in crate::executor) fn set_fd_input_bytes(
@@ -2429,7 +2436,11 @@ impl Executor {
             // consumers that read it directly; the fd-table endpoint gets the
             // unread tail so both channels agree on what fd 0 serves next.
             if let Some(remaining) = self.function_stdin_remaining() {
-                self.set_fd_input_bytes(0, remaining.into_bytes(), false);
+                self.set_fd_input_bytes(
+                    0,
+                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(&remaining),
+                    false,
+                );
             }
         }
         if self.fd_table.is_open(source_fd) {

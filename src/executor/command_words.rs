@@ -267,9 +267,8 @@ fn dynamic_scalar_parameter_name(word: &str) -> Option<&str> {
 }
 
 fn word_is_unquoted_indirect_name_list(word: &str) -> bool {
-    let Some(inner) = word
-        .strip_prefix("${!")
-        .and_then(|word| word.strip_suffix('}'))
+    let Some(inner) = crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
+        .and_then(|body| body.strip_prefix('!'))
     else {
         return false;
     };

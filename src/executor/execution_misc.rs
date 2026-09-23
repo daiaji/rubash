@@ -844,14 +844,19 @@ pub(in crate::executor) fn restore_command_substitution_output(value: &str) -> S
 pub(in crate::executor) fn substitution_result_visible_text(value: &str) -> String {
     // The dispatcher's output can nest the raw-byte marker pair inside
     // literal-char escapes (E400+E000/E4xx), which the char-level decoder
-    // resolves to a live E000+payload pair again. Decode to visible text,
-    // then run the byte-level marker pass so the re-formed pair yields its
-    // payload byte (a C0 carrier byte), and finally restore that carrier to
-    // the literal character it marks (DATA_BACKTICK -> `, etc).
-    let visible = crate::locale::decode_to_visible_text(value);
+    // resolves to a live E000+payload pair again.
+    //
+    // Ordering matters: restore transport carriers FIRST — a bare C0 carrier
+    // char in `value` is syntax (DATA_BACKTICK -> `, PROTECTED_BACKSLASH ->
+    // \). Only then decode marker pairs; a decoded pair byte is DATA and must
+    // be re-tagged by bytes_to_shell_text so no later carrier restore claims
+    // it (unicode1.sub `$(printf '\x15')` in a heredoc body printed `\` —
+    // the decoded 0x15 was read as PROTECTED_BACKSLASH).
+    let restored = restore_command_substitution_output(value);
+    let visible = crate::locale::decode_to_visible_text(&restored);
     let bytes =
         crate::executor::substitution_metadata::decode_raw_byte_markers(visible.as_bytes());
-    restore_command_substitution_output(&String::from_utf8_lossy(&bytes))
+    crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
 }
 
 pub(in crate::executor) fn decode_command_substitution_payload(value: &str) -> String {

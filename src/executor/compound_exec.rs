@@ -751,7 +751,8 @@ impl Executor {
         // the virtual text wins, exactly like GNU's dup2 of the heredoc
         // temp file over the earlier descriptor.
         if let Some(remaining) = self.function_stdin_remaining() {
-            let bytes = remaining.into_bytes();
+            let bytes =
+                crate::executor::substitution_metadata::shell_text_to_raw_bytes(&remaining);
             match self.materialize_virtual_stdin_fd0(&bytes) {
                 Some(file) => {
                     // fd 0 now owns a real endpoint; drop the text channel

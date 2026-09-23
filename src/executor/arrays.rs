@@ -637,9 +637,7 @@ pub(super) fn word_is_unquoted_array_list_expansion(word: &str) -> bool {
         return false;
     }
 
-    let Some(inner) = word
-        .strip_prefix("${")
-        .and_then(|word| word.strip_suffix('}'))
+    let Some(inner) = crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
     else {
         return false;
     };

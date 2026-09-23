@@ -194,7 +194,11 @@ impl Executor {
                 let Some(output) = self.process_substitution_output(source) else {
                     continue;
                 };
-                self.set_fd_input_bytes(fd, output.into_bytes(), true);
+                self.set_fd_input_bytes(
+                    fd,
+                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(&output),
+                    true,
+                );
                 if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                     self.set_fd_readwrite_file(fd, &target, true)
                         .map_err(|e| crate::posix_errors::path_error(&target, e))?;
@@ -567,8 +571,10 @@ impl Executor {
         body: &str,
     ) -> SubstitutionOutput {
         let expanded = self.expand_heredoc_body(body);
+        // expand_heredoc_body returns shell text; readback takes raw bytes,
+        // so decode marker pairs once instead of re-encoding them.
         SubstitutionOutput::readback(
-            expanded.into_bytes(),
+            crate::executor::substitution_metadata::shell_text_to_raw_bytes(&expanded),
             0,
             SubstitutionQuoteContext::HereDocument,
         )
@@ -587,7 +593,9 @@ impl Executor {
         match carrier {
             Some(crate::parser::StdinBody::Preexpanded(text)) => {
                 return SubstitutionOutput::readback(
-                    decode_stdin_body_enq(text).into_bytes(),
+                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                        &decode_stdin_body_enq(text),
+                    ),
                     0,
                     SubstitutionQuoteContext::HereDocument,
                 );

@@ -203,6 +203,19 @@ pub(in crate::executor) fn braced_parameter_spans_whole_word_in_context(
         .is_some_and(|index| index + 1 == rest.len())
 }
 
+/// When `word` is exactly one `${...}` expansion, return its body — the text
+/// between the opening `${` and its matching `}`. GNU subst.c param_expand
+/// expands one `${}` per word position; `"${a}x${b}"` is two expansions plus
+/// literal text, so the naive `strip_prefix("${") + strip_suffix('}')`
+/// extraction — which pairs the first `${` with the LAST `}` — glues the
+/// middle into the body and feeds garbage to the operator/substring parsers
+/// (iquote.sub: `"${del:0:1}${a#d}"` evaluated `1}${a#d` as arithmetic).
+pub(in crate::executor) fn whole_word_braced_parameter_body(word: &str) -> Option<&str> {
+    let rest = word.strip_prefix("${")?;
+    let close = matching_parameter_brace(rest)?;
+    (close + 1 == rest.len()).then_some(&rest[..close])
+}
+
 /// Whether a parameter default/alternate word contains a backslash-escaped
 /// IFS whitespace character. In an unquoted word such an escape keeps the
 /// whitespace literal and suppresses field splitting (parse.y parameter

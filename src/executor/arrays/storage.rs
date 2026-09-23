@@ -506,6 +506,11 @@ fn decode_ansic_escapes(value: &str) -> String {
     }
     // The decoded byte stream may not be UTF-8 (`$'\200'`): non-UTF-8 bytes
     // re-encode as raw-byte markers so they round-trip verbatim instead of
-    // degrading to U+FFFD (array9.sub `a[2]=$'\x80'`).
-    crate::executor::substitution_metadata::bytes_to_shell_text(&out)
+    // degrading to U+FFFD (array9.sub `a[2]=$'\x80'`). Carrier-range bytes
+    // (0x14..=0x1f: DATA_DQUOTE/QUOTED_WORD_PREFIX/IFS_GLUE/...) must enter
+    // pair-encoded exactly like scalar assignment storage
+    // (bytes_to_assignment_shell_text), otherwise `[ "${a[i]}" = "$x" ]`
+    // compares a raw carrier byte against the pair-encoded form (intl.tests
+    // unicode1.sub U+0018/U+001B/U+001C/U+001D).
+    crate::executor::substitution_metadata::bytes_to_assignment_shell_text(&out)
 }

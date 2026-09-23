@@ -205,7 +205,11 @@ fn decode_ansic_escapes(value: &str) -> String {
         out.push(bytes[index]);
         index += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    // Carrier-range bytes (0x14..=0x1f) must reach readers pair-encoded like
+    // scalar assignment storage (bytes_to_assignment_shell_text); a raw
+    // control byte would alias IFS_GLUE/DATA_DQUOTE/QUOTED_WORD_PREFIX and
+    // compare unequal to the same byte held in a scalar (unicode1.sub).
+    crate::executor::substitution_metadata::bytes_to_assignment_shell_text(&out)
 }
 
 pub(super) fn quote_double(value: &str) -> String {

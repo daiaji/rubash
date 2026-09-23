@@ -152,11 +152,18 @@ where
     if let Err(error) = env::set_current_dir(&target.path) {
         // GNU builtins/cd.def:427: builtin_error("%s: %s", printable_filename(dirname), strerror(e))
         // reports the user-given path, not the Windows-converted path.
+        // general.c printable_filename: non-printing bytes render through
+        // ansic_quote ($'5\247@3\231+\306S8\237\242\352\263' in unicode3.sub).
         let display_path = target
             .display
             .as_deref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| target.path.to_string_lossy().to_string());
+        let display_path = if crate::executor::ansic_shouldquote(&display_path) {
+            crate::executor::ansic_quote(&display_path)
+        } else {
+            display_path
+        };
         writeln!(
             stderr,
             "{}cd: {}: {}",

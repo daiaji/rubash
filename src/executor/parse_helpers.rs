@@ -194,91 +194,12 @@ pub(in crate::executor) fn decode_ansi_c_quoted_word(word: &str) -> Option<Strin
 }
 
 pub(in crate::executor) fn decode_ansi_c_escapes(value: &str) -> String {
-    let mut output = String::new();
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            output.push(ch);
-            continue;
-        }
-
-        match chars.next() {
-            Some('a') => output.push('\x07'),
-            Some('b') => output.push('\x08'),
-            Some('e') | Some('E') => output.push(crate::executor::markers::QUOTED_WORD_PREFIX),
-            Some('f') => output.push('\x0c'),
-            Some('n') => output.push('\n'),
-            Some('r') => output.push('\r'),
-            Some('t') => output.push('\t'),
-            Some('v') => output.push('\x0b'),
-            Some('\\') => output.push('\\'),
-            Some('\'') => output.push('\''),
-            Some('"') => output.push('"'),
-            Some('?') => output.push('?'),
-            Some('x') => push_ansi_c_escape_or_literal(
-                &mut output,
-                'x',
-                read_ansi_c_digits(&mut chars, 16, 2),
-            ),
-            Some('u') => push_ansi_c_escape_or_literal(
-                &mut output,
-                'u',
-                read_ansi_c_digits(&mut chars, 16, 4),
-            ),
-            Some('U') => push_ansi_c_escape_or_literal(
-                &mut output,
-                'U',
-                read_ansi_c_digits(&mut chars, 16, 8),
-            ),
-            Some(octal @ '0'..='7') => {
-                let mut value = octal.to_digit(8).unwrap_or(0);
-                for _ in 0..2 {
-                    let Some(next) = chars.peek().copied() else {
-                        break;
-                    };
-                    let Some(digit) = next.to_digit(8) else {
-                        break;
-                    };
-                    value = value * 8 + digit;
-                    chars.next();
-                }
-                push_ansi_c_codepoint(&mut output, Some(value));
-            }
-            Some(other) => {
-                output.push('\\');
-                output.push(other);
-            }
-            None => output.push('\\'),
-        }
-    }
-    output
-}
-
-pub(in crate::executor) fn read_ansi_c_digits<I>(
-    chars: &mut std::iter::Peekable<I>,
-    radix: u32,
-    max: usize,
-) -> Option<u32>
-where
-    I: Iterator<Item = char>,
-{
-    let mut value = String::new();
-    while value.len() < max {
-        let Some(next) = chars.peek().copied() else {
-            break;
-        };
-        if next.to_digit(radix).is_none() {
-            break;
-        }
-        value.push(next);
-        chars.next();
-    }
-
-    if value.is_empty() {
-        None
-    } else {
-        u32::from_str_radix(&value, radix).ok()
-    }
+    // Same decoder as the lexer's ANSI-C path (GNU strtrans.c ansicstr):
+    // carrier bytes get raw-byte marker tags, \x/octal bytes >= 0x80 stay
+    // raw bytes, and NUL truncates. A second untagged decode here left
+    // carrier bytes (0x15/0x19/0x1e) claimable by carrier restores and
+    // mangled high bytes into Latin-1 chars (unicode1.sub).
+    crate::lexer::decode_ansi_c_quoted(value)
 }
 
 pub(in crate::executor) fn push_ansi_c_codepoint(output: &mut String, value: Option<u32>) {
@@ -287,15 +208,6 @@ pub(in crate::executor) fn push_ansi_c_codepoint(output: &mut String, value: Opt
     };
     if let Some(ch) = char::from_u32(value) {
         output.push(ch);
-    }
-}
-
-fn push_ansi_c_escape_or_literal(output: &mut String, escape: char, value: Option<u32>) {
-    if let Some(value) = value {
-        push_ansi_c_codepoint(output, Some(value));
-    } else {
-        output.push('\\');
-        output.push(escape);
     }
 }
 

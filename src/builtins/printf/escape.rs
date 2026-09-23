@@ -7,8 +7,11 @@ where
     match chars.next() {
         Some('a') => "\x07".to_string(),
         Some('b') => "\x08".to_string(),
-        Some('e') | Some('E') => crate::executor::markers::QUOTED_WORD_PREFIX_STR.to_string(),
-        Some('f') => "\x0c".to_string(),
+        // \e and \f decode to carrier bytes (0x1b QUOTED_WORD_PREFIX, 0x0c):
+        // as data they must be marker-tagged so no carrier consumer claims
+        // them (unicode1.sub printf -v). Same contract as push_ansi_c_byte.
+        Some('e') | Some('E') => encode_raw_byte(0x1b),
+        Some('f') => encode_raw_byte(0x0c),
         Some('n') => "\n".to_string(),
         Some('r') => "\r".to_string(),
         Some('t') => "\t".to_string(),
@@ -49,7 +52,11 @@ fn format_escape_byte(value: Option<u32>, fallback: &str) -> String {
 }
 
 fn encode_raw_byte(byte: u8) -> String {
-    if byte.is_ascii() {
+    // ASCII bytes that collide with text-layer carriers must travel as
+    // raw-byte marker pairs (same rule as push_ansi_c_byte in
+    // lexer/ansi.rs): printf '\x15' emits byte 0x15, and a bare char 0x15
+    // would be claimed by the PROTECTED_BACKSLASH restore.
+    if byte.is_ascii() && !crate::lexer::ansi::is_assignment_carrier_byte(byte as u32) {
         char::from(byte).to_string()
     } else {
         encode_raw_byte_marker(byte)
@@ -78,8 +85,8 @@ pub(super) fn expand_percent_b(value: &str) -> (String, bool) {
             }
             Some('a') => output.push('\x07'),
             Some('b') => output.push('\x08'),
-            Some('e') | Some('E') => output.push(crate::executor::markers::QUOTED_WORD_PREFIX),
-            Some('f') => output.push('\x0c'),
+            Some('e') | Some('E') => output.push_str(&encode_raw_byte(0x1b)),
+            Some('f') => output.push_str(&encode_raw_byte(0x0c)),
             Some('n') => output.push('\n'),
             Some('r') => output.push('\r'),
             Some('t') => output.push('\t'),

@@ -127,7 +127,15 @@ impl Executor {
     ) -> SubstitutionOutput {
         let output = self.expand_command_substitution_with_context(source, context);
         let status = self.last_command_substitution_status.get().unwrap_or(0);
-        SubstitutionOutput::readback(output.into_bytes(), status, context)
+        // expand_command_substitution_with_context returns shell TEXT (marker
+        // pairs for carrier/raw bytes). readback takes raw capture bytes, so
+        // decode the markers once — into_bytes() would re-encode them as
+        // literal PUA glyphs at the next bytes_to_shell_text boundary.
+        SubstitutionOutput::readback(
+            crate::executor::substitution_metadata::shell_text_to_raw_bytes(&output),
+            status,
+            context,
+        )
     }
 
     pub(in crate::executor) fn expand_command_substitution_inner(

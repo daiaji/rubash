@@ -1152,8 +1152,8 @@ impl Executor {
                 values.extend(self.shell_state.positional_params.iter().map(|value| store!(value)));
             } else if let Some(array_name) = token
                 .strip_prefix(STORAGE_WORD_PREFIX)
-                .and_then(|token| token.strip_prefix("${"))
-                .and_then(|token| token.strip_suffix("[@]}"))
+                .and_then(whole_word_braced_parameter_body)
+                .and_then(|body| body.strip_suffix("[@]"))
                 .or_else(|| {
                     // The atomic lexer path (skip_word_at) preserves the
                     // element's wrapping quotes as raw text, so the hoist
@@ -1162,10 +1162,8 @@ impl Executor {
                     // marker; the [@] list must still fan out per element
                     // (array.tests: local v=("${foo[@]}") keeps 'b c' one
                     // element).
-                    token
-                        .trim_matches('\u{E302}')
-                        .strip_prefix("${")
-                        .and_then(|token| token.strip_suffix("[@]}"))
+                    whole_word_braced_parameter_body(token.trim_matches('\u{E302}'))
+                        .and_then(|body| body.strip_suffix("[@]"))
                 })
             {
                 if let Some(storage) = self.parameter_array_storage(array_name) {
@@ -1176,8 +1174,7 @@ impl Executor {
                 }
             } else if let Some(indirect_name) = token
                 .strip_prefix(STORAGE_WORD_PREFIX)
-                .and_then(|token| token.strip_prefix("${"))
-                .and_then(|token| token.strip_suffix('}'))
+                .and_then(whole_word_braced_parameter_body)
                 .and_then(|name| name.strip_prefix('!'))
                 .or_else(|| {
                     // The atomic lexer path (skip_word_at) preserves the
@@ -1190,10 +1187,7 @@ impl Executor {
                     // actually present so unquoted `${!ref}` falls through
                     // to the unquoted indirect branch below.
                     if token.starts_with('\u{E302}') && token.ends_with('\u{E302}') {
-                        token
-                            .trim_matches('\u{E302}')
-                            .strip_prefix("${")
-                            .and_then(|token| token.strip_suffix('}'))
+                        whole_word_braced_parameter_body(token.trim_matches('\u{E302}'))
                             .and_then(|name| name.strip_prefix('!'))
                     } else {
                         None
@@ -1212,9 +1206,7 @@ impl Executor {
                     }
                     None => values.push(store!(&token, token_raw)),
                 }
-            } else if let Some(indirect_name) = token
-                .strip_prefix("${")
-                .and_then(|token| token.strip_suffix('}'))
+            } else if let Some(indirect_name) = whole_word_braced_parameter_body(&token)
                 .and_then(|name| name.strip_prefix('!'))
             {
                 // The lexer strips the token's quotes and marks the whole
@@ -1248,8 +1240,7 @@ impl Executor {
                             .and_then(|inner| inner.strip_suffix('"'))
                     })
                     .unwrap_or(core);
-                core.strip_prefix("${")
-                    .and_then(|token| token.strip_suffix('}'))
+                whole_word_braced_parameter_body(core)
                     .and_then(parse_parameter_replacement)
                     .filter(|(var_name, _, _, _)| {
                         var_name.ends_with("[@]")
@@ -1343,8 +1334,7 @@ impl Executor {
                 }
             } else if let Some(name) = token
                 .strip_prefix(STORAGE_WORD_PREFIX)
-                .and_then(|token| token.strip_prefix("${"))
-                .and_then(|token| token.strip_suffix('}'))
+                .and_then(whole_word_braced_parameter_body)
                 .or_else(|| {
                     // The atomic lexer path (skip_word_at) wraps the
                     // element's quotes in DQ_DATA markers instead of the
@@ -1355,14 +1345,9 @@ impl Executor {
                     // through the real expander — new-exp5.sub
                     // `b=("${a[@]:2}")` stores C and D as two elements).
                     if token_raw.starts_with('\u{E302}') && token_raw.ends_with('\u{E302}') {
-                        token_raw
-                            .trim_matches('\u{E302}')
-                            .strip_prefix("${")
-                            .and_then(|token| token.strip_suffix('}'))
+                        whole_word_braced_parameter_body(token_raw.trim_matches('\u{E302}'))
                     } else if token_raw.starts_with('"') {
-                        token
-                            .strip_prefix("${")
-                            .and_then(|token| token.strip_suffix('}'))
+                        whole_word_braced_parameter_body(&token)
                     } else {
                         None
                     }
@@ -1605,10 +1590,7 @@ impl Executor {
         let parameter = if is_quoted { &unquoted_inner } else { inner };
         let value = if let Some(name) = single_unquoted_parameter_name(parameter) {
             self.shell_variable_value(name).unwrap_or_default()
-        } else if let Some(name) = parameter
-            .strip_prefix("${")
-            .and_then(|name| name.strip_suffix('}'))
-        {
+        } else if let Some(name) = whole_word_braced_parameter_body(parameter) {
             let name = name.replace("\\\"", "\"").replace("\\'", "'");
             self.array_element_parameter_value(&name)?
         } else {
@@ -1649,7 +1631,7 @@ impl Executor {
         value: &str,
     ) -> Option<String> {
         let value = value.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(value);
-        let name = value.strip_prefix("${")?.strip_suffix('}')?;
+        let name = whole_word_braced_parameter_body(value)?;
         let array_name = name
             .strip_suffix("[@]")
             .or_else(|| name.strip_suffix("[*]"))

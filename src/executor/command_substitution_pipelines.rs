@@ -316,7 +316,7 @@ impl Executor {
         output = output.trim_capture_terminator().to_string();
         self.last_command_substitution_status.set(Some(0));
         Some(SubstitutionOutput::readback(
-            output.into_bytes(),
+            crate::executor::substitution_metadata::shell_text_to_raw_bytes(&output),
             0,
             context,
         ))

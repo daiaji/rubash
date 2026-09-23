@@ -313,10 +313,7 @@ impl Executor {
         if word == "$@" && kind.map_or(true, |kind| *kind == TokenKind::Word) {
             return Some(self.shell_state.positional_params.clone());
         }
-        if let Some(name) = word
-            .strip_prefix("${")
-            .and_then(|word| word.strip_suffix('}'))
-        {
+        if let Some(name) = whole_word_braced_parameter_body(word) {
             // A quoted indirect reference whose target is @ or * expands with
             // the same word-boundary rules as "${@}" / "${*}" (GNU subst.c
             // parameter_brace_expand_indir re-expands the target name in the
@@ -543,10 +540,7 @@ impl Executor {
         if word.starts_with('"') || word.starts_with('\'') || word.starts_with(STORAGE_WORD_PREFIX) {
             return false;
         }
-        let Some(inner) = word
-            .strip_prefix("${")
-            .and_then(|word| word.strip_suffix('}'))
-        else {
+        let Some(inner) = whole_word_braced_parameter_body(word) else {
             return false;
         };
         self.positional_modified_base_name(inner)
@@ -565,10 +559,7 @@ impl Executor {
         if word.starts_with('"') || word.starts_with('\'') || word.starts_with(STORAGE_WORD_PREFIX) {
             return false;
         }
-        let Some(inner) = word
-            .strip_prefix("${")
-            .and_then(|word| word.strip_suffix('}'))
-        else {
+        let Some(inner) = whole_word_braced_parameter_body(word) else {
             return false;
         };
         matches!(inner, "@" | "*")
@@ -885,7 +876,9 @@ impl Executor {
             process.stdin(Stdio::from(file));
         } else if let Some(input) = self.function_stdin_remaining() {
             process.stdin(Stdio::piped());
-            piped_stdin = Some(input.into_bytes());
+            piped_stdin = Some(
+                crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
+            );
         }
         if let Some(redirect) = &stdio.stdout_redirect {
             let file = open_command_substitution_redirect(redirect).ok()?;
