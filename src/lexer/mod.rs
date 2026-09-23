@@ -241,14 +241,19 @@ fn tokenize_with_heredocs(
                 {
                     // Insert \x1c before the first `)` after the delimiter
                     // in the logical line. command_substitution_heredoc_output_mut_typed
-                    // will detect and remove it before parsing.
-                    let after_delim = logical_line
-                        .rfind(front.delimiter.as_str())
-                        .map(|pos| pos + front.delimiter.len())
-                        .unwrap_or(0);
-                    if let Some(rel_pos) = logical_line[after_delim..].find(')') {
-                        let abs_pos = after_delim + rel_pos;
-                        logical_line.insert(abs_pos, crate::executor::markers::IFS_GLUE);
+                    // will detect and remove it before parsing. The search is
+                    // scoped to the physical line just appended: `rfind` on
+                    // the whole logical line could land on the pushed-back
+                    // `)` itself (delim `)`) or on a `)` from an earlier line.
+                    let line_start = logical_line.len() - line.len();
+                    let delim_end = line_start
+                        + (line.len() - comparable.len())
+                        + front.delimiter.len();
+                    if let Some(rel_pos) = logical_line[delim_end..].find(')') {
+                        logical_line.insert(
+                            delim_end + rel_pos,
+                            crate::executor::markers::IFS_GLUE,
+                        );
                     }
                 }
             }
@@ -279,16 +284,10 @@ fn tokenize_with_heredocs(
             continued_line = true;
             continue;
         }
-        // parse.y:5379-5384: the backslash is removed together with its
-        // newline even when that newline is the FINAL byte of input; EOF
-        // right after completes the token, so `echo a\<LF><EOF>` runs
-        // `echo a` instead of erroring (matches GNU byte-for-byte).
-        if !line_had_terminator
-            && ends_with_unquoted_backslash(&logical_line)
-            && !in_comsub_heredoc_body
-        {
-            logical_line.pop();
-        }
+        // parse.y:5379-5384: a backslash before EOF is NOT removed — GNU's
+        // read_token_word ungets EOF and keeps the `\` as a quoted literal
+        // (`echo a\` prints `a\`), so no EOF-pop branch exists here. Only
+        // `\`+`\n` joins lines (handled above).
 
         // Fresh header scan once the accumulated text is stable (after the
         // join decision): a header whose delimiter is completed by the next
@@ -532,9 +531,9 @@ fn tokenize_with_heredocs(
 /// A heredoc opened inside an unclosed command substitution, tracked while
 /// the tokenizer accumulates physical lines.
 #[derive(Clone)]
-struct ComsubHeredocHeader {
-    delimiter: String,
-    strip_tabs: bool,
+pub(crate) struct ComsubHeredocHeader {
+    pub(crate) delimiter: String,
+    pub(crate) strip_tabs: bool,
 }
 
 /// Scan accumulated text for `<<` heredoc headers (skipping quoted text and
@@ -543,7 +542,7 @@ struct ComsubHeredocHeader {
 /// byte offset: an incomplete delimiter (one whose raw spelling ends with an
 /// unquoted backslash, completed by the next physical line) leaves the scan
 /// point at its `<<` so it is re-read after the join.
-fn scan_line_for_comsub_heredoc_headers(line: &str) -> (Vec<ComsubHeredocHeader>, usize) {
+pub(crate) fn scan_line_for_comsub_heredoc_headers(line: &str) -> (Vec<ComsubHeredocHeader>, usize) {
     let bytes = line.as_bytes();
     let mut headers = Vec::new();
     let mut consumed = 0usize;

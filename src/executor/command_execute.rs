@@ -228,21 +228,30 @@ impl Executor {
             return Err(ExecuteError::ExitCode(2));
         }
 
-        if cmd
-            .word_metadata
-            .iter()
-            .any(|metadata| crate::lexer::has_unclosed_command_substitution(&metadata.raw))
-            || cmd
-                .assignment_values()
-                .any(|value| crate::lexer::has_unclosed_command_substitution(value))
         {
-            self.mark_parse_error();
-            eprintln!(
-                "{}syntax error: unexpected EOF while looking for matching `)'",
-                self.parser_diagnostic_prefix()
-            );
-            self.exit_code = 2;
-            return Err(ExecuteError::ExitCode(2));
+            // GNU make_cmd.c gather_here_documents + parse.y:6883: warn on
+            // any heredoc header the unclosed comsub swallowed, then report
+            // `unexpected EOF` at the line after the last input line — not
+            // the command's start line.
+            let mut base_line = cmd.line.unwrap_or(1);
+            let mut reported = false;
+            for raw in cmd
+                .assignment_values()
+                .map(|v| v.as_str())
+                .chain(cmd.word_metadata.iter().map(|m| m.raw.as_str()))
+            {
+                if crate::lexer::has_unclosed_command_substitution(raw) {
+                    self.mark_parse_error();
+                    self.report_unclosed_comsub_eof(raw, base_line);
+                    reported = true;
+                    break;
+                }
+                base_line += raw.matches('\n').count();
+            }
+            if reported {
+                self.exit_code = 2;
+                return Err(ExecuteError::ExitCode(2));
+            }
         }
 
         if cmd.function_command.is_none()

@@ -239,7 +239,16 @@ pub(super) fn collect_trailing_redirections(
                     redirect_fd_var_prefix(tokens, *index),
                 ));
                 if fd.is_none() {
-                    command.heredoc_delimiter = Some(target.value.clone());
+                    // GNU make_cmd.c make_here_document stores
+                    // `here_doc_eof = string_quote_removal(word)` — the
+                    // DEQUOTED delimiter; it is used both for body-line
+                    // matching and for the `delimited by end-of-file
+                    // (wanted `%s')` warning, so drop CTLESC pairs here.
+                    command.heredoc_delimiter = Some(
+                        target
+                            .value
+                            .replace(crate::executor::markers::CTLESC, ""),
+                    );
                 }
                 *index += 2;
                 continue;
@@ -744,7 +753,13 @@ pub(super) fn fill_pending_heredoc_body(
     redirect.gather_line = Some(gather_line);
     if redirect.fd.is_none() {
         cmd.heredoc = Some(body);
-        cmd.heredoc_delimiter = Some(redirect.delimiter.clone());
+        // GNU stores the dequoted delimiter (`here_doc_eof = redir_word`),
+        // so CTLESC pairs must not reach the warning text either.
+        cmd.heredoc_delimiter = Some(
+            redirect
+                .delimiter
+                .replace(crate::executor::markers::CTLESC, ""),
+        );
         cmd.heredoc_gather_line = Some(gather_line);
     }
     true

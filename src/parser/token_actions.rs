@@ -671,7 +671,11 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     redirect_fd_var_prefix(tokens, *i),
                 ));
                 if fd.is_none() {
-                    state.current_cmd.heredoc_delimiter = Some(delimiter);
+                    // GNU stores `here_doc_eof` dequoted (make_cmd.c
+                    // string_quote_removal); CTLESC pairs must not leak
+                    // into the `wanted `%s'` warning text.
+                    state.current_cmd.heredoc_delimiter =
+                        Some(delimiter.replace(crate::executor::markers::CTLESC, ""));
                 }
                 *i += 1;
             }

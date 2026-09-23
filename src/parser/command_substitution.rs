@@ -394,20 +394,21 @@ fn skip_command_substitution_heredoc(
             ));
         }
         // GNU parse.y gather_here_documents reads the whole heredoc body
-        // before the parser looks at the next token, so a body line that is
-        // the delimiter followed by `)` ends the heredoc AND supplies the
-        // command substitution's closing paren (make_cmd.c:585-640
-        // PST_EOFTOKEN). Consume only up to the `)` and report that the
-        // header did not close the substitution: the caller's paren scan
-        // then closes it at the unconsumed `)`. Mirror of the lexer-side
-        // scanner (lexer/skip.rs strip_suffix form).
-        if let Some(body) = candidate.strip_suffix(')') {
-            if body == delimiter {
-                let paren_index = line_start
-                    + (line.chars().count() - candidate.chars().count())
-                    + delimiter.chars().count();
-                return Some((paren_index, None));
-            }
+        // before the parser looks at the next token, so a body line that
+        // starts with the delimiter and contains `)` later on ends the
+        // heredoc AND pushes the remainder back into the parser input
+        // (make_cmd.c:602-611 PST_EOFTOKEN, shell_ungets(line+redir_len)).
+        // Resume the caller's scan right after the delimiter prefix — the
+        // pushed-back `)` (and anything before it, e.g. `x` in `EOFx)`)
+        // re-enters the token stream, where the `)` closes the substitution.
+        // Covers `EOF)`, `EOF )`, and `))` when the delimiter is `)` itself.
+        if candidate.starts_with(delimiter.as_str())
+            && candidate[delimiter.len()..].contains(')')
+        {
+            let resume = line_start
+                + (line.chars().count() - candidate.chars().count())
+                + delimiter.chars().count();
+            return Some((resume, None));
         }
         if line_end >= chars.len() {
             break;

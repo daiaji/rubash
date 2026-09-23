@@ -402,7 +402,17 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
         i += 1;
     }
     let d = *stack.last()?;
-    Some((d.close, d.open_line, line, d.report_open))
+    // GNU parse.y:6883 yyerror path reports `line_number` at EOF. The lexer
+    // consumes the final physical line before seeing EOF, so the reported
+    // line is the last content line + 1: for input ending in '\n' `line`
+    // already counts the (empty) next line; without a trailing newline the
+    // pending last line still has to be stepped past.
+    let eof_line = if input.ends_with('\n') {
+        line
+    } else {
+        line + 1
+    };
+    Some((d.close, d.open_line, eof_line, d.report_open))
 }
 
 pub(super) fn has_unclosed_quotes(input: &str) -> bool {

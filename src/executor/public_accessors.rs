@@ -767,6 +767,31 @@ impl Executor {
         "bash: ".to_string()
     }
 
+    /// GNU parser_error (error.c:300-316) with yy_input_name() ==
+    /// "command substitution" (parse_and_execute's `whom`, subst.c:7413):
+    /// `script: command substitution: line N: `. The comsub parse inherits
+    /// the outer line_number (evalstring.c push_stream(0)), so `line` is the
+    /// script line where the substitution's input ran out.
+    pub(in crate::executor) fn comsub_eof_diagnostic(&self, line: usize) -> String {
+        if self.shell_state.env_vars.contains_key("__RUBASH_INTERACTIVE") {
+            // parser_error's interactive branch prints only the shell name.
+            let name = self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_SHELL_NAME")
+                .cloned()
+                .unwrap_or_else(|| "bash".to_string());
+            return format!("{name}: ");
+        }
+        let name = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_SCRIPT_NAME")
+            .cloned()
+            .unwrap_or_else(|| "bash".to_string());
+        format!("{name}: command substitution: line {line}: ")
+    }
+
     pub fn diagnostic_prefix_for_line(&self, line: usize) -> String {
         if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             return format!("{script}: line {line}: ");
@@ -839,6 +864,60 @@ impl Executor {
         eprintln!(
             "{}warning: here-document at line {gather_line} delimited by end-of-file (wanted `{delimiter}')",
             self.diagnostic_prefix_for_line(delimiter_line)
+        );
+    }
+
+    /// Report an unclosed `$(` that ran to end of input. GNU make_cmd.c
+    /// gather_here_documents scans heredoc headers inside the comsub text
+    /// first (each unterminated body warns at the last input line, with
+    /// "at line N" = the header's script line); parse.y:6883-6896 then issues
+    /// `unexpected EOF while looking for matching ')'` at the parser's
+    /// line_number — the line after the last physical input line.
+    /// `raw` is the token text starting at `start_line` that contains the
+    /// unclosed `$(` and everything it swallowed.
+    pub(in crate::executor) fn report_unclosed_comsub_eof(&self, raw: &str, start_line: usize) {
+        // Locate the last `$(` whose tail never closes — its text is the
+        // comsub body GNU's nested parse consumed.
+        let bytes = raw.as_bytes();
+        let mut innermost: Option<(usize, &str)> = None;
+        for (idx, window) in bytes.windows(2).enumerate() {
+            if window == b"$("
+                && (idx == 0 || bytes[idx - 1] != b'\\')
+                && crate::lexer::has_unclosed_command_substitution(&raw[idx..])
+            {
+                innermost = Some((idx, &raw[idx + 2..]));
+            }
+        }
+        let last_line = start_line + raw.matches('\n').count();
+        if let Some((idx, content)) = innermost {
+            let content_line = start_line + raw[..idx].matches('\n').count();
+            // Replay the gather: track pending headers and consumed
+            // delimiter lines; whatever is still open at EOF warns.
+            let mut pending: Vec<(String, usize)> = Vec::new();
+            let mut line_no = content_line;
+            for line in content.split('\n') {
+                if let Some((delim, _)) = pending.first().cloned() {
+                    if line == delim {
+                        pending.remove(0);
+                    }
+                } else {
+                    let (headers, _) = crate::lexer::scan_line_for_comsub_heredoc_headers(line);
+                    for header in headers {
+                        pending.push((header.delimiter, line_no));
+                    }
+                }
+                line_no += 1;
+            }
+            for (delim, at_line) in pending {
+                eprintln!(
+                    "{}warning: here-document at line {at_line} delimited by end-of-file (wanted `{delim}')",
+                    self.diagnostic_prefix_for_line(last_line)
+                );
+            }
+        }
+        eprintln!(
+            "{}unexpected EOF while looking for matching `)'",
+            self.parser_diagnostic_prefix_for_line(last_line + 1)
         );
     }
 

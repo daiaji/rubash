@@ -806,10 +806,21 @@ impl Executor {
                         // GNU parse.y parse_comsub: an unclosed `$(` reports
                         // `unexpected EOF` and the expansion fails, aborting
                         // the command while the script continues (braces.tests
-                        // "${a+'$('\'}").
+                        // "${a+'$('\'}"). parser_error (error.c:300) uses
+                        // yy_input_name()=="command substitution" and the
+                        // inherited line_number (evalstring.c push_stream(0))
+                        // — the current command line plus the newlines the
+                        // comsub text consumed.
+                        let eof_line = self
+                            .shell_state
+                            .env_vars
+                            .get("__RUBASH_CURRENT_LINE")
+                            .and_then(|line| line.parse::<usize>().ok())
+                            .unwrap_or(1)
+                            + source.lines().count().saturating_sub(1);
                         eprintln!(
-                            "{}command substitution: line 1: unexpected EOF while looking for matching `)'",
-                            self.diagnostic_prefix()
+                            "{}unexpected EOF while looking for matching `)'",
+                            self.comsub_eof_diagnostic(eof_line)
                         );
                         self.shell_state.arithmetic_fatal_error.set(true);
                         self.shell_state.arithmetic_expansion_error.set(true);
