@@ -149,10 +149,51 @@ RB_PATH="$SHFIX"
 # NTFS symlinks instead of copies, matching GNU ln semantics on the rb side
 # (globstar3.sub symlink traversal depends on it).
 export MSYS=winsymlinks:nativestrict
-export WSLENV="__RUBASH_NO_UPSTREAM_SCRIPTS/w:TMPDIR/p:LC_ALL/w:LC_COLLATE/w:LANG/w:MSYS/w"
+# OLDPWD/wp: suites cd into the fixture dir inside a subshell that exports
+# OLDPWD=<parent cwd>, so GNU's errors.tests `cd -` returns to the repo root
+# and every `${THIS_SH} ./errorsN.sub` then ENOENTs. Without the /wp entry the
+# variable never crosses to rubash.exe, `cd -` reports "OLDPWD not set", and
+# the .sub bodies run against GNU's empty output (~115 phantom diff lines —
+# verified identical on a HEAD build under the same WSLENV).
+export WSLENV="__RUBASH_NO_UPSTREAM_SCRIPTS/w:TMPDIR/p:LC_ALL/w:LC_COLLATE/w:LANG/w:MSYS/w:OLDPWD/wp"
 
 mkdir -p "$OUT"
 : > "$LOG"
+
+# ---- env-bound diff classification -----------------------------------------
+# NTFS cannot create filenames containing : * ? " < > | -- test suites that
+# `touch` such names (extglob/glob a:b cases) fail CREATION on the rubash side
+# while the GNU side (ext4) succeeds. That is a filesystem capability gap, not
+# a shell semantic gap, so the ledger reports it separately: each suite line is
+# "name <total> env=<n>", where env= is the hunk count attributable solely to
+# illegal-filename tokens. Raw gnu.out/rb.out artifacts are untouched -- the
+# classification is reviewable against them. A hunk is env-bound only when
+# EVERY token present on one side but not the other contains an illegal
+# character; any differing legal token keeps the hunk in the rubash count.
+# "/" is deliberately NOT in the illegal set: diff tokens are often whole
+# paths, and path-shape differences (e.g. vredir /bin/* expansion) are real
+# rubash-side questions, not filename-creation failures.
+count_diff_env() { # <gnu.out> <rb.out> -> prints "<total> <env_count>"
+  diff "$1" "$2" 2>/dev/null | awk -v RS='' -v FS='\n' '
+    {
+      delete gt; delete rt; gl=0; rl=0
+      for (i = 1; i <= NF; i++) {
+        l = $i
+        if (l ~ /^</) { gl++; c = split(substr(l, 3), t, " "); for (j = 1; j <= c; j++) gt[t[j]]++ }
+        else if (l ~ /^>/) { rl++; c = split(substr(l, 3), t, " "); for (j = 1; j <= c; j++) rt[t[j]]++ }
+      }
+      env = 1
+      for (tk in gt) { ex = gt[tk] - (rt[tk] + 0)
+        if (ex > 0) { s = tk; gsub(/^[<>()\x27]+|[<>()\x27]+$/, "", s)
+          if (s !~ /[:*?"<>|]/) env = 0 } }
+      for (tk in rt) { ex = rt[tk] - (gt[tk] + 0)
+        if (ex > 0) { s = tk; gsub(/^[<>()\x27]+|[<>()\x27]+$/, "", s)
+          if (s !~ /[:*?"<>|]/) env = 0 } }
+      total += gl + rl
+      if (env) e += gl + rl
+    }
+    END { print total + 0, e + 0 }'
+}
 for name in $SUITES; do
   sync_suite "$name" || { echo "$name SKIP(no-source)" >> "$LOG"; continue; }
   w="$OUT/$name"; mkdir -p "$w/tmp"
@@ -175,7 +216,9 @@ for name in $SUITES; do
       timeout --foreground -k 5 "$tmo" "$RUB" "./$name.tests" \
       > "$w/rb.out" 2> "$w/rb.err" ) < /dev/null
   echo $? > "$w/rb.rc"
-  n=$(diff "$w/gnu.out" "$w/rb.out" 2>/dev/null | grep -c "^[<>]")
-  echo "$name $n" >> "$LOG"
+  read -r n envn <<EOF
+$(count_diff_env "$w/gnu.out" "$w/rb.out")
+EOF
+  echo "$name $n env=$envn" >> "$LOG"
 done
 echo TRUE-DONE
