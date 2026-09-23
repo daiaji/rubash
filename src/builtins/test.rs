@@ -685,6 +685,8 @@ fn modified(path: &str, env_vars: &HashMap<String, String>) -> Option<std::time:
 }
 
 fn modified_since_last_read(path: &str, env_vars: &HashMap<String, String>) -> bool {
+    // GNU test.c:569-574 (`-N`): stat must succeed, then mtime > atime —
+    // strictly newer, so a just-touched file (atime == mtime) is false.
     let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
         return false;
     };
@@ -694,7 +696,7 @@ fn modified_since_last_read(path: &str, env_vars: &HashMap<String, String>) -> b
     let Ok(accessed) = metadata.accessed() else {
         return true;
     };
-    modified >= accessed
+    modified > accessed
 }
 
 fn fd_is_terminal(operand: &str) -> bool {
@@ -788,13 +790,63 @@ fn file_owned_by_effective_group(path: &str, env_vars: &HashMap<String, String>)
 }
 
 fn same_file(left: &str, right: &str, env_vars: &HashMap<String, String>) -> bool {
-    let Ok(left) = fs::canonicalize(test_path(left, env_vars)) else {
-        return false;
+    // GNU general.c:652-670 same_file: stat both operands and compare
+    // (st_dev, st_ino) — hardlinks are distinct paths sharing one inode,
+    // so a canonical-path comparison misses them. On Windows the
+    // equivalent identity is (volume serial, file index).
+    let left = test_path(left, env_vars);
+    let right = test_path(right, env_vars);
+    match (file_identity(&left), file_identity(&right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn file_identity(path: &std::path::Path) -> Option<(u32, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
     };
-    let Ok(right) = fs::canonicalize(test_path(right, env_vars)) else {
-        return false;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // DesiredAccess 0 queries metadata without requiring data access;
+    // FILE_FLAG_BACKUP_SEMANTICS lets directories resolve an identity too.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
     };
-    left == right
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    unsafe {
+        CloseHandle(handle);
+    }
+    (ok != 0).then(|| {
+        (
+            info.dwVolumeSerialNumber,
+            ((info.nFileIndexHigh as u64) << 32) | u64::from(info.nFileIndexLow),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn file_identity(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
 }
 
 pub(crate) const EMULATED_FILE_MODES: &str = "__RUBASH_FILE_MODES";

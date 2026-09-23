@@ -17,7 +17,12 @@ use std::io::{self, BufRead, IsTerminal, Read, Write};
 fn main() {
     let handle = std::thread::Builder::new()
         .name("rubash-main".to_string())
-        .stack_size(32 * 1024 * 1024)
+        // GNU variables.c FUNCNEST: 0/unset means no limit, so recursion
+        // depth is bounded only by the real stack. Debug frames in the
+        // executor's call chain run ~150KB each; 512MiB (reserved, not
+        // committed) covers func4.sub's FUNCNEST=0 recursion to f=201
+        // with headroom for deeper user recursion.
+        .stack_size(512 * 1024 * 1024)
         .spawn(run_main)
         .expect("spawn rubash main thread");
     let code = handle.join().unwrap_or(1);

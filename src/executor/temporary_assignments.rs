@@ -670,7 +670,7 @@ impl Executor {
                     if is_marked_var(&self.shell_state.env_vars, "__RUBASH_READONLY_VARS", elem_base) {
                         let line = format!(
                             "{}{}: readonly variable\n",
-                            self.assignment_diagnostic_prefix(),
+                            self.diagnostic_prefix(),
                             elem_base
                         );
                         self.emit_assignment_diag(line);
@@ -719,9 +719,13 @@ impl Executor {
                 }
                 {
                     if is_marked_var(&self.shell_state.env_vars, "__RUBASH_READONLY_VARS", elem_base) {
+                        // GNU error.c:453 err_readonly -> report_error: the
+                        // bind-layer diagnostic is `name: readonly variable`
+                        // with no builtin-name segment (read.def:1155
+                        // bind_read_variable -> variables.c bind_variable).
                         let line = format!(
                             "{}{}: readonly variable\n",
-                            self.assignment_diagnostic_prefix(),
+                            self.diagnostic_prefix(),
                             elem_base
                         );
                         self.emit_assignment_diag(line);
@@ -745,7 +749,7 @@ impl Executor {
         if is_marked_var(&self.shell_state.env_vars, "__RUBASH_READONLY_VARS", base_name) {
             let line = format!(
                 "{}{}: readonly variable\n",
-                self.assignment_diagnostic_prefix(),
+                self.diagnostic_prefix(),
                 base_name
             );
             self.emit_assignment_diag(line);
