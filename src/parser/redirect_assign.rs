@@ -27,7 +27,9 @@ pub(super) fn assign_redirect_out_target(
         let redirect =
             redirect_node_with_fd_var(&tokens[index].value, fd, fd_var, &target, false, false);
         command.redirects.push(redirect.clone());
-        command.redirect_out = Some(redirect);
+        if redirect.fd.unwrap_or(1) == 1 {
+            command.redirect_out = Some(redirect);
+        }
         return Some(next_i);
     }
 
@@ -57,14 +59,17 @@ pub(super) fn assign_redirect_out_target(
             false,
         );
         command.redirects.push(redirect.clone());
-        command.redirect_in = Some(redirect);
+        if redirect.fd.unwrap_or(0) == 0 {
+            command.redirect_in = Some(redirect);
+        }
         return Some(index + 1);
     }
+    let (target_value, target_raw) = dup_close_target(command, &tokens[index].value, target);
     assign_output_redirect_raw(
         command,
         &tokens[index].value,
-        &target.value,
-        &target.raw,
+        &target_value,
+        &target_raw,
         fd,
         fd_var,
     );
@@ -97,7 +102,9 @@ pub(super) fn assign_append_target(
         let redirect =
             redirect_node_with_fd_var(&tokens[index].value, fd, fd_var, &target, true, false);
         command.redirects.push(redirect.clone());
-        command.append = Some(redirect);
+        if redirect.fd.unwrap_or(1) == 1 {
+            command.append = Some(redirect);
+        }
         return Some(next_i);
     }
 
@@ -121,8 +128,9 @@ pub(super) fn assign_redirect_err_target(
     command: &mut CommandNode,
 ) -> Option<usize> {
     let target = redirect_target_token(tokens, index)?;
-    let target_value = redirect_target(&tokens[index].value, &target.value);
-    let target_raw = redirect_target(&tokens[index].value, &target.raw);
+    let (dup_value, dup_raw) = dup_close_target(command, &tokens[index].value, target);
+    let target_value = redirect_target(&tokens[index].value, &dup_value);
+    let target_raw = redirect_target(&tokens[index].value, &dup_raw);
     command.redirects.push(redirect_node_with_raw(
         &tokens[index].value,
         Some(2),
@@ -207,7 +215,13 @@ pub(super) fn assign_output_redirect_raw(
         operator == ">|",
     );
     command.redirects.push(redirect.clone());
-    command.redirect_out = Some(redirect);
+    // The `redirect_out` field mirrors only fd-1 redirects (GNU's
+    // redirector==1); numbered output redirects (`3>f`, `3>&1`) live in the
+    // ordered `redirects` list so fd-1 propagation never mistakes them for
+    // the command's own stdout redirect.
+    if redirect.fd.unwrap_or(1) == 1 {
+        command.redirect_out = Some(redirect);
+    }
     if operator == "&>" {
         command.redirect_err_append = Some(redirect_node_with_raw(
             operator,
@@ -241,7 +255,9 @@ pub(super) fn assign_append_redirect_raw(
     let redirect =
         redirect_node_with_fd_var_raw(operator, fd, fd_var, target, raw_target, true, false);
     command.redirects.push(redirect.clone());
-    command.append = Some(redirect);
+    if redirect.fd.unwrap_or(1) == 1 {
+        command.append = Some(redirect);
+    }
     if operator == "&>>" {
         command.redirect_err_append = Some(redirect_node_with_raw(
             operator,

@@ -36,6 +36,38 @@ pub struct Redirect {
     pub clobber: bool,
 }
 
+impl Redirect {
+    /// Input-side kinds (GNU redir.c r_input_direction /
+    /// r_duplicating_input / r_close_this-on-read family): they occupy a
+    /// read descriptor slot, not an output one.
+    pub fn is_input_side(&self) -> bool {
+        matches!(
+            self.kind,
+            RedirectKind::Input
+                | RedirectKind::ReadWrite
+                | RedirectKind::DuplicateInput
+                | RedirectKind::CloseInput
+                | RedirectKind::HereDoc
+                | RedirectKind::HereString
+        )
+    }
+
+    /// Output-side kinds (r_output_direction / r_appending_to /
+    /// r_duplicating_output / r_err_and_out family).
+    pub fn is_output_side(&self) -> bool {
+        !self.is_input_side() && !matches!(self.kind, RedirectKind::Unknown)
+    }
+
+    /// The stdio mirror fields (`redirect_in`/`redirect_out`/`append`/
+    /// `redirect_err`/`redirect_err_append`) only carry descriptors 0-2;
+    /// a numbered fd outside that set or a `{var}` dynamic fd lives solely
+    /// in the ordered `redirects` list. Probes that ask "does this command
+    /// have redirects" must scan the list or they miss these.
+    pub fn is_list_only_redirect(&self) -> bool {
+        self.fd.is_some_and(|fd| fd > 2) || self.fd_var.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedirectKind {
     Input,
@@ -1140,6 +1172,14 @@ pub struct CommandNode {
     pub coproc_command: Option<Box<CoprocCommand>>,
     /// Script line number where this command starts, when known.
     pub line: Option<usize>,
+    /// Script line number where this command's parse ENDED (the line of
+    /// its last token — closing keyword or trailing redirect target).
+    /// GNU tracks `line_number` at the point each top-level command
+    /// finishes parsing, so a compound command's diagnostics — while,
+    /// until, if, `{ }` — report the `done`/`fi`/`}` line, not the
+    /// keyword line (redir.c do_redirections runs under that ambient
+    /// `line_number` before the command's own ->line assignment).
+    pub end_line: Option<usize>,
     /// Physical line where the primary `<<` heredoc's body scan began
     /// (mirrors the gather_line of the last fd-less heredoc redirect).
     /// GNU reports "here-document at line N" against this gather line, not
@@ -1222,6 +1262,7 @@ impl CommandNode {
             brace_group: None,
             coproc_command: None,
             line: None,
+            end_line: None,
             heredoc_gather_line: None,
         }
     }

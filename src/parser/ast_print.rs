@@ -398,7 +398,9 @@ impl Printer {
         for (index, stage) in stages.iter().enumerate() {
             if index > 0 {
                 let operator = operators.get(index - 1).map(String::as_str).unwrap_or("|");
-                let connector = if operator == "|&" { " |&" } else { " |" };
+                // parse.y lowers `a |& b` to `a 2>&1 | b` in the command
+                // tree, so print_cmd.c reprints the dup redirect on the LHS.
+                let connector = if operator == "|&" { " 2>&1 |" } else { " |" };
                 self.print_deferred_heredocs(connector);
                 self.cprintf(" ");
                 self.skip_this_indent += 1;
@@ -1025,11 +1027,17 @@ impl Printer {
                     self.cprintf(&format!("{{{var}}}<&{fd}"));
                 } else {
                     let redirectee = target.trim_start_matches('&');
-                    if redirectee.chars().all(|ch| ch.is_ascii_digit()) {
-                        // print_cmd.c r_duplicating_input prints both fds
-                        // unconditionally: `<&3` prints as `0<&3`.
+                    let (moved, bare) = redirectee
+                        .strip_suffix('-')
+                        .map(|b| (true, b))
+                        .unwrap_or((false, redirectee));
+                    if bare.chars().all(|ch| ch.is_ascii_digit()) {
+                        // print_cmd.c r_duplicating_input/r_move_input print
+                        // both fds unconditionally: `<&3` -> `0<&3`,
+                        // `<&5-` -> `0<&5-`.
                         let fd = redirect.fd.unwrap_or(0);
-                        self.cprintf(&format!("{fd}<&{redirectee}"));
+                        let dash = if moved { "-" } else { "" };
+                        self.cprintf(&format!("{fd}<&{bare}{dash}"));
                     } else if redirect.fd == Some(0) || redirect.fd.is_none() {
                         // r_duplicating_input_word omits a zero redirector.
                         self.cprintf(&format!("<&{redirectee}"));
@@ -1048,11 +1056,16 @@ impl Printer {
                     self.cprintf(&format!("{{{var}}}>&{fd}"));
                 } else {
                     let redirectee = target.trim_start_matches('&');
-                    if redirectee.chars().all(|ch| ch.is_ascii_digit()) {
-                        // print_cmd.c r_duplicating_output prints both fds
-                        // unconditionally: `>&2` prints as `1>&2`.
+                    let (moved, bare) = redirectee
+                        .strip_suffix('-')
+                        .map(|b| (true, b))
+                        .unwrap_or((false, redirectee));
+                    if bare.chars().all(|ch| ch.is_ascii_digit()) {
+                        // print_cmd.c r_duplicating_output/r_move_output
+                        // print both fds unconditionally.
                         let fd = redirect.fd.unwrap_or(1);
-                        self.cprintf(&format!("{fd}>&{redirectee}"));
+                        let dash = if moved { "-" } else { "" };
+                        self.cprintf(&format!("{fd}>&{bare}{dash}"));
                     } else if redirect.fd == Some(1) || redirect.fd.is_none() {
                         // r_duplicating_output_word omits a unit redirector.
                         self.cprintf(&format!(">&{redirectee}"));

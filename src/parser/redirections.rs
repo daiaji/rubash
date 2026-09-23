@@ -47,7 +47,9 @@ pub(super) fn collect_trailing_redirections(
                 let redirect =
                     redirect_node_with_fd_var(&token.value, fd, fd_var, &target, false, false);
                 command.redirects.push(redirect.clone());
-                command.redirect_in = Some(redirect);
+                if redirect.fd.unwrap_or(0) == 0 {
+                    command.redirect_in = Some(redirect);
+                }
                 *index = next_i + 1;
                 continue;
             }
@@ -146,17 +148,20 @@ pub(super) fn collect_trailing_redirections(
             TokenKind::RedirectIn => {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
+                let (dup_value, dup_raw) = dup_close_target(command, &token.value, target);
                 let redirect = redirect_node_with_fd_var_raw(
                     &token.value,
                     fd,
                     redirect_fd_var_prefix(tokens, *index),
-                    &input_redirect_target(&token.value, &target.value),
-                    &input_redirect_target(&token.value, &target.raw),
+                    &input_redirect_target(&token.value, &dup_value),
+                    &input_redirect_target(&token.value, &dup_raw),
                     false,
                     false,
                 );
                 command.redirects.push(redirect.clone());
-                command.redirect_in = Some(redirect);
+                if redirect.fd.unwrap_or(0) == 0 {
+                    command.redirect_in = Some(redirect);
+                }
             }
             TokenKind::RedirectOut => {
                 if token.value.ends_with("<>") {
@@ -172,13 +177,16 @@ pub(super) fn collect_trailing_redirections(
                         false,
                     );
                     command.redirects.push(redirect.clone());
-                    command.redirect_in = Some(redirect);
+                    if redirect.fd.unwrap_or(0) == 0 {
+                        command.redirect_in = Some(redirect);
+                    }
                 } else {
+                    let (dup_value, dup_raw) = dup_close_target(command, &token.value, target);
                     assign_output_redirect_raw(
                         command,
                         &token.value,
-                        &target.value,
-                        &target.raw,
+                        &dup_value,
+                        &dup_raw,
                         None,
                         redirect_fd_var_prefix(tokens, *index),
                     );
@@ -303,6 +311,32 @@ pub(super) fn assign_here_string_process_substitution(
     assign_here_string_redirect(command, operator, &target, fd_var);
 }
 
+/// GNU parse.y:3802-3807: after `<&`/`>&` (optionally fd-prefixed) a `-`
+/// is its own close token — `exec <&-1` is `exec <&-` (close fd 0) plus
+/// operand `1` (`exec: 1: not found`), never a dup of fd "-1". When the
+/// target word starts with `-` and has more characters, returns the `-`
+/// close target and pushes the remainder onto the command's word list.
+pub(super) fn dup_close_target(
+    command: &mut CommandNode,
+    operator: &str,
+    target: &Token,
+) -> (String, String) {
+    if !(operator.ends_with("<&") || operator.ends_with(">&")) {
+        return (target.value.clone(), target.raw.clone());
+    }
+    let Some(rest) = target.value.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
+        return (target.value.clone(), target.raw.clone());
+    };
+    let raw_rest = target
+        .raw
+        .strip_prefix('-')
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or(rest);
+    let word = Token::new_with_raw(TokenKind::Word, rest, raw_rest, target.position + 1);
+    push_command_word(command, &word);
+    ("-".to_string(), "-".to_string())
+}
+
 pub(super) fn redirect_target_token(tokens: &[Token], index: usize) -> Option<&Token> {
     tokens
         .get(index + 1)
@@ -396,6 +430,12 @@ pub(super) fn redirect_node_with_raw(
     append: bool,
     clobber: bool,
 ) -> Redirect {
+    // GNU make_redirection (make_cmd.c) stores the redirector fd on the
+    // REDIRECT itself; a digit prefix fused into the operator token
+    // (`3>&1`, `10>f`) is the same fd. Normalize it into `fd` so every
+    // consumer sees the effective source descriptor instead of peeking at
+    // operator text. `>&word`/`&>file` carry no digits and stay None.
+    let fd = fd.or_else(|| redirect_operator_fd(operator));
     Redirect {
         fd,
         fd_var: None,

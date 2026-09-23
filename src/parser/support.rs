@@ -237,7 +237,13 @@ pub(super) fn brace_group_source_has_completed_command(source: &str) -> bool {
 }
 
 pub(super) fn token_completes_brace_group_command(token: &Token) -> bool {
-    if token.kind == TokenKind::Semicolon {
+    // GNU parse.y `compound_list: newline_list list0` and
+    // `list0: list1 '\n' newline_list | list1 '&' newline_list |
+    // list1 ';' newline_list` (parse.y:1262-1279): a `{ }` group closes
+    // after a command terminated by `;', a newline, or `&'. `&&'/`||'
+    // (And/Or) are connectors, not terminators — `{ a && }` stays an
+    // error as in GNU.
+    if matches!(token.kind, TokenKind::Semicolon | TokenKind::Background) {
         return true;
     }
     if token.kind != TokenKind::Keyword {
@@ -382,6 +388,7 @@ pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.append.is_none()
         && cmd.redirect_err.is_none()
         && cmd.redirect_err_append.is_none()
+        && cmd.redirects.is_empty()
         && cmd.pipe.is_none()
         && !cmd.background
         && cmd.and_or.is_none()

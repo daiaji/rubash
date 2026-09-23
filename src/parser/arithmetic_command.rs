@@ -396,6 +396,14 @@ pub(super) fn finish_compound_command(
     mut index: usize,
 ) -> (CommandNode, usize) {
     collect_trailing_redirections(tokens, &mut index, &mut command);
+    // GNU sets each top-level command's ambient line_number from where its
+    // parse ended — the last token consumed by the command itself (closing
+    // keyword or trailing redirect target), before the list terminator.
+    command.end_line = index
+        .checked_sub(1)
+        .and_then(|i| tokens.get(i))
+        .map(|token| token.position)
+        .or(command.line);
     match tokens.get(index).map(|token| &token.kind) {
         Some(TokenKind::Pipe) => {
             command.pipe = Some(1);

@@ -484,7 +484,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     let redirect =
                         redirect_node_with_fd_var(&token.value, fd, fd_var, &target, false, false);
                     state.current_cmd.redirects.push(redirect.clone());
-                    state.current_cmd.redirect_in = Some(redirect);
+                    if redirect.fd.unwrap_or(0) == 0 {
+                        state.current_cmd.redirect_in = Some(redirect);
+                    }
                     *i = next_i;
                 } else if let Some((mut process_substitution, next_i)) =
                     process_substitution_word_target(tokens, *i)
@@ -543,17 +545,21 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         *i = next_i;
                     }
                 } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
+                    let (dup_value, dup_raw) =
+                        dup_close_target(&mut state.current_cmd, &token.value, &tokens[*i + 1]);
                     let redirect = redirect_node_with_fd_var_raw(
                         &token.value,
                         fd,
                         fd_var,
-                        &input_redirect_target(&token.value, &tokens[*i + 1].value),
-                        &input_redirect_target(&token.value, &tokens[*i + 1].raw),
+                        &input_redirect_target(&token.value, &dup_value),
+                        &input_redirect_target(&token.value, &dup_raw),
                         false,
                         false,
                     );
                     state.current_cmd.redirects.push(redirect.clone());
-                    state.current_cmd.redirect_in = Some(redirect);
+                    if redirect.fd.unwrap_or(0) == 0 {
+                        state.current_cmd.redirect_in = Some(redirect);
+                    }
                     *i += 1;
                 }
             }

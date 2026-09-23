@@ -21,13 +21,16 @@ pub(super) fn parse_brace_group_command(
             );
             return Some((command, start + 1));
         }
-        let inner = inner_source.trim();
         // GNU parse.y keeps the in-place line counter: body commands inside
-        // a collapsed `{ ...; }` token report the group's own script line,
-        // not line 1 of the re-tokenized text (eval `'{ ...; }'` at script
-        // line N reports N).
-        let body_tokens =
-            crate::lexer::tokenize_with_initial_posix_and_line(inner, false, token.position);
+        // a collapsed `{ ...; }` token report real script lines. Pass the
+        // inner source untrimmed so the tokenizer's newline counting keeps
+        // positions anchored at the `{` token's line — trimming leading
+        // newlines here would shift every body command up.
+        let body_tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+            inner_source,
+            false,
+            token.position,
+        );
         let mut command = CommandNode::new();
         command.line = Some(token.position);
         command.brace_group = Some(Box::new(BraceGroupCommand {
