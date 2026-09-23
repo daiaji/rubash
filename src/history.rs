@@ -49,6 +49,12 @@ pub struct SessionHistory {
     /// Oldest-to-newest entry lines. Entry N (1-based) lives at
     /// entries[N - base].
     pub entries: Vec<String>,
+    /// Parallel to `entries`: the `#<unix-seconds>` stamp GNU stores on every
+    /// add_history (readline/history.c hist_inittime). Empty string when the
+    /// entry carries none (loaded from a file without timestamps). Written to
+    /// the history file only when history_write_timestamps is set, i.e. when
+    /// HISTTIMEFORMAT exists as a variable (variables.c sv_histtimefmt).
+    pub timestamps: Vec<String>,
     /// history_base: the list number of entries[0].
     pub base: usize,
     /// history_lines_this_session: lines added via the recording path.
@@ -93,7 +99,7 @@ impl SessionHistory {
         line: &str,
         histcontrol: &str,
         histignore: &str,
-        histsize: usize,
+        histsize: Option<usize>,
     ) -> bool {
         if line.trim().is_empty() {
             return false;
@@ -118,23 +124,63 @@ impl SessionHistory {
             return false;
         }
         if control & 4 != 0 {
-            self.entries.retain(|e| e != line);
+            // erasedups removes every matching entry; keep timestamps aligned.
+            let mut kept_ts: Vec<String> = Vec::with_capacity(self.timestamps.len());
+            let mut kept: Vec<String> = Vec::with_capacity(self.entries.len());
+            for (i, e) in self.entries.iter().enumerate() {
+                if e != line {
+                    kept.push(e.clone());
+                    kept_ts.push(
+                        self.timestamps.get(i).cloned().unwrap_or_default(),
+                    );
+                }
+            }
+            self.entries = kept;
+            self.timestamps = kept_ts;
         }
         self.entries.push(line.to_string());
+        // readline/history.c:322-333 hist_inittime: every add_history stores
+        // "#<unix-seconds>" on the entry regardless of whether timestamps are
+        // later written to the file.
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.timestamps.push(format!("#{epoch}"));
         self.stifle(histsize);
         self.lines_this_session += 1;
         true
     }
 
     /// history.c stifle_history: drop oldest entries beyond HISTSIZE while
-    /// keeping the numbering continuous (history_base advances).
-    pub fn stifle(&mut self, histsize: usize) {
-        if histsize == 0 {
+    /// keeping the numbering continuous (history_base advances). `None`
+    /// is the unstifled state (GNU sv_histsize unstifles when HISTSIZE is
+    /// unset, empty, negative, or non-numeric); `Some(0)` empties the list.
+    pub fn stifle(&mut self, histsize: Option<usize>) {
+        let Some(histsize) = histsize else {
             return;
-        }
+        };
         while self.entries.len() > histsize {
             self.entries.remove(0);
+            if !self.timestamps.is_empty() {
+                self.timestamps.remove(0);
+            }
             self.base += 1;
+        }
+    }
+
+    /// variables.c sv_histsize: map a HISTSIZE/HISTFILESIZE value to the
+    /// stifle/truncate limit. Unset, empty, negative, or non-numeric values
+    /// mean "no limit" (unstifle / no file truncation).
+    pub fn size_limit(value: Option<&str>) -> Option<usize> {
+        let value = value?;
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        match value.parse::<i64>() {
+            Ok(n) if n >= 0 => Some(n as usize),
+            _ => None,
         }
     }
 
@@ -142,6 +188,7 @@ impl SessionHistory {
     /// session line counter.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.timestamps.clear();
         self.base = 1;
         self.lines_this_session = 0;
         self.last_line_added = false;
@@ -155,7 +202,7 @@ impl SessionHistory {
     /// skipped (they may be part of multi-line entries), and lines after
     /// a timestamp that are not themselves timestamps are appended to
     /// the previous entry when the file has multi-line entries.
-    pub fn load_file(&mut self, path: &str, histsize: usize) -> io::Result<usize> {
+    pub fn load_file(&mut self, path: &str, histsize: Option<usize>) -> io::Result<usize> {
         let content = fs::read_to_string(path)?;
         let lines: Vec<&str> = content.lines().collect();
         // histfile.c:377-381: detect timestamps (# followed by digit).
@@ -166,14 +213,14 @@ impl SessionHistory {
         let has_multiline = has_timestamps;
         let default_skipblanks = !has_multiline;
         let mut skipblanks = default_skipblanks;
-        let mut last_ts: Option<&str> = None;
+        let mut last_ts: Option<String> = None;
         let mut count = 0usize;
         for line in &lines {
             let is_timestamp = line.starts_with('#')
                 && line[1..].chars().next().is_some_and(|c| c.is_ascii_digit());
             if is_timestamp {
                 // histfile.c:448-453: save timestamp, skip leading blanks.
-                last_ts = Some(line);
+                last_ts = Some(line.to_string());
                 skipblanks = true;
                 continue;
             }
@@ -190,8 +237,11 @@ impl SessionHistory {
                 last.push('\n');
                 last.push_str(line);
             } else {
-                // histfile.c:439: add as new entry.
+                // histfile.c:439-453: add as new entry carrying the saved
+                // timestamp (add_history_time).
                 self.entries.push(line.to_string());
+                self.timestamps
+                    .push(last_ts.clone().unwrap_or_default());
                 self.stifle(histsize);
                 count += 1;
             }
@@ -200,54 +250,133 @@ impl SessionHistory {
         Ok(count)
     }
 
-    /// builtins/history.def -w: write every entry (truncate).
-    pub fn write_file(&self, path: &str) -> io::Result<usize> {
-        let joined = self
-            .entries
-            .iter()
-            .map(|e| e.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        fs::write(path, joined + "\n")?;
+    /// builtins/history.def -w / histfile.c history_write: write every entry
+    /// (truncate). When write_timestamps is set each entry is preceded by its
+    /// `#<epoch>` line (histfile.c:738-739 history_write_slow).
+    pub fn write_file(&self, path: &str, write_timestamps: bool) -> io::Result<usize> {
+        let mut out = String::new();
+        for (i, entry) in self.entries.iter().enumerate() {
+            if write_timestamps {
+                if let Some(ts) = self.timestamps.get(i).filter(|ts| !ts.is_empty()) {
+                    out.push_str(ts);
+                    out.push('\n');
+                }
+            }
+            out.push_str(entry);
+            out.push('\n');
+        }
+        fs::write(path, out)?;
         Ok(self.entries.len())
     }
 
     /// builtins/history.def -a: append the last history_lines_this_session
     /// entries (the ones added since the session baseline) and reset the
     /// session counter on success.
-    pub fn append_file(&mut self, path: &str) -> io::Result<usize> {
+    pub fn append_file(&mut self, path: &str, write_timestamps: bool) -> io::Result<usize> {
         use std::io::Write;
         let n = self.lines_this_session.min(self.entries.len());
         let start = self.entries.len() - n;
-        let pending: Vec<String> = self.entries[start..].to_vec();
-        if !pending.is_empty() {
+        if n > 0 {
             let mut file = fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)?;
-            for entry in &pending {
-                writeln!(file, "{entry}")?;
+            for i in start..self.entries.len() {
+                if write_timestamps {
+                    if let Some(ts) = self.timestamps.get(i).filter(|ts| !ts.is_empty()) {
+                        writeln!(file, "{ts}")?;
+                    }
+                }
+                writeln!(file, "{}", self.entries[i])?;
             }
         }
         self.lines_this_session = 0;
-        Ok(pending.len())
+        Ok(n)
+    }
+
+    /// histfile.c:540-668 history_truncate_file: keep only the last `lines`
+    /// command lines of the file. When timestamps are being written, a
+    /// command's `#<epoch>` line travels with it and does not count toward
+    /// the limit (`lines += history_write_timestamps` plus the
+    /// HIST_TIMESTAMP_START backtrack at lines 633-657).
+    pub fn truncate_file(&self, path: &str, lines: usize, write_timestamps: bool) -> io::Result<()> {
+        let Ok(content) = fs::read_to_string(path) else {
+            return Ok(());
+        };
+        if lines == 0 {
+            fs::write(path, "")?;
+            return Ok(());
+        }
+        let file_lines: Vec<&str> = content.lines().collect();
+        let is_ts = |line: &str| {
+            write_timestamps
+                && line.starts_with('#')
+                && line[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
+        };
+        let command_lines: Vec<usize> = file_lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| !is_ts(line))
+            .map(|(i, _)| i)
+            .collect();
+        if command_lines.len() <= lines {
+            return Ok(());
+        }
+        let first_kept = command_lines[command_lines.len() - lines];
+        // Back up over the kept command's timestamp line.
+        let start = if first_kept > 0 && is_ts(file_lines[first_kept - 1]) {
+            first_kept - 1
+        } else {
+            first_kept
+        };
+        // Recompute the byte offset of the kept tail inside the original
+        // text so the file's exact bytes (including any trailing newlines)
+        // are preserved.
+        let mut offset = 0usize;
+        for (i, line) in file_lines.iter().enumerate() {
+            if i == start {
+                break;
+            }
+            offset += line.len() + 1;
+        }
+        fs::write(path, &content[offset..])?;
+        Ok(())
     }
 
     /// builtins/history.def -r: append file lines to the list.
-    pub fn read_file(&mut self, path: &str, histsize: usize) -> io::Result<usize> {
+    pub fn read_file(&mut self, path: &str, histsize: Option<usize>) -> io::Result<usize> {
         self.load_file(path, histsize)
     }
 
     /// builtins/history.def -n: append file lines not already in the list.
-    pub fn read_new_file(&mut self, path: &str, histsize: usize) -> io::Result<usize> {
+    pub fn read_new_file(&mut self, path: &str, histsize: Option<usize>) -> io::Result<usize> {
         let content = fs::read_to_string(path)?;
+        // Same #<digit> detection as load_file (histfile.c:377-381).
+        let has_timestamps = content
+            .lines()
+            .next()
+            .is_some_and(|l| {
+                l.starts_with('#')
+                    && l[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
+            });
         let mut count = 0usize;
+        let mut last_ts: Option<String> = None;
         for line in content.lines() {
+            if has_timestamps
+                && line.starts_with('#')
+                && line[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
+            {
+                last_ts = Some(line.to_string());
+                continue;
+            }
             if self.entries.iter().any(|e| e == line) {
+                last_ts = None;
                 continue;
             }
             self.entries.push(line.to_string());
+            self.timestamps.push(last_ts.clone().unwrap_or_default());
             self.stifle(histsize);
+            last_ts = None;
             count += 1;
         }
         Ok(count)

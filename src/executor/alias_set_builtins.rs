@@ -102,10 +102,7 @@ impl Executor {
         let Some(path) = self.get_env("HISTFILE") else {
             return;
         };
-        let histsize = self
-            .get_env("HISTSIZE")
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(0);
+        let histsize = crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
         let mut shell = session.borrow_mut();
         shell.histfile_loaded = true;
         let _ = shell.load_file(&path, histsize);

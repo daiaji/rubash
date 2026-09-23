@@ -208,10 +208,8 @@ fn run_history_group(
         .get_env("HISTIGNORE")
         .unwrap_or_default()
         .to_string();
-    let histsize = executor
-        .get_env("HISTSIZE")
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(0);
+    let histsize =
+        crate::history::SessionHistory::size_limit(executor.get_env("HISTSIZE"));
     let chars = executor.get_env("histchars").unwrap_or("!^#");
     let mut chars = chars.chars();
     let ctx = HistCtx {

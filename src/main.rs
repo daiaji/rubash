@@ -369,7 +369,54 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
         ));
         executor.set_session_history(Some(session));
     }
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        initialize_interactive_history(executor);
+    }
     run_no_script_with_init(executor, init_file.as_deref())
+}
+
+/// GNU shell.c:806-811: interactive shells run bash_initialize_history and
+/// load_history at startup. bashhist.c:320-345 load_history: default
+/// HISTSIZE (500) and HISTFILESIZE (=HISTSIZE), apply sv_histsize to the
+/// file (truncating it to HISTFILESIZE lines), then read HISTFILE into the
+/// list when it exists.
+fn initialize_interactive_history(executor: &mut Executor) {
+    executor.set_shell_option("history", true);
+    if executor.get_env("HISTSIZE").is_none() {
+        executor.set_env("HISTSIZE", "500");
+    }
+    if executor.get_env("HISTFILESIZE").is_none() {
+        if let Some(histsize) = executor.get_env("HISTSIZE").map(String::from) {
+            executor.set_env("HISTFILESIZE", &histsize);
+        }
+    }
+    let Some(session) = executor.get_session_history() else {
+        return;
+    };
+    let Some(histfile) = executor.get_env("HISTFILE").map(String::from) else {
+        return;
+    };
+    if histfile.is_empty() {
+        return;
+    }
+    let path = executor.resolve_shell_path(&histfile);
+    let write_ts = executor.get_env("HISTTIMEFORMAT").is_some();
+    // bashhist.c:331-332: sv_histsize("HISTFILESIZE") truncates the file
+    // before it is read.
+    if let Some(max) =
+        rubash::history::SessionHistory::size_limit(executor.get_env("HISTFILESIZE"))
+    {
+        let _ = session
+            .borrow_mut()
+            .truncate_file(&path.to_string_lossy(), max, write_ts);
+    }
+    if path.exists() {
+        let histsize =
+            rubash::history::SessionHistory::size_limit(executor.get_env("HISTSIZE"));
+        let mut shell = session.borrow_mut();
+        shell.histfile_loaded = true;
+        let _ = shell.load_file(&path.to_string_lossy(), histsize);
+    }
 }
 
 fn apply_cli_shell_flags(executor: &mut Executor, option: &str) -> bool {
@@ -790,6 +837,13 @@ fn run_no_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> 
     if io::stdin().is_terminal() {
         run_repl(executor);
         0
+    } else if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        // shell.c: interactive shell with piped stdin still reads commands
+        // through readline (parse.y yy_readline_get -> bashline.c
+        // bash_readline), which echoes the prompt and input to stderr and
+        // honors editing keys (C-p/C-n history, C-r i-search, C-o
+        // operate-and-get-next) even without a tty.
+        run_interactive_stdin(executor)
     } else {
         run_stdin_script(executor)
     }
@@ -905,10 +959,8 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             if !trimmed.is_empty() {
                 let control = executor.get_env("HISTCONTROL").unwrap_or_default();
                 let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
-                let histsize = executor
-                    .get_env("HISTSIZE")
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(500);
+                let histsize =
+                    rubash::history::SessionHistory::size_limit(executor.get_env("HISTSIZE"));
                 session
                     .borrow_mut()
                     .record(trimmed, &control, &ignore, histsize);
@@ -946,6 +998,487 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
     let status = executor.last_exit_code();
     let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
     finish_shell(executor, status, interactive)
+}
+
+fn session_entries_len(executor: &Executor) -> usize {
+    executor
+        .get_session_history()
+        .map(|s| s.borrow().entries.len())
+        .unwrap_or(0)
+}
+
+/// history_base: the absolute 1-based history number of entries[0]
+/// (history.c stifle_history advances it as entries drop off the front).
+fn session_history_base(executor: &Executor) -> usize {
+    executor
+        .get_session_history()
+        .map(|s| s.borrow().base)
+        .unwrap_or(1)
+}
+
+/// Incremental reverse-i-search state (readline/isearch.c). `search` is the
+/// accumulated search string; `match_index` is the history entry currently
+/// displayed.
+struct ISearchState {
+    search: String,
+    orig_buffer: String,
+    orig_index: Option<usize>,
+    match_index: Option<usize>,
+}
+
+/// bash -i reading commands from a non-tty stdin. GNU still drives readline
+/// here (parse.y yy_readline_get -> bashline.c bash_readline): the prompt is
+/// written to stderr, the input line is echoed, and editing keystrokes in
+/// the stream are honored — C-p/C-n walk the history list, C-r starts
+/// reverse-i-search, and C-o (operate-and-get-next, readline/misc.c
+/// rl_operate_and_get_next) executes the current line and replaces the
+/// buffer with the next history entry.
+fn run_interactive_stdin(executor: &mut Executor) -> i32 {
+    executor.inherit_process_stdin();
+    let mut pending = String::new();
+    let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
+    let mut next_line = 1usize;
+    let mut pending_start_line = 1usize;
+
+    // readline edit state: the line being edited, the cursor (byte offset),
+    // and where the buffer came from in the history list.
+    let mut buffer = String::new();
+    let mut cursor = 0usize;
+    let mut history_index: Option<usize> = None;
+    let mut saved_line = String::new();
+    let mut isearch: Option<ISearchState> = None;
+    let mut quoted_insert = false;
+    let mut eof = false;
+
+    // One accepted readline line -> accumulate into `pending` and run it
+    // once the command is complete (same grouping as run_stdin_script).
+    macro_rules! accept_line {
+        ($line:expr) => {{
+            let line: &str = $line;
+            if pending.is_empty() {
+                pending_start_line = next_line;
+            }
+            next_line += line.matches('\n').count().max(1);
+            pending.push_str(line);
+            if !pending.ends_with('\n') {
+                pending.push('\n');
+            }
+            let phys: Vec<&str> = line.split_inclusive('\n').collect();
+            for phys_line in phys.iter().map(|l| l.trim_end_matches('\n')) {
+                if let Some((delimiter, strip_tabs)) = pending_heredocs.first() {
+                    let candidate = phys_line.trim_end_matches('\r');
+                    let candidate = if *strip_tabs {
+                        candidate.trim_start_matches('\t')
+                    } else {
+                        candidate
+                    };
+                    if candidate == delimiter {
+                        pending_heredocs.remove(0);
+                    }
+                } else {
+                    pending_heredocs.extend(stdin_heredoc_declarations(phys_line));
+                }
+            }
+
+            if pending_heredocs.is_empty() && !stdin_source_needs_more(&pending) {
+                // bashhist.c bash_add_history: complete commands are recorded
+                // while remember_on_history (set -o history) is on.
+                let history_on = executor
+                    .get_env("__RUBASH_SETOPT_history")
+                    .as_deref()
+                    == Some("1");
+                if history_on {
+                    if let Some(session) = executor.get_session_history() {
+                        let trimmed = pending.trim_end();
+                        if !trimmed.is_empty() {
+                            let control = executor.get_env("HISTCONTROL").unwrap_or_default();
+                            let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
+                            let histsize = rubash::history::SessionHistory::size_limit(
+                                executor.get_env("HISTSIZE"),
+                            );
+                            session
+                                .borrow_mut()
+                                .record(trimmed, &control, &ignore, histsize);
+                        }
+                    }
+                }
+
+                let status = run_source_with_line_offset(
+                    executor,
+                    &pending,
+                    true,
+                    pending_start_line.saturating_sub(1),
+                    None,
+                );
+                let parse_error = executor.take_parse_error();
+                pending.clear();
+                if parse_error || (status != 0 && stdin_script_errexit_enabled(executor)) {
+                    eof = true;
+                }
+            }
+        }};
+    }
+
+    while !eof {
+        // readline.c readline(): print PS1 on stderr, then echo the input
+        // line (non-tty input is echoed by readline's dumb-terminal path).
+        let ps1 = executor.get_env("PS1").unwrap_or_default().to_string();
+        eprint!("{ps1}");
+
+        let mut raw = String::new();
+        let line_result = match executor.script_fd0_line(&mut raw) {
+            Some(count) => Ok(count),
+            None => read_unbuffered_line(&mut raw),
+        };
+        match line_result {
+            Ok(0) => eof = true,
+            Ok(_) => {}
+            Err(_) => eof = true,
+        }
+        eprint!("{raw}");
+
+        let chars: Vec<char> = raw.chars().collect();
+        let mut i = 0usize;
+        while i < chars.len() && !eof {
+            let c = chars[i];
+            i += 1;
+
+            if quoted_insert {
+                buffer.insert(cursor, c);
+                cursor += c.len_utf8();
+                quoted_insert = false;
+                continue;
+            }
+
+            if let Some(search) = isearch.as_mut() {
+                // readline/isearch.c rl_isearch_dispatch: printable bytes
+                // extend the search string; editing keys accept the current
+                // match and are then re-processed in normal mode; C-g aborts.
+                let entries_len = session_entries_len(executor);
+                match c {
+                    '\x07' | '\x1b' => {
+                        // abort: restore the pre-search line
+                        buffer = search.orig_buffer.clone();
+                        cursor = buffer.len();
+                        history_index = search.orig_index;
+                        isearch = None;
+                        continue;
+                    }
+                    '\x12' => {
+                        // repeat search further back
+                        let search_str = search.search.clone();
+                        if !search_str.is_empty() {
+                            if let Some(session) = executor.get_session_history() {
+                                let shell = session.borrow();
+                                let upper = search.match_index.unwrap_or(entries_len);
+                                if let Some(found) = shell.entries[..upper]
+                                    .iter()
+                                    .rposition(|e| e.contains(&search_str))
+                                {
+                                    search.match_index = Some(found);
+                                    buffer = shell.entries[found].clone();
+                                    cursor = buffer.len();
+                                    history_index = Some(found);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    '\x7f' | '\x08' => {
+                        search.search.pop();
+                        let search_str = search.search.clone();
+                        if let Some(session) = executor.get_session_history() {
+                            let shell = session.borrow();
+                            let upper = search
+                                .match_index
+                                .map(|m| m + 1)
+                                .unwrap_or(entries_len);
+                            if let Some(found) = shell.entries[..upper]
+                                .iter()
+                                .rposition(|e| e.contains(&search_str))
+                            {
+                                search.match_index = Some(found);
+                                buffer = shell.entries[found].clone();
+                                cursor = buffer.len();
+                                history_index = Some(found);
+                            }
+                        }
+                        continue;
+                    }
+                    c if c >= ' ' || c == '\n' || c == '\r' || c == '\x0f' || c == '\x10'
+                        || c == '\x0e' =>
+                    {
+                        if c == '\n' || c == '\r' || c == '\x0f' || c == '\x10' || c == '\x0e'
+                        {
+                            // Accept the match (if any) and reprocess the
+                            // terminating key in normal mode.
+                            if let Some(m) = search.match_index {
+                                if let Some(session) = executor.get_session_history() {
+                                    if let Some(entry) =
+                                        session.borrow().entries.get(m).cloned()
+                                    {
+                                        buffer = entry;
+                                        cursor = buffer.len();
+                                        history_index = Some(m);
+                                    }
+                                }
+                            }
+                            isearch = None;
+                            // fall through to normal dispatch below
+                        } else {
+                            // extend the search string and re-search
+                            search.search.push(c);
+                            let search_str = search.search.clone();
+                            if let Some(session) = executor.get_session_history() {
+                                let shell = session.borrow();
+                                let upper = search
+                                    .match_index
+                                    .map(|m| m + 1)
+                                    .unwrap_or(entries_len);
+                                if let Some(found) = shell.entries[..upper]
+                                    .iter()
+                                    .rposition(|e| e.contains(&search_str))
+                                {
+                                    search.match_index = Some(found);
+                                    buffer = shell.entries[found].clone();
+                                    cursor = buffer.len();
+                                    history_index = Some(found);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    _ => {
+                        // other control chars end the search and reprocess
+                        if let Some(m) = search.match_index {
+                            if let Some(session) = executor.get_session_history() {
+                                if let Some(entry) = session.borrow().entries.get(m).cloned()
+                                {
+                                    buffer = entry;
+                                    cursor = buffer.len();
+                                    history_index = Some(m);
+                                }
+                            }
+                        }
+                        isearch = None;
+                    }
+                }
+            }
+
+
+            match c {
+                '\n' | '\r' => {
+                    let line = std::mem::take(&mut buffer);
+                    cursor = 0;
+                    history_index = None;
+                    saved_line.clear();
+                    accept_line!(&line);
+                }
+                '\x12' => {
+                    isearch = Some(ISearchState {
+                        search: String::new(),
+                        orig_buffer: buffer.clone(),
+                        orig_index: history_index,
+                        match_index: None,
+                    });
+                }
+                '\x0f' => {
+                    // rl_operate_and_get_next (readline/misc.c): accept the
+                    // line for execution, then preload the next readline with
+                    // the entry AFTER the accepted line — identified by its
+                    // absolute history number (where_history()+history_base+1),
+                    // so a HISTSIZE stifle dropping entries during the accepted
+                    // command's own add_history cannot shift the target.
+                    let src_abs = history_index
+                        .map(|p| session_history_base(executor) + p + 1);
+                    let line = std::mem::take(&mut buffer);
+                    cursor = 0;
+                    accept_line!(&line);
+                    match src_abs {
+                        Some(abs) => {
+                            let base = session_history_base(executor);
+                            let idx = abs.saturating_sub(base);
+                            let len = session_entries_len(executor);
+                            if idx < len {
+                                history_index = Some(idx);
+                                if let Some(session) = executor.get_session_history() {
+                                    buffer = session.borrow().entries[idx].clone();
+                                }
+                                cursor = buffer.len();
+                            } else {
+                                history_index = None;
+                                buffer.clear();
+                            }
+                        }
+                        None => {
+                            history_index = None;
+                            buffer.clear();
+                        }
+                    }
+                }
+                '\x10' => {
+                    // previous-history-line
+                    let len = session_entries_len(executor);
+                    if len > 0 {
+                        let idx = match history_index {
+                            None => {
+                                saved_line = buffer.clone();
+                                len - 1
+                            }
+                            Some(i0) => i0.saturating_sub(1),
+                        };
+                        history_index = Some(idx);
+                        if let Some(session) = executor.get_session_history() {
+                            buffer = session.borrow().entries[idx].clone();
+                        }
+                        cursor = buffer.len();
+                    }
+                }
+                '\x0e' => {
+                    // next-history-line
+                    let len = session_entries_len(executor);
+                    if let Some(i0) = history_index {
+                        if i0 + 1 < len {
+                            history_index = Some(i0 + 1);
+                            if let Some(session) = executor.get_session_history() {
+                                buffer = session.borrow().entries[i0 + 1].clone();
+                            }
+                        } else {
+                            history_index = None;
+                            buffer = saved_line.clone();
+                        }
+                        cursor = buffer.len();
+                    }
+                }
+                '\x01' => cursor = 0,
+                '\x05' => cursor = buffer.len(),
+                '\x02' => cursor = cursor.saturating_sub(1),
+                '\x06' => cursor = (cursor + 1).min(buffer.len()),
+                '\x0b' => buffer.truncate(cursor),
+                '\x15' => {
+                    buffer.drain(..cursor);
+                    cursor = 0;
+                }
+                '\x7f' | '\x08' => {
+                    if cursor > 0 {
+                        cursor -= 1;
+                        while !buffer.is_char_boundary(cursor) {
+                            cursor -= 1;
+                        }
+                        let mut end = cursor + 1;
+                        while !buffer.is_char_boundary(end) && end <= buffer.len() {
+                            end += 1;
+                        }
+                        buffer.drain(cursor..end.min(buffer.len()));
+                    }
+                }
+                '\x04' => {
+                    // C-d: EOF on an empty buffer, delete-char otherwise.
+                    if buffer.is_empty() && history_index.is_none() {
+                        eof = true;
+                    } else if cursor < buffer.len() {
+                        let mut end = cursor + 1;
+                        while !buffer.is_char_boundary(end) && end <= buffer.len() {
+                            end += 1;
+                        }
+                        buffer.drain(cursor..end.min(buffer.len()));
+                    }
+                }
+                '\x03' => {
+                    // SIGINT-style abort: discard the edit line.
+                    buffer.clear();
+                    cursor = 0;
+                    history_index = None;
+                    saved_line.clear();
+                }
+                '\x16' => quoted_insert = true,
+                '\x1b' => {
+                    // Escape sequences: consume the introducer plus the
+                    // sequence; only arrow keys get bindings here.
+                    if i < chars.len() {
+                        let introducer = chars[i];
+                        i += 1;
+                        if introducer == '[' || introducer == 'O' {
+                            if i < chars.len() {
+                                let final_byte = chars[i];
+                                i += 1;
+                                match final_byte {
+                                    'A' => {
+                                        let len = session_entries_len(executor);
+                                        if len > 0 {
+                                            let idx = match history_index {
+                                                None => {
+                                                    saved_line = buffer.clone();
+                                                    len - 1
+                                                }
+                                                Some(i0) => i0.saturating_sub(1),
+                                            };
+                                            history_index = Some(idx);
+                                            if let Some(session) =
+                                                executor.get_session_history()
+                                            {
+                                                buffer =
+                                                    session.borrow().entries[idx].clone();
+                                            }
+                                            cursor = buffer.len();
+                                        }
+                                    }
+                                    'B' => {
+                                        let len = session_entries_len(executor);
+                                        if let Some(i0) = history_index {
+                                            if i0 + 1 < len {
+                                                history_index = Some(i0 + 1);
+                                                if let Some(session) =
+                                                    executor.get_session_history()
+                                                {
+                                                    buffer = session.borrow().entries
+                                                        [i0 + 1]
+                                                        .clone();
+                                                }
+                                            } else {
+                                                history_index = None;
+                                                buffer = saved_line.clone();
+                                            }
+                                            cursor = buffer.len();
+                                        }
+                                    }
+                                    'C' => cursor = (cursor + 1).min(buffer.len()),
+                                    'D' => cursor = cursor.saturating_sub(1),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                c if c >= ' ' => {
+                    buffer.insert(cursor, c);
+                    cursor += c.len_utf8();
+                }
+                _ => {}
+            }
+        }
+
+        if eof && !buffer.is_empty() {
+            // readline treats EOF on a nonempty buffer as accept-line.
+            let line = std::mem::take(&mut buffer);
+            accept_line!(&line);
+        }
+    }
+
+    if !pending.trim().is_empty() {
+        let status = run_source_with_line_offset(
+            executor,
+            &pending,
+            true,
+            pending_start_line.saturating_sub(1),
+            None,
+        );
+        let _ = status;
+        pending.clear();
+    }
+
+    let status = executor.last_exit_code();
+    finish_shell(executor, status, true)
 }
 
 fn run_internal_pipeline_utility(name: &str, args: &[String]) -> ! {
@@ -1073,13 +1606,46 @@ fn run_line(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
 fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> i32 {
     // shell.c:1007-1009 exit_shell: if remember_on_history is set,
     // maybe_save_shell_history() writes the session's history to $HISTFILE
-    // (bashhist.c:488-530). Interactive shells with -i have history
-    // enabled, so save on exit.
+    // (bashhist.c:488-530): append only this session's lines when the list
+    // was not stifled below them, rewrite the file otherwise, then
+    // sv_histsize("HISTFILESIZE") truncates the file (variables.c:6088).
     if interactive {
-        if let Some(session) = executor.get_session_history() {
-            if let Some(histfile) = executor.get_env("HISTFILE") {
-                if !histfile.is_empty() {
-                    let _ = session.borrow_mut().write_file(&histfile);
+        // shell.c:1008: the save is gated on remember_on_history (the
+        // `history` set option), which `set +o history` clears.
+        let remember_on_history = executor
+            .get_env("__RUBASH_SETOPT_history")
+            .as_deref()
+            == Some("1");
+        if remember_on_history {
+            if let Some(session) = executor.get_session_history() {
+                let write_ts = executor.get_env("HISTTIMEFORMAT").is_some();
+                let histfile = executor.get_env("HISTFILE").map(String::from);
+                let histfilesize = rubash::history::SessionHistory::size_limit(
+                    executor.get_env("HISTFILESIZE"),
+                );
+                let mut shell = session.borrow_mut();
+                if shell.lines_this_session > 0 {
+                    if let Some(hf) = histfile.as_deref().filter(|hf| !hf.is_empty()) {
+                        let path = executor.resolve_shell_path(hf);
+                        let path_str = path.to_string_lossy().to_string();
+                        if !path.exists() {
+                            let _ = fs::write(&path, "");
+                        }
+                        // bashhist.c:513: force_append_history is the histappend
+                        // shopt; it always appends instead of rewriting.
+                        let force_append = executor
+                            .get_env("__RUBASH_SHOPT_STATE")
+                            .is_some_and(|s| s.split('\u{1f}').any(|e| e == "histappend"));
+                        if force_append || shell.lines_this_session <= shell.entries.len() {
+                            let _ = shell.append_file(&path_str, write_ts);
+                        } else {
+                            let _ = shell.write_file(&path_str, write_ts);
+                        }
+                        shell.lines_this_session = 0;
+                        if let Some(max) = histfilesize {
+                            let _ = shell.truncate_file(&path_str, max, write_ts);
+                        }
+                    }
                 }
             }
         }

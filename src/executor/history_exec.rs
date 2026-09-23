@@ -42,11 +42,16 @@ pub(in crate::executor) fn hist_ctx(executor: &Executor) -> HistCtx {
     }
 }
 
-fn histsize_of(executor: &Executor) -> usize {
-    executor
-        .get_env("HISTSIZE")
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(0)
+/// variables.c sv_histsize: unset/empty/negative/non-numeric HISTSIZE means
+/// unstifled; a valid non-negative number stifles the list.
+fn histsize_of(executor: &Executor) -> Option<usize> {
+    SessionHistory::size_limit(executor.get_env("HISTSIZE"))
+}
+
+/// histfile.c:121 + variables.c:6168 sv_histtimefmt: timestamps are written
+/// whenever HISTTIMEFORMAT exists as a shell variable (even set-but-empty).
+fn write_timestamps_of(executor: &Executor) -> bool {
+    executor.get_env("HISTTIMEFORMAT").is_some()
 }
 
 /// Execute the history builtin against the session list.
@@ -245,6 +250,7 @@ pub(in crate::executor) fn execute_history_session(
                                 && start <= end =>
                         {
                             shell.entries.drain(start as usize..=end as usize);
+                            shell.timestamps.drain(start as usize..=end as usize);
                             true
                         }
                         (Some(start), Some(end)) if start >= 0 && start < len => {
@@ -286,6 +292,7 @@ pub(in crate::executor) fn execute_history_session(
                     match parse_pos(arg) {
                         Some(index) if index >= 0 && (index as usize) < shell.entries.len() => {
                             shell.entries.remove(index as usize);
+                            shell.timestamps.remove(index as usize);
                             true
                         }
                         _ => {
@@ -327,6 +334,7 @@ pub(in crate::executor) fn execute_history_session(
                 && !shell.entries.is_empty()
             {
                 shell.entries.pop();
+                shell.timestamps.pop();
             }
             let command = operands.join(" ");
             if !command.is_empty() {
@@ -346,6 +354,7 @@ pub(in crate::executor) fn execute_history_session(
                     return Ok(1);
                 }
                 shell.entries.pop();
+                shell.timestamps.pop();
             }
             for operand in &operands {
                 let result = shell.expand(operand, ctx);
@@ -380,9 +389,10 @@ pub(in crate::executor) fn execute_history_session(
             let path = crate::executor::path::shell_path_to_windows(&path, &executor.shell_state.env_vars)
                 .to_string_lossy()
                 .to_string();
+            let write_ts = write_timestamps_of(executor);
             let outcome = match mode {
-                HistoryMode::Append => shell.append_file(&path).map(|_| 0),
-                HistoryMode::Write => shell.write_file(&path).map(|_| {
+                HistoryMode::Append => shell.append_file(&path, write_ts).map(|_| 0),
+                HistoryMode::Write => shell.write_file(&path, write_ts).map(|_| {
                     shell.lines_this_session = 0;
                     0
                 }),

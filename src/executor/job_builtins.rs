@@ -1668,10 +1668,8 @@ impl Executor {
                 if let Some(session) = session.as_ref() {
                     let control = self.get_env("HISTCONTROL").unwrap_or_default();
                     let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
-                    let histsize = self
-                        .get_env("HISTSIZE")
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(500);
+                    let histsize =
+                        crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
                     session
                         .borrow_mut()
                         .record(&edited, &control, &ignore, histsize);
@@ -1698,16 +1696,15 @@ impl Executor {
                 if let Some(session) = session.as_ref() {
                     let control = self.get_env("HISTCONTROL").unwrap_or_default();
                     let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
-                    let histsize = self
-                        .get_env("HISTSIZE")
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(500);
+                    let histsize =
+                        crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
                     let mut shell = session.borrow_mut();
                     // fc.def fc_replhist: the executed command REPLACES the
                     // fc entry (delete the last line, add the new one), so
                     // the fc command itself never appears in the history.
                     if shell.last_line_added && !shell.entries.is_empty() {
                         shell.entries.pop();
+                        shell.timestamps.pop();
                     }
                     let was_recorded = shell.record(&command, &control, &ignore, histsize);
                     shell.last_line_added = was_recorded;
