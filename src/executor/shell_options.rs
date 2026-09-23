@@ -26,6 +26,29 @@ impl Executor {
         if let Some(fd) = dev_stdio_redirect_fd(target) {
             return self.open_fd_read_endpoint(fd, target);
         }
+        // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic /proc files
+        // serve as a pre-filled pipe converted to a File; reads hit EOF at
+        // content end, matching procfs static-snapshot semantics.
+        if let Some(content) = crate::proc_vfs::proc_file_content(target) {
+            use std::io::Write as _;
+            let (reader, mut writer) = std::io::pipe()?;
+            writer
+                .write_all(&content)
+                .map_err(|e| crate::posix_errors::path_error(target, e))?;
+            drop(writer); // close write side: reader sees EOF after content
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::{FromRawHandle as _, IntoRawHandle as _};
+                let handle = reader.into_raw_handle();
+                return Ok(unsafe { File::from_raw_handle(handle) });
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+                let fd = reader.into_raw_fd();
+                return Ok(unsafe { File::from_raw_fd(fd) });
+            }
+        }
         let win_path = shell_path_to_windows(target, &self.shell_state.env_vars);
         // A spawned child reading a `<(cmd)` carrier must get the stream's
         // REMAINING bytes — GNU hands it a dup of the shared pipe offset,
@@ -1116,16 +1139,29 @@ impl Executor {
                     .write(true)
                     .open(&path);
             }
+            // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic files
+            // are served before the filesystem (read/cat/heredoc stdin path).
+            if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
+                return Some(
+                    crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+                );
+            }
             // GNU redir.c dup2's the descriptor — a character device has
             // no EOF, so slurping blocks forever on the console
             // (test.tests `t -t 0 < /dev/tty` hung via
             // function_call_stdin). Decline the text channel; the caller
             // binds the live fd for the command's duration instead.
-            #[cfg(windows)]
             {
+                #[cfg(windows)]
                 use std::os::windows::io::AsRawHandle;
+                #[cfg(unix)]
+                use std::os::unix::io::AsRawFd;
                 if let Ok(file) = File::open(&path) {
-                    if crate::fd::is_char_device_handle(file.as_raw_handle() as _) {
+                    #[cfg(windows)]
+                    let raw = file.as_raw_handle() as crate::fd::HANDLE;
+                    #[cfg(unix)]
+                    let raw = file.as_raw_fd() as crate::fd::HANDLE;
+                    if crate::fd::is_char_device_handle(raw) {
                         return None;
                     }
                 }

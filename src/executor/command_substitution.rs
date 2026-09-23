@@ -731,6 +731,7 @@ impl Executor {
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             background_children: HashMap::new(),
+            conditional_invert_pending: std::cell::Cell::new(false),
             coproc_stderr_forwarders: HashMap::new(),
             assignment_output_process_substitutions: HashMap::new(),
             pending_scalar_assignment: false,

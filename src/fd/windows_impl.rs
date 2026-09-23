@@ -22,8 +22,6 @@
 
 #![allow(non_snake_case, non_camel_case_types)]
 
-// Windows engine landing of the fd layer (see mod.rs dispatcher).
-
 use std::ffi::c_void;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -174,6 +172,14 @@ impl FdTable {
 
     /// `N<file`: open a file for reading into `slot`.
     pub fn open_read(&mut self, slot: usize, path: &str) -> Result<(), String> {
+        // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic /proc files
+        // materialize through an anonymous pipe so downstream reads (and any
+        // inherited-handle child) see ordinary byte-stream semantics. The
+        // write side is closed immediately: a pipe reports EOF once drained,
+        // which is exactly the procfs "static snapshot file" behavior.
+        if let Some(content) = crate::proc_vfs::proc_file_content(path) {
+            return self.install_read_bytes(slot, &content);
+        }
         let wide = to_wide(path);
         let h = unsafe {
             CreateFileW(
@@ -226,6 +232,41 @@ impl FdTable {
         self.install(read_slot, r)?;
         self.install(write_slot, w)?;
         Ok(())
+    }
+
+    /// Q11 /proc P1: install `content` as a drained-pipe snapshot in `slot`.
+    /// The write end is closed before returning, so reads hit EOF at content
+    /// end -- the procfs static-snapshot behavior -- and the HANDLE remains a
+    /// real byte-stream handle for inheritable-child redirection.
+    pub fn install_read_bytes(&mut self, slot: usize, content: &[u8]) -> Result<(), String> {
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as DWORD,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let (mut r, mut w): (HANDLE, HANDLE) = (0, 0);
+        if unsafe { CreatePipe(&mut r, &mut w, &sa, 0) } == 0 {
+            return Err("install_read_bytes: CreatePipe failed".into());
+        }
+        if !content.is_empty() {
+            let mut written: DWORD = 0;
+            let ok = unsafe {
+                WriteFile(
+                    w,
+                    content.as_ptr().cast(),
+                    content.len() as DWORD,
+                    &mut written,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 || written as usize != content.len() {
+                unsafe { CloseHandle(r) };
+                unsafe { CloseHandle(w) };
+                return Err("install_read_bytes: WriteFile failed".into());
+            }
+        }
+        unsafe { CloseHandle(w) };
+        self.install(slot, r)
     }
 
     /// `N>&M` / `N<&M`: duplicate the open file description into `slot`.
@@ -397,7 +438,52 @@ fn create_file(
 
 /// `N<file` — O_RDONLY equivalent.
 pub fn open_file_read(path: &std::path::Path) -> std::io::Result<HANDLE> {
+    // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): every redirect-read path
+    // funnels through here (FileFd::open_read), so the synthetic /proc files
+    // materialize as a drained pipe handle at this single choke point.
+    let posix_text = path.to_string_lossy().replace('\\', "/");
+    if let Some(content) = crate::proc_vfs::proc_file_content(&posix_text) {
+        return install_bytes_read_pipe(&content);
+    }
     create_file(path, GENERIC_READ, OPEN_EXISTING)
+}
+
+/// Create an anonymous pipe pre-filled with `content`, write end closed:
+/// reads return the bytes then EOF (procfs static-snapshot semantics).
+fn install_bytes_read_pipe(content: &[u8]) -> std::io::Result<HANDLE> {
+    // Local extern (matches this file's declaration style; windows-sys types
+    // differ from the local HANDLE/SECURITY_ATTRIBUTES aliases).
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreatePipe(
+            read: *mut HANDLE,
+            write: *mut HANDLE,
+            attrs: *const SECURITY_ATTRIBUTES,
+            size: DWORD,
+        ) -> BOOL;
+    }
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as DWORD,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    let (mut r, mut w): (HANDLE, HANDLE) = (0, 0);
+    if unsafe { CreatePipe(&mut r, &mut w, &sa, 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut written: DWORD = 0;
+    let write_ok = content.is_empty()
+        || unsafe {
+            WriteFile(w, content.as_ptr().cast(), content.len() as DWORD, &mut written, std::ptr::null_mut())
+        } != 0;
+    if !write_ok || written as usize != content.len() {
+        let err = std::io::Error::last_os_error();
+        unsafe { CloseHandle(r) };
+        unsafe { CloseHandle(w) };
+        return Err(err);
+    }
+    unsafe { CloseHandle(w) };
+    Ok(r)
 }
 
 /// `N>file` / `N>|file` — O_WRONLY|O_CREAT|O_TRUNC.
