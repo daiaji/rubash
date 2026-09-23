@@ -175,7 +175,9 @@ fn case_pattern_atom_matches(
     nocase: bool,
 ) -> (bool, usize) {
     match pattern[pattern_index] {
-        crate::executor::markers::PATTERN_LITERAL_BACKSLASH => (candidate == '\\', pattern_index + 1),
+        crate::executor::markers::PATTERN_LITERAL_BACKSLASH => {
+            (candidate == '\\', pattern_index + 1)
+        }
         crate::executor::markers::CTLESC if pattern_index + 1 < pattern.len() => (
             chars_match(pattern[pattern_index + 1], candidate, nocase),
             pattern_index + 2,
@@ -309,7 +311,12 @@ pub(in crate::executor) fn case_bracket_expression_matches_with_case(
         // pattern never closes and cannot match (posixpat.tests ok 21).
         // `\x18` is a legacy protected-literal-backslash marker that may still
         // reach this matcher; treat it exactly like a real backslash here.
-        if matches!(pattern[index], '\\' | crate::executor::markers::PATTERN_LITERAL_BACKSLASH | crate::executor::markers::CTLESC) && index + 1 < pattern.len() {
+        if matches!(
+            pattern[index],
+            '\\' | crate::executor::markers::PATTERN_LITERAL_BACKSLASH
+                | crate::executor::markers::CTLESC
+        ) && index + 1 < pattern.len()
+        {
             let lit = pattern[index + 1];
             if chars_match(lit, candidate, nocase) {
                 matched = true;
@@ -320,8 +327,11 @@ pub(in crate::executor) fn case_bracket_expression_matches_with_case(
             // escaped (`[\a-\z]`).
             if index + 3 < pattern.len() && pattern[index + 2] == '-' && pattern[index + 3] != ']' {
                 let mut end_index = index + 3;
-                if matches!(pattern[end_index], '\\' | crate::executor::markers::PATTERN_LITERAL_BACKSLASH | crate::executor::markers::CTLESC)
-                    && end_index + 1 < pattern.len()
+                if matches!(
+                    pattern[end_index],
+                    '\\' | crate::executor::markers::PATTERN_LITERAL_BACKSLASH
+                        | crate::executor::markers::CTLESC
+                ) && end_index + 1 < pattern.len()
                 {
                     end_index += 1;
                 }
@@ -384,7 +394,11 @@ pub(in crate::executor) fn case_bracket_expression_matches_with_case(
             // sm_loop.c BRACKET:568-572: the range end may be an escaped
             // character (`[a-\z]` is the range a-z).
             let mut end_index = index + 2;
-            if matches!(pattern[end_index], '\\' | crate::executor::markers::PATTERN_LITERAL_BACKSLASH | crate::executor::markers::CTLESC) && end_index + 1 < pattern.len()
+            if matches!(
+                pattern[end_index],
+                '\\' | crate::executor::markers::PATTERN_LITERAL_BACKSLASH
+                    | crate::executor::markers::CTLESC
+            ) && end_index + 1 < pattern.len()
             {
                 end_index += 1;
             }
@@ -463,7 +477,10 @@ fn collating_range_end(pattern: &[char], dash_index: usize) -> Option<(char, usi
         }
         return None;
     }
-    if matches!(end, '\\' | crate::executor::markers::PATTERN_LITERAL_BACKSLASH) {
+    if matches!(
+        end,
+        '\\' | crate::executor::markers::PATTERN_LITERAL_BACKSLASH
+    ) {
         let after = *pattern.get(end_index + 1)?;
         return Some((after, end_index + 2));
     }

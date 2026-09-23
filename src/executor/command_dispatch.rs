@@ -51,7 +51,11 @@ impl Executor {
                     "{prefix}{}",
                     cmd.words
                         .iter()
-                        .map(|word| crate::builtins::arrayref::take_arrayref_flag(word).1)
+                        .map(|word| {
+                            super::prompt_expansion::xtrace_quote_word(
+                                crate::builtins::arrayref::take_arrayref_flag(word).1,
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join(" ")
                 )
@@ -71,10 +75,10 @@ impl Executor {
                 if self.has_output_fd_target(&target) {
                     let _ = self.write_output_fd_redirect(&target, &xtrace_output);
                 } else {
-                    let _ = self.write_default_stderr(&xtrace_output);
+                    self.xtrace_write(&xtrace_output);
                 }
             } else {
-                let _ = self.write_default_stderr(&xtrace_output);
+                self.xtrace_write(&xtrace_output);
             }
         }
 

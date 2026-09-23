@@ -665,7 +665,13 @@ impl Executor {
         {
             return;
         }
-        let command = bash_command_text(cmd);
+        // GNU the_printed_command is produced by print_command
+        // (print_cmd.c), which covers every command form — a `[[ ]]`
+        // node must record `[[ -n $unset ]]`, not a word-list dump
+        // (`'[[' '-n' '$unset' ']]'`); pipelines record the full
+        // `a | b` text. bash_command_source_text is that renderer;
+        // bash_command_text only knows simple commands.
+        let command = bash_command_source_text(cmd);
         self.shell_state.env_vars
             .insert("__RUBASH_LAST_COMMAND".to_string(), command.clone());
         if !command_references_bash_command(cmd) {

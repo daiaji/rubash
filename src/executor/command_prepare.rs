@@ -159,7 +159,25 @@ impl Executor {
         conditional_command: &ConditionalCommand,
     ) -> Result<(), ExecuteError> {
         self.apply_no_output_builtin_redirects(cmd)?;
+        // GNU execute_cmd.c execute_cond_command -> redir.c
+        // do_redirections/undo_redirections: the command's output
+        // redirections bind the real descriptors for the duration of the
+        // test, then restore. Bind fd 1/2 so `[[ ]]`'s own diagnostics
+        // reach `2>f`.
+        let saved_stdout = self.fd_table.entries.get(&1).cloned();
+        let saved_stderr = self.fd_table.entries.get(&2).cloned();
+        self.bind_conditional_stdio_redirects(cmd)?;
         self.exit_code = self.execute_conditional_command(conditional_command);
+        for (fd, saved) in [(1u32, saved_stdout), (2, saved_stderr)] {
+            match saved {
+                Some(entry) => {
+                    self.fd_table.entries.insert(fd, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&fd);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -217,11 +235,25 @@ impl Executor {
                 // GNU traces the assignment prefix on its own line (see
                 // xtrace_assignment_text).
                 let assignments = self.xtrace_assignment_text(cmd);
-                eprintln!("{prefix}{}", assignments.join(" "));
-                eprintln!("{prefix}{}", cmd.words.join(" "));
+                self.xtrace_write(format!("{prefix}{}\n", assignments.join(" ")).as_bytes());
+                self.xtrace_write(
+                    format!(
+                        "{prefix}{}\n",
+                        cmd.words
+                            .iter()
+                            .map(|word| {
+                                super::prompt_expansion::xtrace_quote_word(
+                                    crate::builtins::arrayref::take_arrayref_flag(word).1,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                    .as_bytes(),
+                );
             } else {
                 let text = self.xtrace_command_text(cmd);
-                eprintln!("{prefix}{text}");
+                self.xtrace_write(format!("{prefix}{text}\n").as_bytes());
             }
         }
         let mut status = 0;

@@ -513,6 +513,18 @@ impl Executor {
         name: &str,
         value: String,
     ) -> bool {
+        let result = self.apply_shell_assignment_inner(name, value);
+        // GNU variables.c:5761 { "BASH_XTRACEFD", sv_xtracefd }: assigning
+        // the variable retargets xtrace (or reports an invalid fd) through
+        // the bind hook, independent of which builtin stored the value.
+        let base = assignment_name_and_append(name).0;
+        if result && base == "BASH_XTRACEFD" {
+            self.apply_xtracefd_assignment();
+        }
+        result
+    }
+
+    fn apply_shell_assignment_inner(&mut self, name: &str, value: String) -> bool {
         // TODO(variables.c/arrayfunc.c): Bash stores append assignment state
         // separately on WORD_DESC/ASSIGNMENT_WORD. This narrow path handles
         // scalar `name+=value` until SHELL_VAR attributes and arrays own it.

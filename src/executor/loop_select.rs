@@ -83,7 +83,7 @@ impl Executor {
             // iteration, before the loop variable is assigned.
             if self.xtrace_enabled() {
                 let prefix = self.xtrace_prefix();
-                eprintln!("{prefix}{for_xtrace_text}");
+                self.xtrace_write(format!("{prefix}{for_xtrace_text}\n").as_bytes());
             }
             // Bash fires the DEBUG trap for the `for` command once per
             // iteration (execute_cmd.c execute_for_command), but only where

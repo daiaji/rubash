@@ -188,13 +188,18 @@ impl Executor {
                 }
             }
             "[[" => {
-                self.apply_no_output_builtin_redirects(cmd)?;
-                self.exit_code = cmd
-                    .conditional_command
-                    .as_ref()
-                    .map(|command| self.execute_conditional_command(command))
-                    .unwrap_or_else(|| self.execute_conditional(&cmd.words[1..]));
-                Ok(())
+                // GNU has no `[[` builtin: the word only works when the parser
+                // built a conditional command node. `v=9 [[ -n a ]]` or an
+                // expanded `[[` therefore hits `[[: command not found` (127)
+                // like any other missing command.
+                match cmd.conditional_command.as_ref() {
+                    Some(command) => {
+                        self.apply_no_output_builtin_redirects(cmd)?;
+                        self.exit_code = self.execute_conditional_command(command);
+                        Ok(())
+                    }
+                    None => self.execute_external(cmd),
+                }
             }
             "((" => {
                 self.apply_no_output_builtin_redirects(cmd)?;

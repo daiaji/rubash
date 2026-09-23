@@ -123,6 +123,14 @@ pub struct ShellState {
     /// against the substitution's own source; the clone boundary restores
     /// the outer command automatically.
     pub(crate) debug_trap_command: RefCell<Option<String>>,
+    /// print_cmd.c xtrace_fd — resolved descriptor xtrace writes to
+    /// (-1 = stderr). variables.c sv_xtracefd resolves BASH_XTRACEFD on
+    /// each assignment to it.
+    pub(crate) xtrace_fd: Cell<i32>,
+    /// The BASH_XTRACEFD value `xtrace_fd` was last resolved against, so
+    /// xtrace writes can realign when the variable changed through a path
+    /// that skipped the resolve hook (read/local/unset/direct store).
+    pub(crate) xtrace_fd_source: RefCell<String>,
 }
 
 /// Typed snapshot of the interior-mutable slice of ShellState.
@@ -147,6 +155,8 @@ pub(crate) struct InteriorSnapshot {
         Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
     parameter_bad_substitution: bool,
     debug_trap_command: Option<String>,
+    xtrace_fd: i32,
+    xtrace_fd_source: String,
 }
 
 impl InteriorSnapshot {
@@ -173,6 +183,8 @@ impl ShellState {
             arithmetic_last_error_category: self.arithmetic_last_error_category.get(),
             parameter_bad_substitution: self.parameter_bad_substitution.get(),
             debug_trap_command: self.debug_trap_command.borrow().clone(),
+            xtrace_fd: self.xtrace_fd.get(),
+            xtrace_fd_source: self.xtrace_fd_source.borrow().clone(),
         }
     }
 
@@ -194,6 +206,8 @@ impl ShellState {
         self.parameter_bad_substitution
             .set(snapshot.parameter_bad_substitution);
         *self.debug_trap_command.borrow_mut() = snapshot.debug_trap_command.clone();
+        self.xtrace_fd.set(snapshot.xtrace_fd);
+        *self.xtrace_fd_source.borrow_mut() = snapshot.xtrace_fd_source.clone();
     }
 }
 
@@ -239,6 +253,8 @@ impl Clone for ShellState {
             arithmetic_nounset_error: Cell::new(self.arithmetic_nounset_error.get()),
             arithmetic_last_error_category: Cell::new(self.arithmetic_last_error_category.get()),
             parameter_bad_substitution: Cell::new(self.parameter_bad_substitution.get()),
+            xtrace_fd: Cell::new(self.xtrace_fd.get()),
+            xtrace_fd_source: RefCell::new(self.xtrace_fd_source.borrow().clone()),
             debug_trap_command: RefCell::new(self.debug_trap_command.borrow().clone()),
         }
     }

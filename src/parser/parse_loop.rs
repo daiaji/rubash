@@ -827,13 +827,16 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             push_compound_command(state, conditional_cmd);
             return Some(next_i);
         }
-        return Some(push_parse_error_until(
-            state,
-            tokens,
-            i,
-            "]]",
-            "unexpected EOF while looking for `]]'",
-        ));
+        // Unclosed `[[`: GNU's cond parser (parse.y cond_term/cond_error)
+        // consumes the remaining tokens and reports the first offending
+        // token or the `unexpected EOF while looking for `]]'' diagnostic.
+        let (command, next_i) = conditional_eof_error_command(tokens, i);
+        state.current_cmd = command;
+        state
+            .ast
+            .commands
+            .push(std::mem::take(&mut state.current_cmd));
+        return Some(next_i);
     }
 
     if command_allows_compound_start(&state.current_cmd)

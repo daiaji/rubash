@@ -613,6 +613,11 @@ pub struct Executor {
     /// failures must pierce function frames so the enclosing compound
     /// command can abandon itself entirely (GNU probe f4).
     pub(crate) inside_compound_condition: Cell<bool>,
+    /// Pending `!` inversion for the next evaluated `[[ ]]` leaf term —
+    /// GNU parse.y XORs CMD_INVERT_RETURN onto the term node and
+    /// xtrace_print_cond_term (print_cmd.c:956) prints it as `! ` inside
+    /// the trace. Consumed when the leaf term traces.
+    pub(crate) conditional_invert_pending: Cell<bool>,
     /// True while a scalar assignment RHS is expanding: GNU param_expand
     /// carries PF_ASSIGNRHS into `${!arr[@]}` so the unquoted `@` key list
     /// takes the dollar_at path (elements quoted, space-joined, never

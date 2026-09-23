@@ -697,8 +697,24 @@ impl Executor {
         self.error_trap_running = true;
         let saved_exit = self.exit_code;
         let saved_trap_command = self.shell_state.debug_trap_command.borrow().clone();
-        *self.shell_state.debug_trap_command.borrow_mut() =
-            Some(crate::executor::command_text::bash_command_text(command));
+        // GNU get_bash_command (variables.c:1558) reads
+        // the_printed_command_except_trap — the last command printed
+        // while no trap was in progress — not necessarily the node that
+        // failed: a failing function call reports the function body's
+        // last inner command (cond-error1.sub: `func` at line 28 reports
+        // `[[ -z nonempty ]]`), and a failing pipeline reports its last
+        // stage (`true | false` reports `false`).
+        *self.shell_state.debug_trap_command.borrow_mut() = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_LAST_COMMAND")
+            .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_COMMAND"))
+            .cloned()
+            .or_else(|| {
+                Some(crate::executor::command_text::bash_command_source_text(
+                    command,
+                ))
+            });
         // GNU executes the ERR trap action with LINENO bound to the failed
         // command's line (trap3.sub: `false | false | false` on line 8 makes
         // the ERR action's $LINENO print 8). The action AST re-parses with

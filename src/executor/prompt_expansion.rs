@@ -4,14 +4,112 @@ use super::*;
 /// or raw-byte markers (GNU print_cmd.c xtrace_print_word calls ansic_quote
 /// on words needing quoting). Words that are already printable are returned
 /// unchanged.
-fn xtrace_quote_word(word: &str) -> String {
-    if super::execution_misc::word_needs_ansic_quote(word) {
+pub(in crate::executor) fn xtrace_quote_word(word: &str) -> String {
+    // GNU print_cmd.c:549 xtrace_print_word_list: an empty word prints as
+    // `''`, then ansic_shouldquote → `$'...'`, then sh_contains_shell_metas
+    // → `'...'`, otherwise the bare word.
+    let visible = crate::locale::decode_to_visible_text(word);
+    if visible.is_empty() {
+        "''".to_string()
+    } else if super::execution_misc::word_needs_ansic_quote(word) {
         super::execution_misc::ansic_quote_with_markers(word)
+    } else if xtrace_contains_shell_metas(&visible) {
+        xtrace_single_quote(&visible)
     } else {
         // xtrace prints user-visible text: decode transport carriers
         // (E400 literal-char escape, C0 carriers) or marker escapes leak.
-        crate::locale::decode_to_visible_text(word)
+        visible
     }
+}
+
+/// lib/sh/shquote.c sh_contains_shell_metas (376-407): IFS whitespace,
+/// quoting chars, shell metacharacters, globbing chars, expansion chars.
+fn xtrace_contains_shell_metas(value: &str) -> bool {
+    let chars: Vec<char> = value.chars().collect();
+    for (index, ch) in chars.iter().enumerate() {
+        match ch {
+            ' ' | '\t' | '\n' | '\'' | '"' | '\\' | '|' | '&' | ';' | '(' | ')' | '<' | '>'
+            | '!' | '{' | '}' | '*' | '[' | '?' | ']' | '^' | '$' | '`' => return true,
+            '~' => {
+                if index == 0 || chars[index - 1] == '=' || chars[index - 1] == ':' {
+                    return true;
+                }
+            }
+            '#' => {
+                if index == 0 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// GNU read_token_word token text for one compound-assignment element:
+/// source-verbatim except `$'...'`, which the lexer replaces with
+/// `sh_single_quote(ansiexpand(body))` (parse.y:5563-5574).
+fn compound_element_xtrace_text(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'\'') {
+            let mut j = i + 2;
+            let mut body = String::new();
+            let mut closed = false;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'\\' if j + 1 < bytes.len() => {
+                        body.push('\\');
+                        body.push(bytes[j + 1] as char);
+                        j += 2;
+                    }
+                    b'\'' => {
+                        closed = true;
+                        j += 1;
+                        break;
+                    }
+                    c => {
+                        body.push(c as char);
+                        j += 1;
+                    }
+                }
+            }
+            if closed {
+                out.push('\'');
+                for c in crate::lexer::ansi::decode_ansi_c_quoted(&body).chars() {
+                    if c == '\'' {
+                        out.push_str("'\\''");
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out.push('\'');
+                i = j;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// lib/sh/shquote.c sh_single_quote: wrap a string in single quotes,
+/// `'` → `'\''`.
+fn xtrace_single_quote(word: &str) -> String {
+    let mut ret = String::with_capacity(word.len() + 2);
+    ret.push('\'');
+    for c in word.chars() {
+        if c == '\'' {
+            ret.push_str("'\\''");
+        } else {
+            ret.push(c);
+        }
+    }
+    ret.push('\'');
+    ret
 }
 
 impl Executor {
@@ -408,6 +506,84 @@ impl Executor {
 
     /// Expanded PS4 prefix for `set -x` tracing (Bash prints the expanded
     /// value of PS4 before each traced command). Defaults to `+ ` like Bash.
+    /// Write xtrace output to the current trace target. GNU print_cmd.c
+    /// xtrace_fd defaults to stderr; `BASH_XTRACEFD=N` retargets it
+    /// (variables.c sv_xtracefd) and xtrace_fdchk silently resets to stderr
+    /// when that descriptor is closed.
+    pub(in crate::executor) fn xtrace_write(&mut self, bytes: &[u8]) {
+        // Realign when BASH_XTRACEFD changed through a path that skipped the
+        // assignment hook (read/local/unset/direct store).
+        let current = self
+            .shell_state
+            .env_vars
+            .get("BASH_XTRACEFD")
+            .cloned()
+            .unwrap_or_default();
+        if current != *self.shell_state.xtrace_fd_source.borrow() {
+            self.resolve_xtracefd(false);
+        }
+        let fd = self.shell_state.xtrace_fd.get();
+        if fd >= 0 {
+            if !self.fd_table.has_entry(fd as u32) || self.fd_table.is_closed(fd as u32) {
+                // xtrace_fdchk (print_cmd.c:436): a closed trace fd silently
+                // falls back to stderr until the next BASH_XTRACEFD assign.
+                self.shell_state.xtrace_fd.set(-1);
+            } else {
+                let _ = self.write_fd_endpoint(fd as u32, bytes);
+                return;
+            }
+        }
+        let _ = self.write_default_stderr(bytes);
+    }
+
+    /// GNU variables.c:6424 sv_xtracefd: resolve BASH_XTRACEFD after an
+    /// assignment. Empty/unset resets to stderr; a non-numeric or closed fd
+    /// reports `invalid value for trace file descriptor` and keeps the
+    /// previous target. `report` controls the diagnostic (skipped for lazy
+    /// realignment, which is not an assignment event).
+    pub(in crate::executor) fn apply_xtracefd_assignment(&mut self) {
+        self.resolve_xtracefd(true);
+    }
+
+    fn resolve_xtracefd(&mut self, report: bool) {
+        let value = self
+            .shell_state
+            .env_vars
+            .get("BASH_XTRACEFD")
+            .cloned()
+            .unwrap_or_default();
+        if !value.is_empty() {
+            // strtol: leading whitespace ok, the entire rest must parse.
+            let parsed = value.trim_start().parse::<i64>().ok();
+            let mut fd: Option<i32> = None;
+            if let Some(n) = parsed.filter(|n| (0..=i32::MAX as i64).contains(n)) {
+                // sh_validfd (shvalidfd.c): the descriptor only has to be
+                // open — fdopen("w") failure is a separate diagnostic GNU
+                // only reaches for exotic states, so open-for-anything
+                // suffices here.
+                if self.fd_table.has_entry(n as u32) && !self.fd_table.is_closed(n as u32) {
+                    fd = Some(n as i32);
+                }
+            }
+            if let Some(n) = fd {
+                self.shell_state.xtrace_fd.set(n);
+            } else {
+                // internal_error: the diagnostic fires but the previous
+                // trace target stays bound (sv_xtracefd returns early).
+                if report {
+                    let line = format!(
+                        "{}BASH_XTRACEFD: {value}: invalid value for trace file descriptor\n",
+                        self.diagnostic_prefix()
+                    );
+                    let _ = self.write_default_stderr(line.as_bytes());
+                }
+            }
+        } else {
+            self.shell_state.xtrace_fd.set(-1);
+        }
+        *self.shell_state.xtrace_fd_source.borrow_mut() = value;
+    }
+
     pub(in crate::executor) fn xtrace_prefix(&self) -> String {
         let ps4 = self
             .shell_state.env_vars
@@ -437,16 +613,49 @@ impl Executor {
     pub(in crate::executor) fn xtrace_assignment_text(&mut self, cmd: &CommandNode) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
         for (name, value) in &cmd.assignments {
-            // `COMPOUND_ASSIGNMENT_MARKER` is an internal carrier for compound
-            // array assignments and must never leak into user-visible xtrace.
+            // GNU subst.c:3580 xtrace_print_assignment: a compound assignment
+            // (assign_list) prints `name=(raw-inner)` — the space-joined
+            // element WORD texts, unexpanded (arrayfunc.c
+            // extract_array_assignment_list). rubash's marker value already
+            // carries the parenthesized interior; rebuild GNU's join by
+            // re-splitting on unquoted whitespace and applying the lexer's
+            // `$'...'` → `'<decoded>'` token rewrite (parse.y:5563-5574).
+            if let Some(raw) =
+                value.strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
+            {
+                let interior = raw
+                    .strip_prefix('(')
+                    .and_then(|inner| inner.strip_suffix(')'))
+                    .unwrap_or(raw);
+                let joined = crate::parser::assignment::split_compound_assignment_words(interior)
+                    .iter()
+                    .map(|element| {
+                        crate::locale::decode_to_visible_text(&compound_element_xtrace_text(
+                            element,
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                parts.push(format!("{name}=({joined})"));
+                continue;
+            }
+            // Scalar: the EXPANDED value is quoted like an xtrace word,
+            // except an empty value prints as nothing (GNU print_cmd.c:522).
             let expanded = self.expand_assignment_value(name, value);
             let expanded = expanded
                 .strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
                 .unwrap_or(&expanded);
-            parts.push(format!(
-                "{name}={}",
-                crate::locale::decode_to_visible_text(expanded)
-            ));
+            let visible = crate::locale::decode_to_visible_text(expanded);
+            let rendered = if visible.is_empty() {
+                visible
+            } else if super::execution_misc::word_needs_ansic_quote(expanded) {
+                super::execution_misc::ansic_quote_with_markers(expanded)
+            } else if xtrace_contains_shell_metas(&visible) {
+                xtrace_single_quote(&visible)
+            } else {
+                visible
+            };
+            parts.push(format!("{name}={rendered}"));
         }
         parts
     }
@@ -457,10 +666,10 @@ impl Executor {
     /// The expression is the already-expanded string that will be evaluated.
     /// GNU's `expand_arith_string` strips leading whitespace; trailing
     /// whitespace is preserved (e.g. `i++  ` from `for ((...; ...; i++ ))`).
-    pub(in crate::executor) fn xtrace_print_arith_cmd(&self, expression: &str) {
+    pub(in crate::executor) fn xtrace_print_arith_cmd(&mut self, expression: &str) {
         if self.xtrace_enabled() {
             let prefix = self.xtrace_prefix();
-            eprintln!("{prefix}(( {} ))", expression.trim_start());
+            self.xtrace_write(format!("{prefix}(( {} ))\n", expression.trim_start()).as_bytes());
         }
     }
 
@@ -468,10 +677,10 @@ impl Executor {
     /// GNU prints the between-parens text untouched on both sides —
     /// `(( n ))` traces as `+ ((  n  ))` — unlike the arith-for sections,
     /// whose parsed word lists drop the leading blanks (xtrace above).
-    pub(in crate::executor) fn xtrace_print_arith_cmd_raw(&self, expression: &str) {
+    pub(in crate::executor) fn xtrace_print_arith_cmd_raw(&mut self, expression: &str) {
         if self.xtrace_enabled() {
             let prefix = self.xtrace_prefix();
-            eprintln!("{prefix}(( {} ))", expression);
+            self.xtrace_write(format!("{prefix}(( {} ))\n", expression).as_bytes());
         }
     }
 }

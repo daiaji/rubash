@@ -200,6 +200,12 @@ pub(super) fn command_boundary_keyword_allowed(tokens: &[Token], index: usize) -
         return true;
     }
 
+    // GNU parse.y reads reserved words at any position where a command is
+    // complete: separators, `)`/`}`-style closers, and the `]]`/`))` that
+    // end `[[ ]]`/`(( ))` (cond.tests:230 `if [[ str ]] then [[ str ]] fi`
+    // — no `;` before `then`). A `]]`/`))` that never closed a matching
+    // opener is a plain word argument (`if echo ]] then` is a GNU syntax
+    // error, not a boundary), so verify the pairing backward.
     matches!(
         previous.kind,
         TokenKind::Semicolon
@@ -216,6 +222,35 @@ pub(super) fn command_boundary_keyword_allowed(tokens: &[Token], index: usize) -
         ))
         || (previous.kind == TokenKind::Word
             && matches!(previous.raw.as_str(), ";;" | ";&" | ";;&"))
+        || compound_close_precedes(tokens, index)
+}
+
+/// Whether the token at `index - 1` is a `]]` or `))` that actually
+/// closed a matching `[[`/`((` opener (GNU: the closer ends the compound
+/// command, so the next token sits at a command boundary). Scans backward
+/// counting closer/opener balance on raw spelling so quoted `']]'` and
+/// word-argument `]]` never count.
+fn compound_close_precedes(tokens: &[Token], index: usize) -> bool {
+    let Some(previous) = index.checked_sub(1).and_then(|i| tokens.get(i)) else {
+        return false;
+    };
+    let (closer, opener) = match previous.raw.as_str() {
+        "]]" => ("]]", "[["),
+        "))" => ("))", "(("),
+        _ => return false,
+    };
+    let mut depth = 0i32;
+    for token in tokens[..index].iter().rev() {
+        if token.raw == closer {
+            depth += 1;
+        } else if token.raw == opener {
+            depth -= 1;
+            if depth == 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub(super) fn is_boundary_keyword(tokens: &[Token], index: usize, value: &str) -> bool {

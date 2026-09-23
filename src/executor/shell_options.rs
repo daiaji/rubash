@@ -260,7 +260,7 @@ impl Executor {
         })
     }
 
-    fn write_fd_endpoint(&mut self, fd: u32, output: &[u8]) -> Result<(), ExecuteError> {
+    pub(in crate::executor) fn write_fd_endpoint(&mut self, fd: u32, output: &[u8]) -> Result<(), ExecuteError> {
         if self.fd_table.is_closed(fd) {
             return Ok(());
         }

@@ -2007,7 +2007,7 @@ impl Executor {
         // unexpanded word, print_cmd.c:742) before pattern expansion.
         if self.xtrace_enabled() {
             let prefix = self.xtrace_prefix();
-            eprintln!("{prefix}case {} in", case_command.word);
+            self.xtrace_write(format!("{prefix}case {} in\n", case_command.word).as_bytes());
         }
         // GNU execute_cmd.c:3660-3668: the case head is printed
         // (print_case_command_head, print_cmd.c:731 -> `case WORD in `) and

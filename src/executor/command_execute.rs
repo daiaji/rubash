@@ -138,6 +138,52 @@ impl Executor {
             return Err(ExecuteError::ExitCode(2));
         }
 
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_COND__") {
+            // GNU parse.y conditional diagnostics: each parser_error message
+            // first, then report_syntax_error — either `syntax error near
+            // `X'` plus the offending source line, or at EOF the
+            // `unexpected end of file from `[[' command on line N' tail.
+            self.mark_parse_error();
+            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+            let shape = fields.next().unwrap_or("near");
+            let aux_a = fields.next().unwrap_or_default();
+            let aux_b = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            for field in fields {
+                let (line, message) = field
+                    .split_once('\u{1}')
+                    .map(|(line, msg)| (line.parse::<usize>().unwrap_or(1), msg))
+                    .unwrap_or((1, field));
+                eprintln!(
+                    "{}{}",
+                    self.parser_diagnostic_prefix_for_line(line),
+                    message
+                );
+            }
+            if shape == "eof" {
+                eprintln!(
+                    "{}syntax error: unexpected end of file from `[[' command on line {aux_a}",
+                    self.parser_diagnostic_prefix_for_line(aux_b)
+                );
+            } else {
+                eprintln!(
+                    "{}syntax error near `{aux_a}'",
+                    self.parser_diagnostic_prefix_for_line(aux_b)
+                );
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    eprintln!(
+                        "{}`{}'",
+                        self.parser_diagnostic_prefix_for_line(aux_b),
+                        parse_error_source_display(source)
+                    );
+                }
+            }
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
+
         if cmd.has_assignment("__RUBASH_PARSE_ERROR__") {
             self.mark_parse_error();
             if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {

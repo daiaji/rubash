@@ -710,6 +710,7 @@ impl Executor {
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
             ambient_line: Cell::new(None),
+            conditional_invert_pending: Cell::new(false),
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             background_children: HashMap::new(),
