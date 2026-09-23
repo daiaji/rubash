@@ -249,3 +249,22 @@ fn nested_heredoc_in_command_substitution_is_collected_before_next_command() {
     assert!(substitution.value.contains("foo\nbar\nEOF"));
     assert!(tokens.iter().any(|token| token.value == "after"));
 }
+
+#[test]
+fn trailing_unquoted_backslash_keeps_stdin_line_open() {
+    // parse.y:5379-5384 read_token_word: backslash-newline is removed as a
+    // pair ("ignored in all cases except when quoted with single quotes"),
+    // so the incremental stdin driver must keep reading (PS2) instead of
+    // submitting the line with the backslash dropped.
+    use crate::script_driver::stdin_source_needs_more;
+    assert!(stdin_source_needs_more("echo abc\\\n"));
+    assert!(stdin_source_needs_more("echo abc\\"));
+    // An escaped backslash terminates the line: `echo a\` (two backslashes)
+    // runs now instead of waiting for a continuation line.
+    assert!(!stdin_source_needs_more("echo a\\\\\n"));
+    // Single quotes make the backslash literal: 'xx\' closes and runs.
+    assert!(!stdin_source_needs_more("echo 'xx\\\\'\n"));
+    // A retained CR (CRLF physical line) is an escaped carriage return,
+    // not a continuation.
+    assert!(!stdin_source_needs_more("echo a\\\r\n"));
+}

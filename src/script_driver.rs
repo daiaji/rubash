@@ -491,6 +491,12 @@ pub fn stdin_source_needs_more(source: &str) -> bool {
     if has_unclosed_input_syntax(source) {
         return true;
     }
+    // parse.y:5379-5384: trailing unquoted backslash keeps the physical line
+    // open (PS2 continuation) -- the joined line is assembled later by the
+    // lexer logical-line loop, which removes the backslash-newline pair.
+    if crate::lexer::stdin_line_ends_with_continuation(source) {
+        return true;
+    }
     if stdin_source_is_function_signature(source) {
         return true;
     }

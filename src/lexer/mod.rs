@@ -279,6 +279,16 @@ fn tokenize_with_heredocs(
             continued_line = true;
             continue;
         }
+        // parse.y:5379-5384: the backslash is removed together with its
+        // newline even when that newline is the FINAL byte of input; EOF
+        // right after completes the token, so `echo a\<LF><EOF>` runs
+        // `echo a` instead of erroring (matches GNU byte-for-byte).
+        if !line_had_terminator
+            && ends_with_unquoted_backslash(&logical_line)
+            && !in_comsub_heredoc_body
+        {
+            logical_line.pop();
+        }
 
         // Fresh header scan once the accumulated text is stable (after the
         // join decision): a header whose delimiter is completed by the next
@@ -643,6 +653,18 @@ pub fn has_unclosed_input_syntax(input: &str) -> bool {
     has_unclosed_quotes(input)
         || (has_unclosed_command_substitution(input)
             && !skip::command_substitutions_balanced(input))
+}
+
+/// parse.y:5379-5384 read_token_word: a backslash before the newline is
+/// removed with it ("ignored in all cases except when quoted with single
+/// quotes"), so a physical line ending in an unquoted backslash is an
+/// unfinished token -- the incremental stdin driver must keep reading (PS2),
+/// not submit the line with the backslash dropped. Drivers accumulate with
+/// the newline attached, so probe the text before it; a retained CR (CRLF
+/// line) then correctly reads as an ESCAPED carriage return, which GNU also
+/// does not treat as a continuation.
+pub fn stdin_line_ends_with_continuation(input: &str) -> bool {
+    ends_with_unquoted_backslash(input.strip_suffix('\n').unwrap_or(input))
 }
 
 /// Rotate the `)`-that-closed-on-the-header-line segment of a command
