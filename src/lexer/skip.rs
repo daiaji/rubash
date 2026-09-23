@@ -920,6 +920,14 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
         match ch {
             '\'' => single = true,
             '"' => double = true,
+            // GNU read_token_word (parse.y:5377-5397): outside quotes a
+            // backslash quotes the next character — it can never act as a
+            // paren delimiter, so `$(echo \)` does not close the
+            // substitution (comsub-posix.tests:42).
+            '\\' => {
+                index += 2;
+                continue;
+            }
             '`' => {
                 if let Some(end) = skip_backtick_corrected(chars, index) {
                     index = end;

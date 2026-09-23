@@ -950,6 +950,19 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
             index = next;
             continue;
         }
+        // GNU read_token (parse.y:3630-3643): a `#` at a token boundary
+        // begins a comment through end of line, so the `)` in `# )` cannot
+        // close the substitution (comsub-posix.tests:42).
+        if ch == '#' && word_boundary {
+            while index + 1 < chars.len() && chars[index + 1] != '\n' {
+                index += 1;
+            }
+            word.clear();
+            word_boundary = true;
+            current_word_boundary = true;
+            index += 1;
+            continue;
+        }
         // Quoted text is a literal word and cannot begin a reserved word.
         if !single && !double {
             update_command_substitution_case_depth(
@@ -961,6 +974,14 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
                 &mut word_boundary,
                 &mut current_word_boundary,
             );
+            // GNU read_token_word (parse.y:5377-5397): outside quotes a
+            // backslash quotes the next character — it can never act as a
+            // paren delimiter, so `$(echo \)` does not close the
+            // substitution (comsub-posix.tests:42).
+            if ch == '\\' {
+                index += 2;
+                continue;
+            }
         }
         match ch {
             '\'' => single = true,
@@ -1217,6 +1238,14 @@ pub(crate) fn has_unclosed_command_substitution(input: &str) -> bool {
         }
         if backtick && ch == '<' && chars.get(index + 1) == Some(&'<') {
             index = skip_heredoc_in_chars_with_closure(&chars, index).0;
+            continue;
+        }
+        // GNU read_token_word (parse.y:5404-5418): inside double quotes a
+        // `)` is literal text — it never balances a `$(` parenthesis. All
+        // constructs that stay live inside `"..."` (`\x`, `$(`, `` ` ``,
+        // `${`) were handled by the arms above; anything left is inert.
+        if double {
+            index += 1;
             continue;
         }
         if depth > 0 && case_depth == 0 && !ansi_single && ch == '(' {
