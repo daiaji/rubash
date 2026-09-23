@@ -501,8 +501,12 @@ pub(in crate::executor) fn mask_quoted_pattern_spans(
             }
             continue;
         }
-        if ch == '"' {
-            let mut j = i + 1;
+        // `$"..."` locale strings expand exactly like `"..."` in the C
+        // locale (subst.c: the dollar is part of the quote syntax); keep the
+        // `$` inside the masked span instead of leaking it into the pattern.
+        let dollar_locale = ch == '$' && chars.get(i + 1) == Some(&'"');
+        if ch == '"' || dollar_locale {
+            let mut j = i + if dollar_locale { 2 } else { 1 };
             let mut content = String::new();
             let mut closed = false;
             while j < chars.len() {
