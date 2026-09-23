@@ -28,8 +28,8 @@ impl Executor {
         if let (Some(stdout_redirect), Some(stderr_redirect)) =
             (&cmd.redirect_out, &cmd.redirect_err_append)
         {
-            let stdout_target = self.expand_word(&stdout_redirect.target);
-            let stderr_target = self.expand_word(&stderr_redirect.target);
+            let stdout_target = self.expand_redirect_target(stdout_redirect);
+            let stderr_target = self.expand_redirect_target(stderr_redirect);
             if stdout_target == stderr_target {
                 let file = self.create_redirect_output(&stdout_target, stdout_redirect.clobber)?;
                 process.stderr(Stdio::from(file.try_clone()?));
@@ -41,8 +41,8 @@ impl Executor {
         if let (Some(stdout_redirect), Some(stderr_redirect)) =
             (&cmd.append, &cmd.redirect_err_append)
         {
-            let stdout_target = self.expand_word(&stdout_redirect.target);
-            let stderr_target = self.expand_word(&stderr_redirect.target);
+            let stdout_target = self.expand_redirect_target(stdout_redirect);
+            let stderr_target = self.expand_redirect_target(stderr_redirect);
             if stdout_target == stderr_target {
                 let mut file = OpenOptions::new()
                     .create(true)
@@ -65,7 +65,7 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         let mut redirected = false;
         if let Some(ref redirect) = cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if let Some(fd) = redirect_target_fd(&target) {
                 if self.apply_external_coproc_output(process, fd, true)? {
                     redirected = true;
@@ -79,33 +79,38 @@ impl Executor {
         }
 
         if let Some(ref redirect) = cmd.append {
-            let target = self.expand_word(&redirect.target);
-            if let Some(fd) = redirect_target_fd(&target) {
-                if self.apply_external_coproc_output(process, fd, true)? {
-                    redirected = true;
+            // Injected group redirect already bound on fd 1: fall through to
+            // the fd-table dup below so the child inherits the group's shared
+            // open file description (see injected_redirect_fd_is_bound).
+            if !self.injected_redirect_fd_is_bound(redirect, 1) {
+                let target = self.expand_redirect_target(redirect);
+                if let Some(fd) = redirect_target_fd(&target) {
+                    if self.apply_external_coproc_output(process, fd, true)? {
+                        redirected = true;
+                    }
                 }
+                if redirected {
+                    return Ok(());
+                }
+                if is_closed_redirect_target(&target) {
+                    process.stdout(Stdio::null());
+                } else if redirect_target_fd(&target) == Some(2)
+                    || self.output_fd_redirects_to_stderr(&target)
+                {
+                    process.stdout(Stdio::piped());
+                } else if self.output_fd_redirects_to_stdout(&target) {
+                } else if self.has_output_fd_target(&target) {
+                    process.stdout(Stdio::from(self.open_output_fd_append(&target)?));
+                } else if redirect_target_fd(&target).is_none() {
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+                    file.seek(SeekFrom::End(0))?;
+                    process.stdout(Stdio::from(file));
+                }
+                redirected = true;
             }
-            if redirected {
-                return Ok(());
-            }
-            if is_closed_redirect_target(&target) {
-                process.stdout(Stdio::null());
-            } else if redirect_target_fd(&target) == Some(2)
-                || self.output_fd_redirects_to_stderr(&target)
-            {
-                process.stdout(Stdio::piped());
-            } else if self.output_fd_redirects_to_stdout(&target) {
-            } else if self.has_output_fd_target(&target) {
-                process.stdout(Stdio::from(self.open_output_fd_append(&target)?));
-            } else if redirect_target_fd(&target).is_none() {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-                file.seek(SeekFrom::End(0))?;
-                process.stdout(Stdio::from(file));
-            }
-            redirected = true;
         }
 
         if !redirected {
@@ -165,7 +170,7 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         let mut redirected = false;
         if let Some(ref redirect) = cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if let Some(fd) = redirect_target_fd(&target) {
                 if self.apply_external_coproc_output(process, fd, false)? {
                     redirected = true;
@@ -191,33 +196,38 @@ impl Executor {
         }
 
         if let Some(ref redirect) = cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
-            if let Some(fd) = redirect_target_fd(&target) {
-                if self.apply_external_coproc_output(process, fd, false)? {
-                    redirected = true;
+            // Injected group redirect already bound on fd 2: fall through to
+            // the fd-table dup below so the child inherits the group's shared
+            // open file description.
+            if !self.injected_redirect_fd_is_bound(redirect, 2) {
+                let target = self.expand_redirect_target(redirect);
+                if let Some(fd) = redirect_target_fd(&target) {
+                    if self.apply_external_coproc_output(process, fd, false)? {
+                        redirected = true;
+                    }
                 }
+                if redirected {
+                    return Ok(());
+                }
+                if is_closed_redirect_target(&target) {
+                    process.stderr(Stdio::null());
+                } else if redirect_target_fd(&target) == Some(1)
+                    || self.output_fd_redirects_to_stdout(&target)
+                {
+                    process.stderr(Stdio::piped());
+                } else if self.output_fd_redirects_to_stderr(&target) {
+                } else if self.has_output_fd_target(&target) {
+                    process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
+                } else if redirect_target_fd(&target).is_none() {
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+                    file.seek(SeekFrom::End(0))?;
+                    process.stderr(Stdio::from(file));
+                }
+                redirected = true;
             }
-            if redirected {
-                return Ok(());
-            }
-            if is_closed_redirect_target(&target) {
-                process.stderr(Stdio::null());
-            } else if redirect_target_fd(&target) == Some(1)
-                || self.output_fd_redirects_to_stdout(&target)
-            {
-                process.stderr(Stdio::piped());
-            } else if self.output_fd_redirects_to_stderr(&target) {
-            } else if self.has_output_fd_target(&target) {
-                process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
-            } else if redirect_target_fd(&target).is_none() {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-                file.seek(SeekFrom::End(0))?;
-                process.stderr(Stdio::from(file));
-            }
-            redirected = true;
         }
 
         if !redirected {
@@ -305,7 +315,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 let mut file = OpenOptions::new()
                     .create(true)
@@ -317,7 +327,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 let mut file = OpenOptions::new()
                     .create(true)
@@ -346,7 +356,7 @@ impl Executor {
                 .redirect_out
                 .as_ref()
                 .or(cmd.append.as_ref())
-                .map(|redirect| self.expand_word(&redirect.target))
+                .map(|redirect| self.expand_redirect_target(redirect))
                 .is_some_and(|target| {
                     redirect_target_fd(&target) == Some(2)
                         || self.output_fd_redirects_to_stderr(&target)
@@ -359,7 +369,7 @@ impl Executor {
                 .redirect_err
                 .as_ref()
                 .or(cmd.redirect_err_append.as_ref())
-                .map(|redirect| self.expand_word(&redirect.target))
+                .map(|redirect| self.expand_redirect_target(redirect))
                 .is_some_and(|target| {
                     redirect_target_fd(&target) == Some(1)
                         || self.output_fd_redirects_to_stdout(&target)

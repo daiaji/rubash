@@ -324,7 +324,7 @@ impl Executor {
                 ]
                 .into_iter()
                 .flatten()
-                .map(|redirect| self.expand_word(&redirect.target))
+                .map(|redirect| self.expand_redirect_target(redirect))
                 .find(|target| {
                     cfg!(windows)
                         && (target.contains('\\')

@@ -86,7 +86,7 @@ impl Executor {
             if redirect.fd.unwrap_or(0) != 0 {
                 return None;
             }
-            if is_closed_redirect_target(&self.expand_word(&redirect.target)) {
+            if is_closed_redirect_target(&self.expand_redirect_target(redirect)) {
                 return None;
             }
             if let Some(source) = redirect
@@ -104,7 +104,7 @@ impl Executor {
                 }
             }
 
-            let expanded_target = self.expand_word(&redirect.target);
+            let expanded_target = self.expand_redirect_target(redirect);
             if let Some(fd) = expanded_target.strip_prefix('&') {
                 let fd = fd.trim_matches(|ch| ch == '"' || ch == STORAGE_WORD_PREFIX);
                 if let Ok(fd) = fd.parse::<u32>() {
@@ -445,20 +445,25 @@ impl Executor {
             return Some(String::new());
         }
 
-        let mut stdin = io::stdin().lock();
-        let mut bytes = [0_u8; 1];
+        // GNU builtins/read.def reads fd 0 through zread — one raw syscall
+        // per byte. io::stdin() owns a process-wide BufReader that prefetches
+        // far past the delimiter, so a sibling process sharing this stdin's
+        // file offset (async `{ read; } &` under a redirected compound —
+        // redir.tests) would inherit an already-drained descriptor. Read the
+        // raw OS handle byte-wise so only the consumed bytes move the offset.
+        let stdin_handle = crate::fd::process_std_handle(0);
         let mut output = String::new();
         let mut decoder = StdinCharDecoder::new();
         let mut units = 0usize;
         let mut eof = false;
         loop {
             if !decoder.has_queued() {
-                let count = stdin.read(&mut bytes).ok()?;
-                if count == 0 {
+                let buf = crate::fd::read_some(stdin_handle, 1).ok()?;
+                if buf.is_empty() {
                     eof = true;
                     break;
                 }
-                decoder.queue_byte(bytes[0]);
+                decoder.queue_byte(buf[0]);
             }
             let Some(unit) = decoder.next_unit() else {
                 continue;

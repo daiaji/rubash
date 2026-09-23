@@ -13,6 +13,16 @@ struct SavedNumberedFd {
     fd_closed: Option<String>,
 }
 
+/// Saved descriptor state for an fd rebound by a compound command's
+/// output redirection (see open_compound_output_redirects).
+pub(in crate::executor) struct SavedOutputFd {
+    fd: u32,
+    entry: Option<FdEntry>,
+    fd_output: Option<String>,
+    fd_procsub: Option<String>,
+    fd_closed: Option<String>,
+}
+
 impl Executor {
     pub(crate) fn with_command_input_redirects<T>(
         &mut self,
@@ -38,7 +48,9 @@ impl Executor {
             }
         }
         let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
+        let saved_output = self.open_compound_output_redirects(cmd)?;
         let result = self.with_command_input_redirects_inner(cmd, execute);
+        self.restore_compound_output_redirects(saved_output);
         self.restore_compound_numbered_input_redirects(saved_numbered);
         for name in dynamic_names {
             self.close_dynamic_fd(&name)?;
@@ -57,6 +69,12 @@ impl Executor {
 
         let old_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
         let old_function_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        // GNU do_redirection_internal (redir.c:767-955, RX_UNDOABLE) saves
+        // fd 0 before a compound's `<` and restores it at scope end — even
+        // undoing a permanent `exec 0<g` inside the body. Snapshot the slot
+        // so async-spawn stdin materialization (and any fd-0 mutation the
+        // body performs) unwinds with the compound.
+        let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
         self.shell_state.env_vars.insert(FUNCTION_STDIN.to_string(), input);
         self.shell_state.env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
@@ -68,6 +86,14 @@ impl Executor {
             FUNCTION_STDIN_OFFSET,
             old_function_stdin_offset,
         );
+        match saved_fd0_entry {
+            Some(entry) => {
+                self.fd_table.entries.insert(0, entry);
+            }
+            None => {
+                self.fd_table.entries.remove(&0);
+            }
+        }
         result
     }
 
@@ -113,7 +139,7 @@ impl Executor {
             {
                 continue;
             }
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if !saved.iter().any(|saved| saved.fd == fd) {
                 saved.push(SavedNumberedFd {
                     fd,
@@ -210,6 +236,223 @@ impl Executor {
                 &mut self.shell_state.env_vars,
                 &fd_dynamic_input_key(saved.fd),
                 saved.fd_dynamic,
+            );
+            restore_optional_env_var(
+                &mut self.shell_state.env_vars,
+                &fd_closed_key(saved.fd),
+                saved.fd_closed,
+            );
+        }
+    }
+
+    /// GNU do_redirection_internal (redir.c:767-955) applies a compound
+    /// command's output redirections to real descriptors — in parse order —
+    /// before the body runs, and execute_cmd.c undoes them when the command
+    /// finishes. Bind them on the fd table so a body's `1>&3` resolves fd 3
+    /// to the *group's* binding (e.g. `>/dev/null 3>&1` leaves fd 3 on the
+    /// null device) instead of re-dup'ing the leaf's own fd 1. Returns the
+    /// touched slots for restore_compound_output_redirects; on a mid-list
+    /// open failure the already-applied slots are unwound before the error
+    /// propagates, like GNU abandoning the compound.
+    pub(in crate::executor) fn open_compound_output_redirects(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<Vec<SavedOutputFd>, ExecuteError> {
+        let mut saved: Vec<SavedOutputFd> = Vec::new();
+        if let Err(error) = self.open_compound_output_redirects_inner(cmd, &mut saved) {
+            self.restore_compound_output_redirects(saved);
+            return Err(error);
+        }
+        Ok(saved)
+    }
+
+    fn save_compound_output_fd(&mut self, saved: &mut Vec<SavedOutputFd>, fd: u32) {
+        if saved.iter().any(|entry| entry.fd == fd) {
+            return;
+        }
+        saved.push(SavedOutputFd {
+            fd,
+            entry: self.fd_table.entries.get(&fd).cloned(),
+            fd_output: self
+                .shell_state
+                .env_vars
+                .get(&fd_output_key(fd))
+                .cloned(),
+            fd_procsub: self
+                .shell_state
+                .env_vars
+                .get(&fd_output_process_substitution_key(fd))
+                .cloned(),
+            fd_closed: self
+                .shell_state
+                .env_vars
+                .get(&fd_closed_key(fd))
+                .cloned(),
+        });
+    }
+
+    fn open_compound_output_redirects_inner(
+        &mut self,
+        cmd: &CommandNode,
+        saved: &mut Vec<SavedOutputFd>,
+    ) -> Result<(), ExecuteError> {
+        for redirect in &cmd.redirects {
+            // `{var}`-targeted redirections allocate a persistent dynamic fd
+            // (redir.c: the variable keeps the descriptor after the command)
+            // and are handled by execute_dynamic_fd_var_redirect above.
+            if redirect.fd_var.is_some() {
+                continue;
+            }
+            let fd = match redirect.kind {
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::Append
+                | crate::parser::RedirectKind::ClobberOutput
+                | crate::parser::RedirectKind::DuplicateOutput
+                | crate::parser::RedirectKind::CloseOutput => redirect.fd.unwrap_or(1),
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => 1,
+                _ => continue,
+            };
+            let target = self.expand_redirect_target(redirect);
+
+            // See injected_redirect_fd_is_bound (redirection.rs): a redirect
+            // injected from an enclosing compound is already realized by the
+            // group's live fd-table binding — re-opening would re-truncate
+            // the file and fork a second offset for the nested compound.
+            if self.injected_redirect_fd_is_bound(redirect, fd) {
+                continue;
+            }
+
+            match redirect.kind {
+                crate::parser::RedirectKind::CloseOutput => {
+                    self.save_compound_output_fd(saved, fd);
+                    self.fd_table.close_output(fd);
+                    self.shell_state
+                        .env_vars
+                        .insert(fd_closed_key(fd), "1".to_string());
+                }
+                crate::parser::RedirectKind::DuplicateOutput => {
+                    self.save_compound_output_fd(saved, fd);
+                    if is_closed_redirect_target(&target) {
+                        self.fd_table.close_output(fd);
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_closed_key(fd), "1".to_string());
+                        continue;
+                    }
+                    if let Some((source_fd, move_source)) =
+                        redirect_target_fd_and_move(&target)
+                    {
+                        if move_source {
+                            self.save_compound_output_fd(saved, source_fd);
+                        }
+                        // GNU dup2 copies the whole descriptor — the group's
+                        // fd takes the source's open file description, shared
+                        // offset included (fd_table dup_entry).
+                        let _ = self.fd_table.dup_output(fd, source_fd);
+                        self.record_output_fd_ledger(fd);
+                        if move_source {
+                            self.fd_table.close(source_fd);
+                            self.shell_state
+                                .env_vars
+                                .insert(fd_closed_key(source_fd), "1".to_string());
+                        }
+                        continue;
+                    }
+                    // GNU redir.c:832-838: `>&word`/`1>&word` with a
+                    // non-numeric word is r_err_and_out — one open, fd 2
+                    // shares fd 1's description. Other redirectors report
+                    // AMBIGUOUS_REDIRECT; the propagation/diagnostic paths
+                    // already report it, so leave the fd table alone.
+                    if fd == 1 {
+                        let path = target.strip_prefix('&').unwrap_or(&target);
+                        if redirect.append {
+                            self.set_fd_output_file(1, path.to_string(), false, true)
+                        } else {
+                            self.create_redirect_output(path, redirect.clobber)?;
+                            self.set_fd_output_file(1, path.to_string(), false, false)
+                        }
+                        .map_err(|error| crate::posix_errors::path_error(path, error))?;
+                        self.save_compound_output_fd(saved, 2);
+                        self.share_fd_output_file(1, 2, path, false);
+                    }
+                }
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => {
+                    if is_closed_redirect_target(&target) {
+                        continue;
+                    }
+                    self.save_compound_output_fd(saved, 1);
+                    self.save_compound_output_fd(saved, 2);
+                    let append =
+                        redirect.kind == crate::parser::RedirectKind::CombinedAppend;
+                    if !append {
+                        self.create_redirect_output(&target, redirect.clobber)?;
+                    }
+                    self.set_fd_output_file(1, target.clone(), false, append)
+                        .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                    self.share_fd_output_file(1, 2, &target, false);
+                }
+                // Output | Append | ClobberOutput
+                _ => {
+                    self.save_compound_output_fd(saved, fd);
+                    if is_closed_redirect_target(&target) {
+                        self.fd_table.close_output(fd);
+                        self.shell_state
+                            .env_vars
+                            .insert(fd_closed_key(fd), "1".to_string());
+                        continue;
+                    }
+                    if !redirect.append {
+                        self.create_redirect_output(&target, redirect.clobber)?;
+                    }
+                    self.set_fd_output_file(fd, target.clone(), fd >= 10, redirect.append)
+                        .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Scoped fd-table binding for a builtin that reparses its body in
+    /// place (eval / fc / source / trap bodies): GNU applies the command's
+    /// redirections to real descriptors for the command's whole duration
+    /// (redir.c do_redirection_internal + execute_cmd.c undo on exit), so
+    /// `eval 'echo x 1>&3' 3>&1` resolves fd 3 to the binding in force when
+    /// eval ran.
+    pub(crate) fn with_compound_output_redirects<T>(
+        &mut self,
+        cmd: &CommandNode,
+        execute: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
+    ) -> Result<T, ExecuteError> {
+        let saved = self.open_compound_output_redirects(cmd)?;
+        let result = execute(self);
+        self.restore_compound_output_redirects(saved);
+        result
+    }
+
+    pub(in crate::executor) fn restore_compound_output_redirects(
+        &mut self,
+        saved: Vec<SavedOutputFd>,
+    ) {
+        for saved in saved {
+            match saved.entry {
+                Some(entry) => {
+                    self.fd_table.entries.insert(saved.fd, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&saved.fd);
+                }
+            }
+            restore_optional_env_var(
+                &mut self.shell_state.env_vars,
+                &fd_output_key(saved.fd),
+                saved.fd_output,
+            );
+            restore_optional_env_var(
+                &mut self.shell_state.env_vars,
+                &fd_output_process_substitution_key(saved.fd),
+                saved.fd_procsub,
             );
             restore_optional_env_var(
                 &mut self.shell_state.env_vars,

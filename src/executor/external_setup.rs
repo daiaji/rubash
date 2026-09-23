@@ -154,7 +154,7 @@ impl Executor {
                 if redirect.fd.unwrap_or(0) == 0
                     && redirect.kind == crate::parser::RedirectKind::Input
                 {
-                    let target = self.expand_word(&redirect.target);
+                    let target = self.expand_redirect_target(redirect);
                     if redirect_target_fd(&target).is_none()
                         && !is_closed_redirect_target(&target)
                     {
@@ -164,7 +164,7 @@ impl Executor {
             }
             process.stdin(Stdio::piped());
         } else if let Some(ref redirect) = cmd.redirect_in {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if redirect.fd.unwrap_or(0) == 0 {
                 if let Some(fd) = redirect_target_fd(&target) {
                     match self.fd_table.read_endpoint(fd) {
@@ -249,6 +249,16 @@ impl Executor {
             || self.virtual_fd_stdin_remaining(0).is_some()
         {
             process.stdin(Stdio::piped());
+        } else if let Some(
+            FdReadEndpoint::File(file_fd) | FdReadEndpoint::CoprocStdout { fd: file_fd, .. },
+        ) = self.fd_table.read_endpoint(0)
+        {
+            // GNU: fd 0 is a real descriptor and the child inherits the open
+            // file description, file offset included (`exec 0<f; tr ...`
+            // reads f from the current position). DuplicateHandle shares the
+            // file pointer just like dup2.
+            let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+            process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
         } else if self.fd_table.is_closed(0)
             || (self.fd_table.has_entry(0) && !self.fd_table.is_open_for_read(0))
         {
@@ -366,7 +376,7 @@ impl Executor {
                 }
             }
             if redirect.fd.unwrap_or(0) == 0 {
-                let target = self.expand_word(&redirect.target);
+                let target = self.expand_redirect_target(redirect);
                 if let Some(fd) = redirect_target_fd(&target) {
                     if self.fd_table.is_open_for_read(fd) {
                         if let Some(input) = self.virtual_fd_stdin_remaining_bytes(fd) {
@@ -692,7 +702,7 @@ impl Executor {
         .into_iter()
         .flatten()
         .filter_map(|redirect| {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             self.assignment_output_process_substitutions
                 .contains_key(&target)
                 .then_some(target)
@@ -808,7 +818,7 @@ impl Executor {
         Ok(path)
     }
 
-    fn process_substitution_temp_path(&self) -> Result<PathBuf, ExecuteError> {
+    pub(in crate::executor) fn process_substitution_temp_path(&self) -> Result<PathBuf, ExecuteError> {
         let dir_value = self
             .shell_state.env_vars
             .get("TMPDIR")

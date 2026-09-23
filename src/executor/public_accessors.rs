@@ -591,7 +591,10 @@ impl Executor {
     pub fn script_fd0_line(&mut self, output: &mut String) -> Option<usize> {
         match self.fd_table.read_endpoint(0) {
             Some(FdReadEndpoint::InheritedProcessStdin) => None,
-            Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
+            Some(FdReadEndpoint::Text(_))
+            | Some(FdReadEndpoint::ProcessSubstitution(_))
+            | Some(FdReadEndpoint::File(_))
+            | Some(FdReadEndpoint::CoprocStdout { .. }) => {
                 let line = self
                     .fd_table
                     .take_buffered_input_line(0)
@@ -609,7 +612,19 @@ impl Executor {
     }
 
     pub(in crate::executor) fn set_current_line(&mut self, cmd: &CommandNode) {
-        if let Some(line) = cmd.line {
+        // GNU execute_cmd.c: only some command kinds stamp `line_number`
+        // from their own `->line` (cm_simple :936, cm_subshell :696,
+        // cm_for :3001, cm_select :3513, cm_case :3653, cm_arith :3904,
+        // cm_cond :4138, cm_arith_for :3236). while/until/if/group and the
+        // connection/pipeline/&/! wrappers run under the ambient line —
+        // the enclosing body's frozen line or, at top level, this
+        // command's own parse-end line (see CommandNode::end_line).
+        let line = if command_sets_own_line(cmd) {
+            cmd.line
+        } else {
+            self.ambient_line.get().or(cmd.end_line).or(cmd.line)
+        };
+        if let Some(line) = line {
             let line = line.to_string();
             self.shell_state.env_vars
                 .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
@@ -617,6 +632,22 @@ impl Executor {
                 set_process_env("__RUBASH_CURRENT_LINE", line);
             }
         }
+    }
+
+    /// Runs `f` with GNU's ambient `line_number` pinned to `line` for its
+    /// duration — the enclosing line-setting command's `->line` in force
+    /// while its body executes (execute_cmd.c SET_LINE_NUMBER sites).
+    /// Non-line-setting commands inside the body report diagnostics
+    /// against this line rather than their own keyword line.
+    pub(in crate::executor) fn with_ambient_line<T>(
+        &mut self,
+        line: Option<usize>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let saved = self.ambient_line.replace(line);
+        let result = f(self);
+        self.ambient_line.set(saved);
+        result
     }
 
     pub(in crate::executor) fn set_current_command(&mut self, cmd: &CommandNode) {

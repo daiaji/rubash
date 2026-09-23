@@ -1,6 +1,17 @@
 use super::*;
 
 pub(in crate::executor) fn format_redirect(operator: &str, redirect: &Redirect) -> String {
+    // fd-dup/close targets are stored as `&N`/`&-`/`&N-` (redirections.rs
+    // redirect_target); GNU print_cmd fuses them: `2>&1`, `>&-`, `<&5-`.
+    if let Some(fd_target) = redirect.target.strip_prefix('&') {
+        let op = operator
+            .trim_start_matches(|ch: char| ch.is_ascii_digit())
+            .trim_end_matches('&');
+        return match redirect.fd {
+            Some(fd) => format!("{fd}{op}&{fd_target}"),
+            None => format!("{op}&{fd_target}"),
+        };
+    }
     match redirect.fd {
         Some(_) if operator.starts_with(char::is_numeric) => {
             format!("{operator} {}", redirect.target)

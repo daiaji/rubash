@@ -24,6 +24,9 @@ pub(super) fn execute_text_maybe_redirected(
     let mut ast = parse_source_ast(source);
     if let Some(redirect_cmd) = redirect_cmd {
         executor.apply_command_output_redirects(redirect_cmd, &mut ast)?;
+        return executor.with_compound_output_redirects(redirect_cmd, |executor| {
+            execute_ast_with_args(executor, ast, args, source_name)
+        });
     }
     execute_ast_with_args(executor, ast, args, source_name)
 }

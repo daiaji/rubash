@@ -231,6 +231,10 @@ impl Executor {
             }
             if self.evalerror_exec_depth.get() == 1 {
                 self.reader_command_line.set(command.line);
+                // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir
+                // is cleared before each top-level command, so a redirected
+                // control structure's flag never leaks into the next command.
+                self.shell_state.stdin_redir.set(false);
             }
             {
                 let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_JOBS);
@@ -239,6 +243,15 @@ impl Executor {
                 self.run_pending_signal_traps()?;
             }
             let _t_chain = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_CHAIN);
+            // GNU `line_number` advances only while the reader parses each
+            // top-level command — the ambient line a while/if/group command
+            // runs under is its own parse-end line. Inside a pre-parsed
+            // body (depth > 1) the ambient stays frozen at whatever the
+            // enclosing command established.
+            if self.evalerror_exec_depth.get() == 1 {
+                self.ambient_line
+                    .set(command.end_line.or(command.line));
+            }
             self.set_current_line(command);
             if self.noexec_enabled() {
                 self.exit_code = 0;

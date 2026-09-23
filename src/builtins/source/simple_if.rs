@@ -161,11 +161,19 @@ fn command_has_output_redirects(command: &CommandNode) -> bool {
         || command.append.is_some()
         || command.redirect_err.is_some()
         || command.redirect_err_append.is_some()
+        || command
+            .redirects
+            .iter()
+            .any(|redirect| redirect.is_output_side())
 }
 
 fn command_has_input_redirects(command: &CommandNode) -> bool {
     command.redirect_in.is_some()
         || command.here_string.is_some()
+        || command
+            .redirects
+            .iter()
+            .any(|redirect| redirect.is_input_side())
         || command
             .heredoc_redirects
             .iter()

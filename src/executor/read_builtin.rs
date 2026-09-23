@@ -48,7 +48,7 @@ impl Executor {
         // in-reader open treats failure as EOF, which wrongly assigns "".
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) == 0 && redirect.fd_var.is_none() {
-                let target = self.expand_word(&redirect.target);
+                let target = self.expand_redirect_target(redirect);
                 if !is_closed_redirect_target(&target)
                     && redirect_target_fd(&target).is_none()
                     && !target.starts_with("<(")
@@ -2252,7 +2252,7 @@ impl Executor {
         }
         cmd.redirect_in.as_ref().is_some_and(|redirect| {
             redirect.fd == Some(fd)
-                && !is_closed_redirect_target(&self.expand_word(&redirect.target))
+                && !is_closed_redirect_target(&self.expand_redirect_target(redirect))
         })
     }
 
@@ -2276,7 +2276,7 @@ impl Executor {
             }
             if cmd.redirect_in.as_ref().is_some_and(|redirect| {
                 redirect.fd == Some(fd)
-                    && !is_closed_redirect_target(&self.expand_word(&redirect.target))
+                    && !is_closed_redirect_target(&self.expand_redirect_target(redirect))
             }) {
                 return 0;
             }
@@ -2288,7 +2288,7 @@ impl Executor {
         }
         if cmd.redirect_in.as_ref().is_some_and(|redirect| {
             redirect.fd.unwrap_or(0) == 0
-                && !is_closed_redirect_target(&self.expand_word(&redirect.target))
+                && !is_closed_redirect_target(&self.expand_redirect_target(redirect))
         }) {
             return 0;
         }
@@ -2375,7 +2375,7 @@ fn redirected_input_fd(executor: &Executor, cmd: &CommandNode) -> Option<u32> {
     if !redirect.operator.contains('&') {
         return None;
     }
-    let target = executor.expand_word(&redirect.target);
+    let target = executor.expand_redirect_target(redirect);
     let target = target.strip_prefix('&').unwrap_or(&target);
     (target != "-")
         .then(|| target.parse::<u32>().ok())

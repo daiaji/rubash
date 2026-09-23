@@ -51,7 +51,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_in {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
             } else if redirect_target_fd(&target).is_some() {
@@ -71,7 +71,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
             } else if redirect_target_fd(&target).is_some() {
@@ -88,7 +88,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if redirect.fd_var.is_some() {
             } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 self.open_output_fd_append(&target).or_else(|_| {
@@ -105,7 +105,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if redirect.fd_var.is_some() {
             } else if !is_closed_redirect_target(&target)
                 && !is_null_device(&target)
@@ -116,7 +116,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if redirect.fd_var.is_some() {
             } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 OpenOptions::new()

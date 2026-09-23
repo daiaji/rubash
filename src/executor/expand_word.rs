@@ -45,6 +45,33 @@ fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
 }
 
 impl Executor {
+    /// GNU redir.c:298 redirection_expand: a redirect word is expanded
+    /// exactly once, inside do_redirections' left-to-right pass. Rubash
+    /// resolves targets over several passes (ambiguity precheck, fd-scope
+    /// binding, pipeline stream routing) and each pass may see a different
+    /// Redirect object for the same source redirect (the ordered `redirects`
+    /// list entry vs the legacy mirror fields vs materialized clones), so
+    /// the memo keys on the redirect's semantic identity. Side effects
+    /// (`$((n+=1))`, `$(cmd)`) in a target run once per command execution;
+    /// the memo is cleared at each execute_command entry.
+    pub(crate) fn expand_redirect_target(&self, redirect: &crate::parser::Redirect) -> String {
+        let key = format!(
+            "{:?}\x1f{}\x1f{:?}\x1f{}",
+            redirect.kind,
+            redirect.operator,
+            redirect.fd,
+            redirect.target
+        );
+        if let Some(hit) = self.redirect_target_memo.borrow().get(&key) {
+            return hit.clone();
+        }
+        let expanded = self.expand_word(&redirect.target);
+        self.redirect_target_memo
+            .borrow_mut()
+            .insert(key, expanded.clone());
+        expanded
+    }
+
     pub(crate) fn expand_word(&self, word: &str) -> String {
         let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
         let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
@@ -289,9 +316,14 @@ impl Executor {
             .and_then(|rest| rest.strip_suffix("))"))
         {
             let expression = self.expand_arithmetic_special_parameters(expression);
+            // Pending deferred arithmetic writes are part of the effective
+            // environment for this expansion (GNU applies redirect-side-effect
+            // assignments immediately, so a later `$((` in the same command
+            // sees them).
+            let overlaid = crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(&self.shell_state.env_vars);
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
                 if let Some(name) =
-                    arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
+                    arithmetic_unbound_variable(&expression, &overlaid)
                 {
                     if !self.shell_state.arithmetic_expansion_error.replace(true) {
                         eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
@@ -303,8 +335,18 @@ impl Executor {
                     return Some(String::new());
                 }
             }
-            let (value, actual_category) =
-                eval_conditional_arith_value_categorized(&expression, &self.shell_state.env_vars);
+            // GNU redir.c:298 redirection_expand / subst.c word expansion run
+            // in the live shell context, so `$((n+=1))` side effects commit.
+            // This `&self` path cannot write env_vars; capture the eval deltas
+            // into the deferred-write queue (same channel as the embedded
+            // parameter walker's arithmetic arm) for the mutable caller to
+            // apply.
+            let (value, writes, actual_category) =
+                eval_conditional_arith_value_categorized_with_writes(&expression, &overlaid);
+            if !writes.is_empty() {
+                crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
+                    .with(|pending| pending.borrow_mut().extend(writes));
+            }
             if let Some(value) = value {
                 return Some(value.to_string());
             }

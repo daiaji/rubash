@@ -9,7 +9,7 @@ impl Executor {
         output: &[u8],
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if self.has_output_fd_target(&target) {
                 self.write_output_fd_redirect(&target, output)?;
                 return Ok(());
@@ -17,7 +17,7 @@ impl Executor {
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             file.write_all(output)?;
         } else if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if self.has_output_fd_target(&target) {
                 self.write_output_fd_redirect(&target, output)?;
                 return Ok(());
@@ -164,6 +164,12 @@ impl Executor {
             crate::parser::parse(&tokens)
         };
         self.apply_command_output_redirects(cmd, &mut ast)?;
+        // A `${THIS_SH} script 3>&1`-style invocation is a process boundary:
+        // the child's fd table is the parent's copy, so the command's
+        // numbered output redirections bind real slots for the child's whole
+        // run (redir.c do_redirection_internal) — restored wholesale with
+        // saved_fd_table below.
+        let _bound_output_fds = self.open_compound_output_redirects(cmd)?;
 
         let saved_env = self.shell_state.env_vars.clone();
         let this_shell_invocation = cmd.words.first().is_some_and(|command| {
@@ -316,7 +322,43 @@ impl Executor {
         // (nameref8.sub warnings reported `rubash.exe:` prologs).
         let saved_assignment_command_name = self.assignment_command_name.take();
 
-        if let (Some(input), _) = self.function_call_stdin(cmd)? {
+        // The fd table is a process boundary too: a child's persistent
+        // `exec 2>/dev/null` (redir.c do_redirection_internal without undo)
+        // dies with the real child process, but the in-process emulation
+        // would leak it into the parent's table and silence every later
+        // diagnostic (jobs1.sub's trailing `exec 2>/dev/null` ate all
+        // parent stderr). Restore the parent's table; the child's entries
+        // drop — and close — like a real exit. The snapshot must precede
+        // the file_stdin install below: GNU applies `< file` in the CHILD
+        // (do_redirections after fork), so the parent's fd 0 slot is the
+        // pre-redirect state — restoring it also unwinds our emulation.
+        let saved_fd_table = self.fd_table.clone();
+        // GNU execute_cmd.c redirects before the child runs: `< file` puts
+        // the open file on the child's fd 0, so `exec 3<&0` inside the child
+        // dups the file (shared offset). Install a real File endpoint on
+        // fd 0 for plain file redirects; text sources (heredoc/here-string)
+        // keep the FUNCTION_STDIN channel.
+        let file_stdin = cmd.redirect_in.as_ref().and_then(|redirect| {
+            if redirect.fd.unwrap_or(0) != 0 {
+                return None;
+            }
+            let target = self.expand_redirect_target(redirect);
+            if is_closed_redirect_target(&target)
+                || redirect_target_fd(&target).is_some()
+                || is_null_device(&target)
+                || target.starts_with('<')
+            {
+                return None;
+            }
+            let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+            FileFd::open_read(path).ok()
+        });
+        if let Some(file) = file_stdin {
+            self.set_fd_input_file(0, file, false);
+            self.shell_state.env_vars.remove(FUNCTION_STDIN);
+            self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
+            self.shell_state.env_vars.remove(INHERIT_PROCESS_STDIN);
+        } else if let (Some(input), _) = self.function_call_stdin(cmd)? {
             self.shell_state
                 .env_vars
                 .insert(FUNCTION_STDIN.to_string(), input);
@@ -344,14 +386,6 @@ impl Executor {
             self.shell_state.job_table.clone()
         };
         let saved_background_children = std::mem::take(&mut self.background_children);
-        // The fd table is a process boundary too: a child's persistent
-        // `exec 2>/dev/null` (redir.c do_redirection_internal without undo)
-        // dies with the real child process, but the in-process emulation
-        // would leak it into the parent's table and silence every later
-        // diagnostic (jobs1.sub's trailing `exec 2>/dev/null` ate all
-        // parent stderr). Restore the parent's table; the child's entries
-        // drop — and close — like a real exit.
-        let saved_fd_table = self.fd_table.clone();
         // A ${THIS_SH} child is a process boundary for signal delivery too:
         // the pending-signal mailbox is keyed by process id, which the
         // in-process child shares with the parent, so signals queued for

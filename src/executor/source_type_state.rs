@@ -72,8 +72,16 @@ impl Executor {
         command: &CommandNode,
         body: &mut [CommandNode],
     ) -> Result<(), ExecuteError> {
-        if let Some(redirect) = &command.redirect_out {
-            let target = self.expand_word(&redirect.target);
+        // The stdio mirror fields are fd-blind: `3>&1`/`2>&1` also land in
+        // `redirect_out`. Only fd-matching entries are stdio redirects;
+        // numbered ones propagate via splice_numbered_output_redirects_in_order
+        // below (GNU do_redirection_internal applies them in parse order).
+        if let Some(redirect) = command
+            .redirect_out
+            .as_ref()
+            .filter(|r| r.fd.unwrap_or(1) == 1)
+        {
+            let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
@@ -84,14 +92,22 @@ impl Executor {
             apply_stdout_append_redirect(body, &append_redirect);
         }
 
-        if let Some(redirect) = &command.append {
+        if let Some(redirect) = command
+            .append
+            .as_ref()
+            .filter(|r| r.fd.unwrap_or(1) == 1)
+        {
             let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_word(&redirect.target);
+            append_redirect.target = self.expand_redirect_target(redirect);
             apply_stdout_append_redirect(body, &append_redirect);
         }
 
-        if let Some(redirect) = &command.redirect_err {
-            let target = self.expand_word(&redirect.target);
+        if let Some(redirect) = command
+            .redirect_err
+            .as_ref()
+            .filter(|r| r.fd.unwrap_or(2) == 2)
+        {
+            let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
@@ -102,11 +118,23 @@ impl Executor {
             apply_stderr_append_redirect(body, &append_redirect);
         }
 
-        if let Some(redirect) = &command.redirect_err_append {
+        if let Some(redirect) = command
+            .redirect_err_append
+            .as_ref()
+            .filter(|r| r.fd.unwrap_or(2) == 2)
+        {
             let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_word(&redirect.target);
+            append_redirect.target = self.expand_redirect_target(redirect);
             apply_stderr_append_redirect(body, &append_redirect);
         }
+
+        // Numbered (fd-prefixed) output redirects — `3>&1`, `10>f` — bind
+        // real fd-table entries for the body's duration through
+        // open_compound_output_redirects (with_command_input_redirects),
+        // matching GNU do_redirection_internal's left-to-right descriptor
+        // setup (redir.c:767-955). Leaves resolve `1>&3` against the
+        // group's binding; a text-level splice would re-dup the leaf's own
+        // fd 1 and mis-bind inside pipelines.
 
         Ok(())
     }

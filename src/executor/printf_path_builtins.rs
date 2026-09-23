@@ -172,7 +172,7 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_null_device(&target) {
                 return Ok(crate::builtins::cd::execute_with_io(
                     cmd.words[1..].iter().map(String::as_str),
@@ -191,7 +191,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -205,7 +205,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if self.has_output_fd_target(&target) {
                 let mut stderr_buf = Vec::new();
                 let status = crate::builtins::cd::execute_with_io(
@@ -235,7 +235,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if self.has_output_fd_target(&target) {
                 let mut stderr_buf = Vec::new();
                 let status = crate::builtins::cd::execute_with_io(

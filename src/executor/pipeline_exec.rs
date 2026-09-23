@@ -147,6 +147,19 @@ impl Executor {
         command: &CommandNode,
     ) -> Result<bool, ExecuteError> {
         if let Some(brace_group) = &command.brace_group {
+            // GNU execute_cmd.c:826-828: cm_group is a shell control
+            // structure, so `{ } <f` sets the sticky stdin_redir flag the
+            // same way `while ... done <f` does — the check lives in
+            // execute_command for the other kinds; brace groups dispatch
+            // here instead.
+            if !command.redirects.is_empty() {
+                self.shell_state.stdin_redir.set(
+                    command
+                        .redirects
+                        .iter()
+                        .any(redirect_updates_stdin_redir),
+                );
+            }
             let mut redirect_command = command.clone();
             let group_outputs =
                 self.materialize_compound_output_process_substitutions(&mut redirect_command)?;
@@ -407,7 +420,7 @@ impl Executor {
             // (set-e1.sub:40 `! { false; echo A $?; } | cat` prints `A 1`).
             let pipeline_inverted =
                 first.inverted || time_prefix.as_ref().is_some_and(|prefix| prefix.inverted);
-            let Some((mut next_input, next_stderr, next_status)) = (if pipeline_inverted {
+            let Some((mut next_input, mut next_stderr, mut next_status)) = (if pipeline_inverted {
                 self.with_errexit_suppressed(|executor| {
                     if last_stage && executor.lastpipe_enabled() {
                         executor.execute_lastpipe_stage(stage, &input).map(Some)
@@ -436,6 +449,24 @@ impl Executor {
             }) else {
                 return Ok(None);
             };
+            // GNU: each element's own redirections run inside the element's
+            // subshell after the pipe is bound to fd 1 (execute_cmd.c
+            // execute_pipeline + redir.c do_redirection_internal). Compound
+            // stages applied them internally; simple stages captured their
+            // raw fd-1/fd-2 streams, so route them through the resolved
+            // redirect state — `echo a >f | cat` writes f and hands cat an
+            // empty pipe, `echo a 1>&2 | cat` goes to stderr. A lastpipe
+            // element ran execute_command in this shell and already applied
+            // its own redirections, so routing it again would reopen `>f`
+            // and truncate the content the stage just wrote.
+            if !command_is_compound_pipeline_stage(command) && !in_shell_stage {
+                self.route_pipeline_stage_streams(
+                    command,
+                    &mut next_input,
+                    &mut next_stderr,
+                    &mut next_status,
+                )?;
+            }
             if command.pipe == Some(2)
                 || self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout)
             {
@@ -460,7 +491,7 @@ impl Executor {
         }
 
         let final_command = commands.last().expect("pipeline has at least one stage");
-        self.write_pipeline_output(final_command, &input)?;
+        self.write_pipeline_output(final_command, &input, true)?;
         if let Some(prefix) = &time_prefix {
             if let Some(started) = time_prefix_started {
                 print_time(&self.shell_state.env_vars, prefix.posix_format, started);
@@ -534,7 +565,7 @@ impl Executor {
             return Ok(None);
         };
 
-        self.write_pipeline_output(commands[1], &output)?;
+        self.write_pipeline_output(commands[1], &output, false)?;
         self.exit_code = status;
         self.set_pipestatus(vec![0, status]);
         Ok(Some(()))
@@ -567,6 +598,7 @@ impl Executor {
             || command.redirect_in.is_some()
             || command.redirect_out.is_some()
             || command.append.is_some()
+            || !command.redirects.is_empty()
         {
             return None;
         }
@@ -781,6 +813,10 @@ impl Executor {
                     || command.redirect_in.is_some()
                     || command.redirect_err.is_some()
                     || command.redirect_err_append.is_some()
+                    || command
+                        .redirects
+                        .iter()
+                        .any(|redirect| redirect.is_list_only_redirect())
                     || ((command.redirect_out.is_some() || command.append.is_some())
                         && index + 1 != commands.len())
                     || ((command.heredoc.is_some()
@@ -967,7 +1003,7 @@ impl Executor {
                 self.write_default_stdout(&output)?;
             }
         }
-        self.write_pipeline_output(commands[commands.len() - 1], &results.last().unwrap().0)?;
+        self.write_pipeline_output(commands[commands.len() - 1], &results.last().unwrap().0, false)?;
         if let Some((_, stderr, _)) = results.last() {
             if !stderr.is_empty() {
                 std::io::stderr().write_all(
@@ -1016,6 +1052,10 @@ impl Executor {
                     || command.redirect_in.is_some()
                     || command.redirect_err.is_some()
                     || command.redirect_err_append.is_some()
+                    || command
+                        .redirects
+                        .iter()
+                        .any(|redirect| redirect.is_list_only_redirect())
                     || ((command.redirect_out.is_some() || command.append.is_some())
                         && index + 1 != commands.len())
                     || ((command.heredoc.is_some()
@@ -1176,7 +1216,7 @@ impl Executor {
                 self.write_default_stdout(&output)?;
             }
         }
-        self.write_pipeline_output(commands[commands.len() - 1], &results.last().unwrap().0)?;
+        self.write_pipeline_output(commands[commands.len() - 1], &results.last().unwrap().0, false)?;
         if let Some((_, stderr, _)) = results.last() {
             if !stderr.is_empty() {
                 if let Some(capture) = &mut self.stderr_capture {
@@ -1885,7 +1925,7 @@ impl Executor {
             ));
         }
         for redirect in &command.redirects {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if redirect.fd_var.is_none() && redirect_target_fd(&target).is_none() && slash(&target)
             {
                 return Some(format!(
@@ -1959,7 +1999,7 @@ impl Executor {
     }
 }
 
-fn command_is_compound_pipeline_stage(command: &CommandNode) -> bool {
+pub(crate) fn command_is_compound_pipeline_stage(command: &CommandNode) -> bool {
     command.for_command.is_some()
         || command.if_command.is_some()
         || command.loop_command.is_some()

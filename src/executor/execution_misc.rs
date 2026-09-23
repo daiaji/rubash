@@ -180,6 +180,57 @@ pub(in crate::executor) fn redirect_target_fd_and_move(target: &str) -> Option<(
         .flatten()
 }
 
+/// GNU redir.c:1401 stdin_redirection + :1435 stdin_redirects — whether a
+/// redirection alters the standard input for the async-stdin decision
+/// (execute_cmd.c:828). Plain input forms (`<`, `<<`, `<<<`, `<>`) count at
+/// ANY redirector fd — `3<file` sets the flag too; `N<&M` dups and `N<&-`
+/// closes count only when N is 0; `N<&M-` moves and output forms never do.
+/// REDIR_VARASSIGN (`{var}<f`) entries are skipped like the C code does.
+pub(in crate::executor) fn redirect_updates_stdin_redir(
+    redirect: &crate::parser::Redirect,
+) -> bool {
+    if redirect.fd_var.is_some() {
+        return false;
+    }
+    use crate::parser::RedirectKind;
+    match redirect.kind {
+        RedirectKind::Input
+        | RedirectKind::ReadWrite
+        | RedirectKind::HereDoc
+        | RedirectKind::HereString => true,
+        RedirectKind::DuplicateInput => {
+            if redirect_target_fd_and_move(&redirect.target)
+                .is_some_and(|(_, move_fd)| move_fd)
+            {
+                false
+            } else {
+                redirect.fd.unwrap_or(0) == 0
+            }
+        }
+        RedirectKind::CloseInput => redirect.fd.unwrap_or(0) == 0,
+        _ => false,
+    }
+}
+
+/// GNU execute_cmd.c:474 shell_control_structure — the command types whose
+/// redirects update the global stdin_redir (execute_cmd.c:828). `( )`
+/// subshells and coprocs are deliberately absent: a subshell recomputes
+/// stdin_redir from its own redirects inside execute_in_subshell
+/// (execute_cmd.c:1733) instead of feeding the parent's flag.
+pub(in crate::executor) fn command_is_shell_control_structure(
+    cmd: &CommandNode,
+) -> bool {
+    cmd.for_command.is_some()
+        || cmd.arithmetic_command.is_some()
+        || cmd.if_command.is_some()
+        || cmd.loop_command.is_some()
+        || cmd.select_command.is_some()
+        || cmd.case_command.is_some()
+        || cmd.conditional_command.is_some()
+        || cmd.brace_group.is_some()
+        || cmd.function_command.is_some()
+}
+
 /// GNU redir.c opens `/dev/stdin`/`/dev/stdout`/`/dev/stderr`,
 /// `/dev/fd/N`, and `/proc/self/fd/N` through the OS's fd-alias device
 /// files, which the kernel resolves to a dup of fd N — behaviorally the

@@ -35,6 +35,10 @@ const GENERIC_READ: DWORD = 0x8000_0000;
 const GENERIC_WRITE: DWORD = 0x4000_0000;
 const FILE_SHARE_READ: DWORD = 0x0000_0001;
 const FILE_SHARE_WRITE: DWORD = 0x0000_0002;
+// POSIX unlink-while-open: without FILE_SHARE_DELETE Windows refuses to
+// delete a file the shell still holds open (GNU redir.tests removes
+// $TMPDIR/bash-c while fd 6 is `<>`-open).
+const FILE_SHARE_DELETE: DWORD = 0x0000_0004;
 const OPEN_EXISTING: DWORD = 3;
 const CREATE_ALWAYS: DWORD = 2;
 const FILE_ATTRIBUTE_TEMPORARY: DWORD = 0x0000_0100;
@@ -162,7 +166,7 @@ impl FdTable {
             CreateFileW(
                 wide.as_ptr(),
                 GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 std::ptr::null(),
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_TEMPORARY,
@@ -182,7 +186,7 @@ impl FdTable {
             CreateFileW(
                 wide.as_ptr(),
                 GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 std::ptr::null(),
                 CREATE_ALWAYS,
                 FILE_ATTRIBUTE_TEMPORARY,
@@ -346,6 +350,7 @@ pub unsafe fn raw_read(h: HANDLE, buf: *mut u8, n: DWORD, got: *mut DWORD) -> BO
 // ---- engine-facing free functions (FdTable-independent) ----
 
 const FILE_APPEND_DATA: DWORD = 0x0000_0004;
+const SYNCHRONIZE: DWORD = 0x0010_0000;
 const CREATE_NEW: DWORD = 1;
 const OPEN_ALWAYS: DWORD = 4;
 const FILE_END: DWORD = 2;
@@ -364,7 +369,7 @@ fn create_file(
         CreateFileW(
             wide.as_ptr(),
             access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             disposition,
             0,
@@ -392,10 +397,14 @@ pub fn open_file_create_new(path: &std::path::Path) -> std::io::Result<HANDLE> {
     create_file(path, GENERIC_WRITE, CREATE_NEW)
 }
 
-/// `N>>file` — O_WRONLY|O_CREAT|O_APPEND. FILE_APPEND_DATA makes every
-/// write land at end-of-file regardless of the shared offset.
+/// `N>>file` — O_WRONLY|O_CREAT|O_APPEND. A handle must carry
+/// FILE_APPEND_DATA and NOT FILE_WRITE_DATA for Windows to force every
+/// write to end-of-file regardless of the shared offset (MSDN:
+/// FILE_APPEND_DATA "and not FILE_WRITE_DATA"); GENERIC_WRITE includes
+/// FILE_WRITE_DATA, so a GENERIC_WRITE handle wrote at offset 0 and
+/// `cmd >>existing` overwrote the head instead of appending.
 pub fn open_file_append(path: &std::path::Path) -> std::io::Result<HANDLE> {
-    create_file(path, FILE_APPEND_DATA | GENERIC_WRITE, OPEN_ALWAYS)
+    create_file(path, FILE_APPEND_DATA | SYNCHRONIZE, OPEN_ALWAYS)
 }
 
 /// `N<>file` — O_RDWR|O_CREAT.
@@ -533,7 +542,7 @@ pub fn open_null_device() -> std::io::Result<HANDLE> {
         CreateFileW(
             to_wide("NUL").as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
             0,
@@ -558,7 +567,7 @@ pub fn open_null_device_inheritable() -> std::io::Result<HANDLE> {
         CreateFileW(
             to_wide("NUL").as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             &mut sa as *mut SECURITY_ATTRIBUTES as *const c_void,
             OPEN_EXISTING,
             0,

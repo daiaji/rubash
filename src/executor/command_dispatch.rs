@@ -21,6 +21,12 @@ impl Executor {
         if self.posix_function_declare_prefix_assignments_are_local(cmd) {
             self.save_assignment_local_names(&cmd.assignments);
         }
+        // GNU redir.c:298 redirection_expand uses expand_words_no_vars:
+        // redirect words expand with the temp environment IGNORED
+        // (`a=9 echo >&$(echo $a)` sees the outer a, not 9). Expanding here —
+        // before apply_temporary_assignments — seeds the redirect-target memo
+        // with the correct pre-binding values; the apply sites reuse them.
+        let ambiguous_redirect = self.reject_ambiguous_redirects(cmd)?;
         let temporary_assignments = if standalone_assignments {
             self.apply_permanent_assignments(&cmd.assignments);
             Vec::new()
@@ -61,7 +67,7 @@ impl Executor {
             // target) and route the trace to that fd's endpoint. This
             // preserves the `2>&1` semantics for nested same-shell scripts.
             if let Some(redirect) = &cmd.redirect_err_append {
-                let target = self.expand_word(&redirect.target);
+                let target = self.expand_redirect_target(redirect);
                 if self.has_output_fd_target(&target) {
                     let _ = self.write_output_fd_redirect(&target, &xtrace_output);
                 } else {
@@ -76,7 +82,7 @@ impl Executor {
         // simple command; builtins that return EX_USAGE/EX_UTILERROR/etc.
         // (> EX_SHERRBASE) set it during dispatch.
         self.special_builtin_failed.set(false);
-        let result = if self.reject_ambiguous_redirects(cmd)? {
+        let result = if ambiguous_redirect {
             Ok(())
         } else {
             self.execute_prepared_command(cmd)

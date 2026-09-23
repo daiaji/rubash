@@ -206,8 +206,14 @@ impl Executor {
         }
         for_command.body = body.commands;
 
+        // GNU execute_cmd.c:3001 `line_number = for_command->line`: the
+        // `for` keyword's line is the ambient line_number in force while
+        // the body executes — inner while/if/group diagnostics report it.
+        let for_line = cmd.line;
         let result = self.with_command_input_redirects(cmd, |executor| {
-            executor.execute_for_command(&for_command)
+            executor.with_ambient_line(for_line, |executor| {
+                executor.execute_for_command(&for_command)
+            })
         });
         let status = self.exit_code;
         let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
@@ -223,7 +229,7 @@ impl Executor {
         if redirect.fd.unwrap_or(0) != 0 {
             return None;
         }
-        if is_closed_redirect_target(&self.expand_word(&redirect.target)) {
+        if is_closed_redirect_target(&self.expand_redirect_target(redirect)) {
             return None;
         }
         if let Some(source) = redirect
@@ -234,7 +240,7 @@ impl Executor {
             return self.process_substitution_output(source);
         }
 
-        let target = self.expand_word(&redirect.target);
+        let target = self.expand_redirect_target(redirect);
         // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
         // the OS fd-alias layer — a dup of fd N, not a filesystem path
         // (niubash#118: `< /dev/stdin` used to open CONIN$ and block on the

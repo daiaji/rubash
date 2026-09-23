@@ -151,7 +151,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if self.has_output_fd_target(&target) {
                 self.write_output_fd_redirect(&target, &output)?;
                 return Ok(());
@@ -179,7 +179,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if self.has_output_fd_target(&target) {
                 let mut output = Vec::new();
                 crate::builtins::echo::write_echo_decoded(

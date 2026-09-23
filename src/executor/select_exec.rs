@@ -94,8 +94,13 @@ impl Executor {
             return Ok(());
         }
 
+        // GNU execute_cmd.c:3513 `line_number = select_command->line`: the
+        // `select` keyword's line is the ambient while the body runs.
+        let select_line = cmd.line;
         let result = self.with_command_input_redirects(cmd, |executor| {
-            executor.execute_select_loop(&select_command, &values)
+            executor.with_ambient_line(select_line, |executor| {
+                executor.execute_select_loop(&select_command, &values)
+            })
         });
         let status = self.exit_code;
         let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
@@ -177,13 +182,29 @@ impl Executor {
 
     fn read_select_input(&mut self, has_stdin: bool, stdin_offset: &mut usize) -> Option<String> {
         if !has_stdin {
-            let mut input = String::new();
-            return match std::io::stdin().read_line(&mut input) {
+            // Raw handle read like GNU zread: io::stdin() owns a process-wide
+            // BufReader that would prefetch the whole stream and break the
+            // shared kernel offset for sibling reads.
+            let stdin_handle = crate::fd::process_std_handle(0);
+            let mut line: Vec<u8> = Vec::new();
+            let result = loop {
+                match crate::fd::read_some(stdin_handle, 1) {
+                    Ok(buf) if buf.is_empty() => break Ok(0_usize),
+                    Ok(buf) => {
+                        line.push(buf[0]);
+                        if buf[0] == b'\n' {
+                            break Ok(1_usize);
+                        }
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            return match result {
                 Ok(0) => {
                     eprintln!();
                     None
                 }
-                Ok(_) => Some(input.trim().to_string()),
+                Ok(_) => Some(crate::executor::bytes_to_shell_text(&line).trim().to_string()),
                 Err(_) => {
                     self.exit_code = 1;
                     Some(String::new())

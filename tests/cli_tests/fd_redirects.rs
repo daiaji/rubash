@@ -236,7 +236,7 @@ fn c_external_command_reports_write_error_for_closed_stdout() {
     assert_eq!(stream_text(&output.stdout), "status:1\n");
     assert_eq!(
         stream_text(&output.stderr),
-        "rubash: emitout: write error: Bad file descriptor\n"
+        "bash: line 1: emitout: write error: Bad file descriptor\n"
     );
     let _ = fs::remove_dir_all(bin_dir);
 }

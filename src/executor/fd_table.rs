@@ -19,7 +19,7 @@ pub(crate) struct TextInput {
 /// A real kernel object behind a file-backed fd. `Rc`-shared across dup'd
 /// slots and fork'd (cloned) fd tables so the file offset stays shared —
 /// POSIX open file description semantics (governance doc 3.6, P6/P10).
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct FileFd {
     pub(crate) handle: crate::fd::HANDLE,
     pub(crate) path: PathBuf,

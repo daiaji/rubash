@@ -9,6 +9,11 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = self.execute_pwd_with_io(&cmd.words[1..], &mut stdout, &mut stderr)?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        // GNU pwd.def returns sh_chkwrite(EXECUTION_SUCCESS): a failed
+        // flush (closed fd) turns the builtin's status into failure.
+        if self.take_builtin_write_failed() {
+            return Ok(1);
+        }
         Ok(status)
     }
 

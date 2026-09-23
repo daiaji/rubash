@@ -567,7 +567,7 @@ impl Executor {
         };
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) == 0 {
-                let target = self.expand_word(&redirect.target);
+                let target = self.expand_redirect_target(redirect);
                 if let Some(fd) = redirect_target_fd(&target) {
                     if let Some(FdReadEndpoint::CoprocStdout { fd: pipe, .. }) =
                         self.fd_table.read_endpoint(fd)
@@ -595,7 +595,7 @@ impl Executor {
             let input = self.stdin_string_for_command_mut(cmd).unwrap_or_default();
             let output = filter(&crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input));
             if let Some(redirect) = &cmd.append {
-                let target = self.expand_word(&redirect.target);
+                let target = self.expand_redirect_target(redirect);
                 let mut file = OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -606,7 +606,7 @@ impl Executor {
             }
 
             if let Some(redirect) = &cmd.redirect_out {
-                let target = self.expand_word(&redirect.target);
+                let target = self.expand_redirect_target(redirect);
                 let mut file = self.create_redirect_output(&target, redirect.clobber)?;
                 file.write_all(&output)?;
                 self.exit_code = 0;
@@ -1083,25 +1083,54 @@ impl Executor {
             let windows = crate::executor::path::shell_path_to_windows(file, &self.shell_state.env_vars)
                 .to_string_lossy()
                 .to_string();
-            // DrvFs (any Windows drive or \\wsl$ UNC) does not support POSIX
-            // chmod bits; GNU on WSL leaves files on DrvFs 0777 after
-            // `chmod -x`, so `test -x` stays true. To match GNU baseline
-            // (posix2 negative -x expects failure when run as root on DrvFs),
-            // skip emulation for any Windows drive path and let `test -x`
-            // fall back to existence. This also covers the per-suite TMPDIR
-            // when WSL does not forward TMPDIR to the Windows child (it
-            // becomes C:\Users\...\Temp).
-            let is_drive = windows.len() >= 2
-                && windows.as_bytes()[1] == b':'
-                && windows.as_bytes()[0].is_ascii_alphabetic();
-            if is_drive || windows.starts_with("\\\\wsl$") || windows.starts_with("//wsl$") {
-                continue;
-            }
             let base = crate::builtins::test::emulated_file_mode(file, &self.shell_state.env_vars)
                 .unwrap_or_else(|| self.default_emulated_mode(&windows));
             match apply_chmod_mode(base, mode) {
                 Some(new_mode) => {
-                    store_emulated_file_mode(&mut self.shell_state.env_vars, &windows, new_mode);
+                    // DrvFs/WSL materializes exactly one POSIX permission
+                    // bit: stripping all write bits sets the Windows readonly
+                    // attribute, so `>file`/`>>file` fail EACCES like under
+                    // GNU-on-WSL (redir12.sub). Sync it for every real path —
+                    // relative names resolve against the drive-relative cwd.
+                    let host = if std::path::Path::new(&windows).is_absolute() {
+                        std::path::PathBuf::from(&windows)
+                    } else {
+                        std::env::current_dir()
+                            .unwrap_or_default()
+                            .join(&windows)
+                    };
+                    match std::fs::metadata(&host) {
+                        Ok(metadata) => {
+                            let readonly = new_mode & 0o222 == 0;
+                            let mut permissions = metadata.permissions();
+                            if permissions.readonly() != readonly {
+                                permissions.set_readonly(readonly);
+                                if std::fs::set_permissions(&host, permissions).is_err() {
+                                    failures += 1;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            failures += 1;
+                            eprintln!(
+                                "chmod: cannot access '{}': No such file or directory",
+                                file
+                            );
+                        }
+                    }
+                    // DrvFs does not support POSIX mode bits (GNU on WSL
+                    // leaves files 0777 after `chmod -x`), so only non-drive
+                    // paths get the emulated mode store; drive paths keep the
+                    // `test -x` existence fallback (posix2 negative -x).
+                    let is_drive = windows.len() >= 2
+                        && windows.as_bytes()[1] == b':'
+                        && windows.as_bytes()[0].is_ascii_alphabetic();
+                    if !is_drive
+                        && !windows.starts_with("\\\\wsl$")
+                        && !windows.starts_with("//wsl$")
+                    {
+                        store_emulated_file_mode(&mut self.shell_state.env_vars, &windows, new_mode);
+                    }
                 }
                 None => {
                     failures += 1;

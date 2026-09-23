@@ -56,6 +56,14 @@ pub fn bytes_to_shell_text(bytes: &[u8]) -> String {
     substitution_metadata::bytes_to_shell_text(bytes)
 }
 
+/// Unbuffered read of up to `count` bytes from the process's real stdin
+/// handle (GNU input.c/zread semantics: no BufReader prefetch, so a child
+/// sharing the descriptor continues at the exact kernel offset the shell
+/// consumed). Returns an empty vec at EOF.
+pub fn read_process_stdin_bytes(count: usize) -> std::io::Result<Vec<u8>> {
+    crate::fd::read_some(crate::fd::process_std_handle(0), count)
+}
+
 use command_words::raw_word_has_unquoted_parameter_expansion;
 use compound_exec::*;
 mod declare_local;
@@ -595,6 +603,12 @@ pub struct Executor {
     /// Source line of the command currently executing at reader level —
     /// becomes the abort boundary when `evalerror_pending` is observed.
     reader_command_line: Cell<Option<usize>>,
+    /// GNU `line_number` ambient: at top level it advances to each
+    /// command's parse-end line; inside a pre-parsed body it freezes at
+    /// the enclosing command's established line (execute_cmd.c — only
+    /// simple/for/select/case/arith/cond/subshell commands stamp their
+    /// own `->line`; while/until/if/group inherit the ambient).
+    ambient_line: Cell<Option<usize>>,
     /// True while an if/elif condition list is executing: word-expansion
     /// failures must pierce function frames so the enclosing compound
     /// command can abandon itself entirely (GNU probe f4).
@@ -646,6 +660,24 @@ pub struct Executor {
     /// returns EX_USAGE/EX_UTILERROR/etc., and checks it in
     /// `execute_materialized_command` to exit the noninteractive POSIX shell.
     special_builtin_failed: Cell<bool>,
+    /// Set by `write_ordered_command_output` when a builtin's buffered
+    /// stdout/stderr could not be delivered because the target fd is
+    /// closed — the executor-side analogue of GNU `sh_chkwrite`
+    /// (builtins/common.c:320) turning the builtin's result into
+    /// EXECUTION_FAILURE. Status-returning builtin wrappers read it via
+    /// `take_builtin_write_failed` so the caller's
+    /// `self.exit_code = self.execute_x(cmd)?` does not overwrite the
+    /// write-failure status with the builtin's nominal zero.
+    last_builtin_write_failed: Cell<bool>,
+    /// GNU redir.c:298 redirection_expand expands each redirect word once,
+    /// inside do_redirections' single left-to-right pass. Rubash resolves
+    /// redirect targets in several passes (ambiguity precheck, fd-scope
+    /// binding, post-hoc pipeline routing); this memo lets the passes share
+    /// one expansion per Redirect node so `$((n+=1))`/`$(cmd)` in a target
+    /// runs once per command execution. Cleared at each execute_command
+    /// entry; keyed by node address, valid only within that command's
+    /// execution span.
+    redirect_target_memo: RefCell<HashMap<String, String>>,
     stdout_capture: Option<Vec<u8>>,
     stderr_capture: Option<Vec<u8>>,
     host_external_command_handler: Option<HostExternalCommandHandler>,

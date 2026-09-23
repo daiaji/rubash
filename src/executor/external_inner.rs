@@ -542,25 +542,22 @@ impl Executor {
     }
 
     fn handle_hashed_cat_checkhash(&mut self) -> Result<bool, ExecuteError> {
+        // GNU findcmd.c:367-380 + execute_disk_command: a hashed name execs
+        // the remembered pathname verbatim. With checkhash off a stale entry
+        // fails at execve (diagnostic names the hashed path, status 127);
+        // with checkhash on the entry is stat'ed first and forgotten when
+        // stale, after which the PATH search runs normally.
         let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, "cat")
         else {
             return Ok(false);
         };
-        if self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_SHOPT_CHECKHASH")
-            .map(String::as_str)
-            == Some("1")
-            || std::env::var("__RUBASH_SHOPT_CHECKHASH").ok().as_deref() == Some("1")
-        {
-            crate::builtins::hash::set_hashed_path(
-                &mut self.shell_state.env_vars,
-                "cat",
-                "/usr/bin/cat",
-            );
-            self.exit_code = 0;
-            return Ok(true);
+        let native = shell_path_to_windows(&path, &self.shell_state.env_vars);
+        if native.is_file() {
+            return Ok(false);
+        }
+        if crate::builtins::shopt::checkhash_enabled() {
+            crate::builtins::hash::remove_hashed_path(&mut self.shell_state.env_vars, "cat");
+            return Ok(false);
         }
         eprintln!(
             "{}{}: No such file or directory",

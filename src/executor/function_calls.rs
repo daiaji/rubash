@@ -309,7 +309,17 @@ impl Executor {
                 });
             self.run_debug_trap(&command_text)?;
         }
-        let result = self.execute_ast_inner(body_ast);
+        // GNU execute_function (execute_cmd.c:5269+) applies the call's
+        // redirections to real descriptors for the body's duration
+        // (redir.c do_redirections, undone on return), so `f 3>&1` makes a
+        // body's `1>&3` resolve fd 3 to the call's binding. The body's
+        // ambient line_number is the function DEFINITION line
+        // (execute_cmd.c:5351 line_number = function_line_number = tc->line).
+        let result = self.with_compound_output_redirects(call_cmd, |executor| {
+            executor.with_ambient_line(definition_line, |executor| {
+                executor.execute_ast_inner(body_ast)
+            })
+        });
         // GNU execute_cmd.c uw_maybe_set_debug_trap: at function exit the
         // saved DEBUG action is restored only when the body did not set a
         // new one, so a trap set inside the function persists after return
@@ -425,8 +435,36 @@ impl Executor {
         // `redirect_err_append` alone created the target file but left the
         // ordered fd-state machine unaware of it, so `f 2>err` / `f &>f`
         // leaked the body's stderr to the console.
-        if let Some(redirect) = &call_cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+        // GNU redir.c do_redirections applies the call's redirects to the
+        // descriptors named by each redirection, not to fd 1/2
+        // unconditionally: `f 4>&-' closes fd 4 for the body's duration and
+        // must not be replayed as a stdout append on every inner command
+        // (redir7.sub `stuff 4>&-' re-serialized the injected `>>&-' into a
+        // spawned `-c' child and failed to parse it).
+        let is_stdout_write_redirect = |redirect: &Redirect| {
+            redirect.fd.unwrap_or(1) == 1
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::ClobberOutput
+                        | crate::parser::RedirectKind::CombinedOutput
+                        | crate::parser::RedirectKind::CombinedAppend
+                )
+        };
+        let is_stderr_write_redirect = |redirect: &Redirect| {
+            redirect.fd.unwrap_or(2) == 2
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::ClobberOutput
+                        | crate::parser::RedirectKind::CombinedOutput
+                        | crate::parser::RedirectKind::CombinedAppend
+                )
+        };
+        if let Some(redirect) = call_cmd.redirect_out.as_ref().filter(|r| is_stdout_write_redirect(r)) {
+            let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
@@ -436,14 +474,14 @@ impl Executor {
             append_redirect.clobber = false;
             apply_stdout_append_redirect(body, &append_redirect);
         }
-        if let Some(redirect) = &call_cmd.append {
+        if let Some(redirect) = call_cmd.append.as_ref().filter(|r| is_stdout_write_redirect(r)) {
             let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_word(&redirect.target);
+            append_redirect.target = self.expand_redirect_target(redirect);
             apply_stdout_append_redirect(body, &append_redirect);
         }
 
-        if let Some(redirect) = &call_cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+        if let Some(redirect) = call_cmd.redirect_err.as_ref().filter(|r| is_stderr_write_redirect(r)) {
+            let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
@@ -453,9 +491,9 @@ impl Executor {
             append_redirect.clobber = false;
             apply_stderr_append_redirect(body, &append_redirect);
         }
-        if let Some(redirect) = &call_cmd.redirect_err_append {
+        if let Some(redirect) = call_cmd.redirect_err_append.as_ref().filter(|r| is_stderr_write_redirect(r)) {
             let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_word(&redirect.target);
+            append_redirect.target = self.expand_redirect_target(redirect);
             // `&>`/`&>>` store their fd-2 leg as a Combined* kind. A body
             // command's own `>other` redirect must still win fd 1, so the
             // propagated leg claims fd 2 only (redir.c:899-900 splits
@@ -516,7 +554,7 @@ impl Executor {
         if redirect.fd.unwrap_or(0) != 0 {
             return Ok((None, false));
         }
-        let target = self.expand_word(&redirect.target);
+        let target = self.expand_redirect_target(redirect);
         if is_closed_redirect_target(&target) {
             return Ok((None, false));
         }
@@ -535,4 +573,5 @@ fn function_redirects_affect_body(command: &CommandNode) -> bool {
         || command.append.is_some()
         || command.redirect_err.is_some()
         || command.redirect_err_append.is_some()
+        || !command.redirects.is_empty()
 }

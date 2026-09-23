@@ -424,7 +424,7 @@ fn c_command_echo_reports_persistent_closed_stdout() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "rubash: echo: write error: Bad file descriptor\n"
+        "bash: line 1: echo: write error: Bad file descriptor\n"
     );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
@@ -2226,7 +2226,7 @@ fn c_command_echo_reports_write_error_for_closed_stdout() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "status:1\n");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "rubash: echo: write error: Bad file descriptor\n"
+        "bash: line 1: echo: write error: Bad file descriptor\n"
     );
 }
 

@@ -38,6 +38,7 @@ pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && cmd.append.is_none()
         && cmd.redirect_err.is_none()
         && cmd.redirect_err_append.is_none()
+        && cmd.redirects.is_empty()
         && cmd.heredoc.is_none()
         && cmd.heredoc_delimiter.is_none()
         && cmd.here_string.is_none()
@@ -91,6 +92,7 @@ pub(in crate::executor) fn command_has_redirect(cmd: &CommandNode) -> bool {
         || cmd.append.is_some()
         || cmd.redirect_err.is_some()
         || cmd.redirect_err_append.is_some()
+        || !cmd.redirects.is_empty()
 }
 
 pub(in crate::executor) fn function_definition_command_uses_source_text(
@@ -177,12 +179,14 @@ pub(in crate::executor) fn command_has_output_redirects(cmd: &CommandNode) -> bo
         || cmd.append.is_some()
         || cmd.redirect_err.is_some()
         || cmd.redirect_err_append.is_some()
+        || cmd.redirects.iter().any(|redirect| redirect.is_output_side())
 }
 
 pub(in crate::executor) fn command_has_input_or_output_redirects(cmd: &CommandNode) -> bool {
     cmd.redirect_in.is_some()
         || cmd.heredoc.is_some()
         || cmd.here_string.is_some()
+        || cmd.redirects.iter().any(|redirect| redirect.is_input_side())
         || command_has_output_redirects(cmd)
 }
 
@@ -208,6 +212,28 @@ pub(in crate::executor) fn command_references_bash_command(cmd: &CommandNode) ->
             .here_string
             .as_ref()
             .is_some_and(|value| value.contains("BASH_COMMAND"))
+}
+
+/// GNU `line_number` ownership (execute_cmd.c): these command kinds stamp
+/// `line_number` from their own `->line` field while they execute —
+/// cm_simple (:936), cm_subshell (:696), cm_for (:3001), cm_select
+/// (:3513), cm_case (:3653), cm_arith (:3904), cm_cond (:4138),
+/// cm_arith_for (:3236). Everything else — while/until, if, `{ }`,
+/// coproc, function definitions, and the pipeline/&&/||/&/!/time wrapper
+/// nodes — runs under the ambient `line_number` left by the reader or
+/// the enclosing command.
+pub(in crate::executor) fn command_sets_own_line(cmd: &CommandNode) -> bool {
+    cmd.loop_command.is_none()
+        && cmd.if_command.is_none()
+        && cmd.brace_group.is_none()
+        && cmd.coproc_command.is_none()
+        && cmd.function_command.is_none()
+        && cmd.pipeline_command.is_none()
+        && cmd.and_or_list.is_none()
+        && cmd.background_command.is_none()
+        && cmd.inverted_command.is_none()
+        && cmd.time_command.is_none()
+        && !command_is_time_prefixed_compound(cmd)
 }
 
 pub(in crate::executor) fn command_needs_process_line_env(cmd: &CommandNode) -> bool {
@@ -268,13 +294,33 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
         parts.push(format_redirect("2>", redirect));
     }
     if let Some(redirect) = &cmd.redirect_err_append {
-        parts.push(format_redirect("2>>", redirect));
+        parts.push(err_append_source_text(cmd, redirect));
     }
     if let Some(here_string) = &cmd.here_string {
         parts.push(format!("<<< {here_string}"));
     }
 
     parts.join(" ")
+}
+
+/// `2>&1` after `>file` is mirrored into `redirect_err_append` as a
+/// synthesized `2>>file` (parser/redirect_assign.rs assign_redirect_err_target)
+/// so legacy consumers can route fd 2 to the resolved file — but the ordered
+/// `redirects` list keeps the real `2>&1` dup. Reprints must use the real
+/// entry (GNU print_cmd.c prints `r_instruction` literally): a serialized
+/// `2>>file` re-opened by a `-c` child loses the shared open file
+/// description (redir7.sub's `eval \`...\`` spawned `( sleep > /dev/null
+/// 2>> /dev/null & )` instead of `2>&1`).
+fn err_append_source_text(cmd: &CommandNode, redirect: &Redirect) -> String {
+    if !cmd.redirects.contains(redirect) {
+        if let Some(dup) = cmd.redirects.iter().find(|entry| {
+            matches!(entry.kind, crate::parser::RedirectKind::DuplicateOutput)
+                && entry.fd.unwrap_or(1) == 2
+        }) {
+            return format_redirect(&dup.operator, dup);
+        }
+    }
+    format_redirect("2>>", redirect)
 }
 
 fn command_words_source_text_for_command(cmd: &CommandNode) -> String {
@@ -660,7 +706,20 @@ pub(in crate::executor) fn append_source_redirects(text: &mut String, cmd: &Comm
         );
         append_function_redirect(text, cmd.append.as_ref(), ">>");
         append_function_redirect(text, cmd.redirect_err.as_ref(), "2>");
-        append_function_redirect(text, cmd.redirect_err_append.as_ref(), "2>>");
+        if let Some(redirect) = &cmd.redirect_err_append {
+            text.push(' ');
+            text.push_str(&err_append_source_text(cmd, redirect));
+        }
+    }
+    // Numbered redirects (fd>=3) and `{var}` dynamic fds live only in the
+    // ordered `redirects` list — the mirror fields above cannot represent
+    // them. GNU print_cmd prints every redirection, so reprint them too or
+    // a `-c` child loses `3>f` entirely.
+    for redirect in &cmd.redirects {
+        if redirect.is_list_only_redirect() {
+            text.push(' ');
+            text.push_str(&format_redirect(&redirect.operator, redirect));
+        }
     }
     if let Some(here_string) = &cmd.here_string {
         text.push_str(" <<< ");

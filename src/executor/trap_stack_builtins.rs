@@ -37,7 +37,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
             } else if self.write_output_fd_redirect(&target, &stdout)? {
             } else if redirect_target_fd(&target) == Some(2) {
@@ -49,26 +49,33 @@ impl Executor {
                 file.write_all(&stdout)?;
             }
         } else if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
-            if is_closed_redirect_target(&target) {
-            } else if self.write_output_fd_redirect(&target, &stdout)? {
-            } else if redirect_target_fd(&target) == Some(2) {
-                super::write_stderr_bytes(&stdout)?;
-            } else if redirect_target_fd(&target) == Some(1) {
-                super::write_stdout_bytes(&stdout)?;
+            // Injected group redirect already bound on fd 1: write through
+            // the shared open file description (see
+            // injected_redirect_fd_is_bound).
+            if self.injected_redirect_fd_is_bound(redirect, 1) {
+                self.write_default_stdout(&stdout)?;
             } else {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-                file.write_all(&stdout)?;
+                let target = self.expand_redirect_target(redirect);
+                if is_closed_redirect_target(&target) {
+                } else if self.write_output_fd_redirect(&target, &stdout)? {
+                } else if redirect_target_fd(&target) == Some(2) {
+                    super::write_stderr_bytes(&stdout)?;
+                } else if redirect_target_fd(&target) == Some(1) {
+                    super::write_stdout_bytes(&stdout)?;
+                } else {
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+                    file.write_all(&stdout)?;
+                }
             }
         } else {
             self.write_default_stdout(&stdout)?;
         }
 
         if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
             } else if self.write_output_fd_redirect(&target, &stderr)? {
             } else if redirect_target_fd(&target) == Some(1) {
@@ -82,21 +89,27 @@ impl Executor {
                 file.write_all(&stderr)?;
             }
         } else if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
-            if is_closed_redirect_target(&target) {
-            } else if self.write_output_fd_redirect(&target, &stderr)? {
-            } else if redirect_target_fd(&target) == Some(1) {
-                if let Some(capture) = &mut self.stdout_capture {
-                    capture.write_all(&stderr)?;
-                } else {
-                    super::write_stdout_bytes(&stderr)?;
-                }
+            // Injected group redirect already bound on fd 2: write through
+            // the shared open file description.
+            if self.injected_redirect_fd_is_bound(redirect, 2) {
+                self.write_default_stderr(&stderr)?;
             } else {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-                file.write_all(&stderr)?;
+                let target = self.expand_redirect_target(redirect);
+                if is_closed_redirect_target(&target) {
+                } else if self.write_output_fd_redirect(&target, &stderr)? {
+                } else if redirect_target_fd(&target) == Some(1) {
+                    if let Some(capture) = &mut self.stdout_capture {
+                        capture.write_all(&stderr)?;
+                    } else {
+                        super::write_stdout_bytes(&stderr)?;
+                    }
+                } else {
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+                    file.write_all(&stderr)?;
+                }
             }
         } else {
             self.write_default_stderr(&stderr)?;

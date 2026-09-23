@@ -10,6 +10,15 @@ impl Executor {
         if super::exec_profile::P_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
             P_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        // GNU redir.c do_redirections expands each redirect word once per
+        // command execution; drop the previous command's target memo so a
+        // re-executed node (loop body, function body) expands fresh.
+        self.redirect_target_memo.borrow_mut().clear();
+        // Commit any deferred arithmetic writes queued by `&self` redirect
+        // target expansion during the previous command (GNU redirection_expand
+        // evaluates in the live environment; the queue exists only because
+        // `&self` expansions cannot write env_vars directly).
+        self.apply_pending_subscript_writes();
         // Set the source line for every command, including commands inside a
         // DEBUG trap function. The trap action expands its call-site `$LINENO`
         // before entering that function, while the function body must see its
@@ -28,6 +37,16 @@ impl Executor {
                 self.set_current_line(cmd);
             }
             self.set_current_command(cmd);
+        }
+        // GNU execute_cmd.c:826-828 (execute_command_internal): a shell
+        // control structure carrying redirections records in the global
+        // stdin_redir whether fd 0 is among them; the flag is sticky for the
+        // structure's whole dynamic extent and eval.c:181 resets it per
+        // reader command. Async `cmd &` consults it (execute_cmd.c:2837).
+        if command_is_shell_control_structure(cmd) && !cmd.redirects.is_empty() {
+            self.shell_state.stdin_redir.set(
+                cmd.redirects.iter().any(redirect_updates_stdin_redir),
+            );
         }
         let _t_heredoc = PhaseTimer::new(&super::exec_profile::P_HEREDOC);
         self.report_command_heredoc_errors(cmd)?;

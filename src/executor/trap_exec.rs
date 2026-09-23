@@ -102,6 +102,32 @@ impl Executor {
         Ok(())
     }
 
+    /// GNU `r_err_and_out`/`r_append_err_and_out` (redir.c:832-838,
+    /// do_redirection_internal): `>&word`/`&>word` open the file once and
+    /// dup2 it onto fd 2 — both descriptors refer to the same open file
+    /// description and share one file offset. Opening the path twice
+    /// gives two offsets, so the second write overwrites the first at
+    /// offset 0 (redir4.sub: `exec >&file; echo to stdout; echo to
+    /// stderr >&2` must produce both lines, not just stderr's).
+    pub(in crate::executor) fn share_fd_output_file(
+        &mut self,
+        source_fd: u32,
+        fd: u32,
+        target: &str,
+        dynamic: bool,
+    ) {
+        if let Some(endpoint) = self.fd_table.write_endpoint(source_fd) {
+            self.fd_table.open_output(fd, endpoint, dynamic);
+        }
+        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+        self.shell_state
+            .env_vars
+            .remove(&fd_output_process_substitution_key(fd));
+        self.shell_state
+            .env_vars
+            .insert(fd_output_key(fd), target.to_string());
+    }
+
     pub(in crate::executor) fn execute_eval(
         &mut self,
         cmd: &CommandNode,
@@ -250,7 +276,13 @@ impl Executor {
         // already ran on `source` above via comsub_body_alias_splice,
         // so executor-level expansion must not fire a second time.
         let saved_alias_streamed = self.mark_alias_streamed();
-        let result = self.execute_ast(&ast);
+        // GNU eval_builtin runs the reparsed body with eval's own
+        // redirections still bound (redir.c do_redirection_internal for the
+        // builtin's duration), so a body's `1>&3` resolves fd 3 to eval's
+        // `3>&1`, not the leaf's own fd 1.
+        let result = self.with_compound_output_redirects(cmd, |executor| {
+            executor.execute_ast(&ast)
+        });
         self.resume_alias_streamed(saved_alias_streamed);
         match saved_eval_context {
             Some(previous) => {
@@ -320,6 +352,14 @@ impl Executor {
                 .cloned();
         }
         let saved_alias_streamed = self.mark_alias_streamed();
+        // GNU trap.c run_exit_trap runs the action while the subshell's
+        // redirections are still in force — execute_in_subshell never undoes
+        // the child's do_redirections before run_exit_trap
+        // (execute_cmd.c:1576-1763). The caller runs this inside the scoped
+        // fd-table binding (with_command_input_redirects), so the action's
+        // output rides the same open file description as the body — no
+        // re-binding here, which would re-open `>file` and truncate what
+        // the body already wrote.
         let result = self.execute_ast(&ast);
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
@@ -831,14 +871,29 @@ impl Executor {
         ast: &mut Ast,
         prepare_targets: bool,
     ) -> Result<(), ExecuteError> {
-        if let Some(redirect) = &cmd.redirect_out {
-            let target = self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
+        // The stdio mirror fields are fd-blind parser conveniences:
+        // `3>&1`/`2>&1` also land in `redirect_out`. Only an fd-1 (or
+        // default) entry is a stdout redirect; numbered entries propagate
+        // through splice_numbered_output_redirects_in_order below instead.
+        if let Some(redirect) = cmd
+            .redirect_out
+            .as_ref()
+            .filter(|r| r.fd.unwrap_or(1) == 1)
+        {
+            // GNU do_redirections opens the expanded word once, relative to
+            // the cwd in force when the compound command starts; the
+            // diagnostic reports that word (redir.c report_error on
+            // redirectee.filename->word). The anchored spelling is only for
+            // the propagated per-leaf redirect, which opens later and must
+            // survive a `cd` inside the body (niubash#118).
+            let expanded = self.expand_redirect_target(redirect);
             if prepare_targets
-                && !is_closed_redirect_target(&target)
-                && redirect_target_fd(&target).is_none()
+                && !is_closed_redirect_target(&expanded)
+                && redirect_target_fd(&expanded).is_none()
             {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output(&expanded, redirect.clobber)?;
             }
+            let target = self.anchor_compound_redirect_target(&expanded);
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
@@ -859,8 +914,12 @@ impl Executor {
                 clobber: false,
             };
             apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
-        } else if let Some(redirect) = &cmd.append {
-            let target = self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
+        } else if let Some(redirect) = cmd
+            .append
+            .as_ref()
+            .filter(|r| r.fd.unwrap_or(1) == 1)
+        {
+            let target = self.anchor_compound_redirect_target(&self.expand_redirect_target(redirect));
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
@@ -879,15 +938,20 @@ impl Executor {
             apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
         }
 
-        if let Some(redirect) = &cmd.redirect_err {
-            let target = self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
+        if let Some(redirect) = cmd
+            .redirect_err
+            .as_ref()
+            .filter(|r| r.fd.unwrap_or(2) == 2)
+        {
+            let expanded = self.expand_redirect_target(redirect);
             if prepare_targets
-                && !is_closed_redirect_target(&target)
-                && redirect_target_fd(&target).is_none()
-                && !is_null_device(&target)
+                && !is_closed_redirect_target(&expanded)
+                && redirect_target_fd(&expanded).is_none()
+                && !is_null_device(&expanded)
             {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output(&expanded, redirect.clobber)?;
             }
+            let target = self.anchor_compound_redirect_target(&expanded);
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
@@ -908,8 +972,12 @@ impl Executor {
                 clobber: false,
             };
             apply_stderr_append_redirect(&mut ast.commands, &append_redirect);
-        } else if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.anchor_compound_redirect_target(&self.expand_word(&redirect.target));
+        } else if let Some(redirect) = cmd
+            .redirect_err_append
+            .as_ref()
+            .filter(|r| r.fd.unwrap_or(2) == 2)
+        {
+            let target = self.anchor_compound_redirect_target(&self.expand_redirect_target(redirect));
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
@@ -927,6 +995,15 @@ impl Executor {
             };
             apply_stderr_append_redirect(&mut ast.commands, &append_redirect);
         }
+
+        // Numbered (fd-prefixed) output redirects — `3>&1`, `10>f` — bind
+        // real fd-table entries for the body's duration through
+        // open_compound_output_redirects (with_command_input_redirects /
+        // with_compound_output_redirects), matching GNU
+        // do_redirection_internal which dups/opens the group's descriptors
+        // before the body runs (redir.c:767-955). Leaves then resolve
+        // `1>&3` against the group's binding rather than a spliced-in
+        // re-dup of their own fd 1 (which mis-binds inside pipelines).
 
         Ok(())
     }
@@ -978,12 +1055,15 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             // GNU redir.c:832-838: `exec cmd >&WORD` with a non-numeric
             // WORD translates to r_err_and_out - the child's stdout AND
             // stderr go to WORD. The raw target keeps the `&` dup marker,
             // so strip it before opening (redir4.sub: exec >&$fd).
-            if redirect.fd.is_none() && target.starts_with('&') {
+            if redirect.fd.unwrap_or(1) == 1
+                && redirect.fd_var.is_none()
+                && target.starts_with('&')
+            {
                 let path = target.strip_prefix('&').unwrap_or(&target).to_string();
                 let mut file = self.create_redirect_output(&path, redirect.clobber)?;
                 // r_err_and_out: the child's stdout and stderr both go to
@@ -1013,7 +1093,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -1030,7 +1110,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             let child_stderr = Stdio::from(file.try_clone()?);
             return Ok(crate::builtins::exec::execute_with_child_stdio(
@@ -1044,7 +1124,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -1092,7 +1172,7 @@ impl Executor {
         let mut ambient: std::collections::BTreeMap<u32, String> =
             std::collections::BTreeMap::new();
         for redirect in &cmd.redirects {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if crate::executor::support_names::is_injected_group_redirect(redirect) {
                 let fd = redirect.fd.unwrap_or_else(|| match redirect.kind {
                     crate::parser::RedirectKind::Input
@@ -1153,7 +1233,7 @@ impl Executor {
                             self.create_redirect_output(&path, redirect.clobber)?;
                         }
                         self.set_fd_output_file(1, path.clone(), false, false)?;
-                        self.set_fd_output_file(2, path, false, false)?;
+                        self.share_fd_output_file(1, 2, &path, false);
                         continue;
                     }
                     if self.open_persistent_output_process_substitution(fd, &target)? {
@@ -1175,9 +1255,10 @@ impl Executor {
                         crate::parser::RedirectKind::CombinedOutput
                             | crate::parser::RedirectKind::CombinedAppend
                     ) {
-                        // &>file / &>>file: stderr follows stdout
-                        // (redir.c r_err_and_out / r_append_err_and_out).
-                        self.set_fd_output_file(2, target, fd >= 10, append)?;
+                        // &>file / &>>file: stderr follows stdout through
+                        // the same open file description (redir.c
+                        // r_err_and_out / r_append_err_and_out).
+                        self.share_fd_output_file(fd, 2, &target, fd >= 10);
                     }
                 }
                 crate::parser::RedirectKind::DuplicateOutput => {
@@ -1207,7 +1288,7 @@ impl Executor {
                             self.create_redirect_output(&path, redirect.clobber)?;
                         }
                         self.set_fd_output_file(1, path.clone(), false, false)?;
-                        self.set_fd_output_file(2, path, false, false)?;
+                        self.share_fd_output_file(1, 2, &path, false);
                         continue;
                     }
                     // Other non-numeric dup targets stay AMBIGUOUS_REDIRECT
@@ -1307,12 +1388,15 @@ impl Executor {
                             self.shell_state
                                 .env_vars
                                 .insert(fd_closed_key(fd), "1".to_string());
+                            // GNU redirection_error (redir.c:149-161): an
+                            // EBADF from a dup/move redirection names the
+                            // *source* fd (redirectee.dest), not the target.
                             let _ = self.write_default_stderr(
                                 format!(
                                     "{}{}: Bad file descriptor
 ",
                                     self.diagnostic_prefix(),
-                                    fd
+                                    source_fd
                                 )
                                 .as_bytes(),
                             );
@@ -1428,7 +1512,7 @@ impl Executor {
 
     /// Writes the `__RUBASH_FD_*` write-side ledger for `fd` from whatever
     /// write endpoint is installed (or clears it). Used after dup/open.
-    fn record_output_fd_ledger(&mut self, target_fd: u32) {
+    pub(in crate::executor) fn record_output_fd_ledger(&mut self, target_fd: u32) {
         match self.fd_table.output_endpoint(target_fd) {
             Some(FdWriteEndpoint::Stdout) => {
                 self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
@@ -1763,7 +1847,7 @@ impl Executor {
             .as_ref()
             .or(cmd.redirect_out.as_ref())
             .or(cmd.append.as_ref())
-            .is_some_and(|redirect| is_closed_redirect_target(&self.expand_word(&redirect.target)));
+            .is_some_and(|redirect| is_closed_redirect_target(&self.expand_redirect_target(redirect)));
         // GNU sets up the redirection itself (creating output targets, opening
         // input files) before failing the fd assignment to a readonly variable.
         let readonly_blocked = !closes_existing_fd && self.dynamic_fd_assignment_readonly(name);
@@ -1781,6 +1865,7 @@ impl Executor {
                 return Ok(Some(1));
             };
             if !self.set_dynamic_fd_variable(name, fd) {
+                self.close_persistent_fd(fd)?;
                 self.report_fd_assignment_failure(name);
                 return Ok(Some(1));
             }
@@ -1789,7 +1874,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_in {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
                 self.close_dynamic_fd(name)?;
                 return Ok(Some(0));
@@ -1801,11 +1886,16 @@ impl Executor {
                     return Ok(Some(1));
                 };
                 self.copy_persistent_input_fd(fd, source_fd);
+                // GNU redir.c:1161-1166: redir_varassign failure closes the
+                // freshly duplicated descriptor — the slot must not leak
+                // into later {var} allocations.
                 if readonly_blocked {
+                    self.close_persistent_fd(fd)?;
                     self.report_readonly_fd_assignment(name);
                     return Ok(Some(1));
                 }
                 if !self.set_dynamic_fd_variable(name, fd) {
+                    self.close_persistent_fd(fd)?;
                     self.report_fd_assignment_failure(name);
                     return Ok(Some(1));
                 }
@@ -1831,10 +1921,12 @@ impl Executor {
                     );
                     self.set_fd_input_text(fd, input, true);
                     if readonly_blocked {
+                        self.close_persistent_fd(fd)?;
                         self.report_readonly_fd_assignment(name);
                         return Ok(Some(1));
                     }
                     if !self.set_dynamic_fd_variable(name, fd) {
+                        self.close_persistent_fd(fd)?;
                         self.report_fd_assignment_failure(name);
                         return Ok(Some(1));
                     }
@@ -1853,10 +1945,12 @@ impl Executor {
                 self.fd_table
                     .open_input(fd, FdReadEndpoint::InheritedProcessStdin, true);
                 if readonly_blocked {
+                    self.close_persistent_fd(fd)?;
                     self.report_readonly_fd_assignment(name);
                     return Ok(Some(1));
                 }
                 if !self.set_dynamic_fd_variable(name, fd) {
+                    self.close_persistent_fd(fd)?;
                     self.report_fd_assignment_failure(name);
                     return Ok(Some(1));
                 }
@@ -1875,10 +1969,12 @@ impl Executor {
                 return Ok(Some(1));
             };
             if readonly_blocked {
+                self.close_persistent_fd(fd)?;
                 self.report_readonly_fd_assignment(name);
                 return Ok(Some(1));
             }
             if !self.set_dynamic_fd_variable(name, fd) {
+                self.close_persistent_fd(fd)?;
                 self.report_fd_assignment_failure(name);
                 return Ok(Some(1));
             }
@@ -1897,7 +1993,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
                 if self.dynamic_fd_variable_value(name).is_none()
                     && crate::builtins::set::shell_option_enabled(
@@ -1919,10 +2015,12 @@ impl Executor {
             if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                 self.copy_persistent_output_fd(fd, source_fd);
                 if readonly_blocked {
+                    self.close_persistent_fd(fd)?;
                     self.report_readonly_fd_assignment(name);
                     return Ok(Some(1));
                 }
                 if !self.set_dynamic_fd_variable(name, fd) {
+                    self.close_persistent_fd(fd)?;
                     self.report_fd_assignment_failure(name);
                     return Ok(Some(1));
                 }
@@ -1933,10 +2031,12 @@ impl Executor {
             }
             if self.open_persistent_output_process_substitution(fd, &target)? {
                 if readonly_blocked {
+                    self.close_persistent_fd(fd)?;
                     self.report_readonly_fd_assignment(name);
                     return Ok(Some(1));
                 }
                 if !self.set_dynamic_fd_variable(name, fd) {
+                    self.close_persistent_fd(fd)?;
                     self.report_fd_assignment_failure(name);
                     return Ok(Some(1));
                 }
@@ -1944,10 +2044,12 @@ impl Executor {
             }
             self.create_redirect_output(&target, redirect.clobber)?;
             if readonly_blocked {
+                self.close_persistent_fd(fd)?;
                 self.report_readonly_fd_assignment(name);
                 return Ok(Some(1));
             }
             if !self.set_dynamic_fd_variable(name, fd) {
+                self.close_persistent_fd(fd)?;
                 self.report_fd_assignment_failure(name);
                 return Ok(Some(1));
             }
@@ -1956,7 +2058,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
                 self.close_dynamic_output_fd(name)?;
                 return Ok(Some(0));
@@ -1967,20 +2069,24 @@ impl Executor {
             };
             if self.open_persistent_output_process_substitution(fd, &target)? {
                 if readonly_blocked {
+                    self.close_persistent_fd(fd)?;
                     self.report_readonly_fd_assignment(name);
                     return Ok(Some(1));
                 }
                 if !self.set_dynamic_fd_variable(name, fd) {
+                    self.close_persistent_fd(fd)?;
                     self.report_fd_assignment_failure(name);
                     return Ok(Some(1));
                 }
                 return Ok(Some(0));
             }
             if readonly_blocked {
+                self.close_persistent_fd(fd)?;
                 self.report_readonly_fd_assignment(name);
                 return Ok(Some(1));
             }
             if !self.set_dynamic_fd_variable(name, fd) {
+                self.close_persistent_fd(fd)?;
                 self.report_fd_assignment_failure(name);
                 return Ok(Some(1));
             }
@@ -1999,7 +2105,7 @@ impl Executor {
         let Some(name) = redirect.fd_var.as_deref() else {
             return Ok(false);
         };
-        let target = self.expand_word(&redirect.target);
+        let target = self.expand_redirect_target(redirect);
         let is_close = matches!(
             redirect.kind,
             crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput
@@ -2073,6 +2179,9 @@ impl Executor {
                     };
                     self.copy_persistent_input_fd(fd, source_fd);
                     if !self.set_dynamic_fd_variable(name, fd) {
+                        // GNU redir.c:1161-1166: redir_varassign failure
+                        // closes the just-duplicated fd — no slot leak.
+                        self.close_persistent_fd(fd)?;
                         return Err(ExecuteError::IoError(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             format!("{name}: cannot assign fd to variable"),
@@ -2098,6 +2207,7 @@ impl Executor {
                     };
                     self.copy_persistent_output_fd(fd, source_fd);
                     if !self.set_dynamic_fd_variable(name, fd) {
+                        self.close_persistent_fd(fd)?;
                         return Err(ExecuteError::IoError(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             format!("{name}: cannot assign fd to variable"),
@@ -2134,6 +2244,7 @@ impl Executor {
                             let _ = self.set_fd_output_file(fd, target.clone(), true, true);
                         }
                         if !self.set_dynamic_fd_variable(name, fd) {
+                            self.close_persistent_fd(fd)?;
                             return Err(ExecuteError::IoError(std::io::Error::new(
                                 std::io::ErrorKind::Other,
                                 format!("{name}: cannot assign fd to variable"),
@@ -2167,6 +2278,7 @@ impl Executor {
                         .insert(fd_output_key(fd), target.clone());
                 }
                 if !self.set_dynamic_fd_variable(name, fd) {
+                    self.close_persistent_fd(fd)?;
                     return Err(ExecuteError::IoError(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("{name}: cannot assign fd to variable"),
@@ -2190,6 +2302,7 @@ impl Executor {
                 {
                     if self.open_persistent_output_process_substitution(fd, &target)? {
                         if !self.set_dynamic_fd_variable(name, fd) {
+                            self.close_persistent_fd(fd)?;
                             return Err(ExecuteError::IoError(std::io::Error::new(
                                 std::io::ErrorKind::Other,
                                 format!("{name}: cannot assign fd to variable"),
@@ -2210,6 +2323,7 @@ impl Executor {
                     redirect.kind == crate::parser::RedirectKind::Append,
                 )?;
                 if !self.set_dynamic_fd_variable(name, fd) {
+                    self.close_persistent_fd(fd)?;
                     return Err(ExecuteError::IoError(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("{name}: cannot assign fd to variable"),
@@ -2298,6 +2412,26 @@ impl Executor {
         // descriptor — the `<`/`>` letter only picks the default fd number.
         // A write-only source (e.g. `exec 8<&1`) still installs fd 8's write
         // side, which is what makes `echo >&8` work.
+        //
+        // fd 0's input may live on the FUNCTION_STDIN text channel (an
+        // in-process THIS_SH child's `< file` installs it there while
+        // fd_table[0] stays InheritedProcessStdin). GNU dup2 of fd 0 copies
+        // the redirected open file description, so materialize the channel
+        // into a shared Text endpoint first — the Rc<RefCell<TextInput>>
+        // then gives both slots one cursor (redir4.sub `exec 3<&0`).
+        if source_fd == 0
+            && matches!(
+                self.fd_table.read_endpoint(0),
+                Some(FdReadEndpoint::InheritedProcessStdin)
+            )
+        {
+            // FUNCTION_STDIN keeps the full buffer and its offset cursor for
+            // consumers that read it directly; the fd-table endpoint gets the
+            // unread tail so both channels agree on what fd 0 serves next.
+            if let Some(remaining) = self.function_stdin_remaining() {
+                self.set_fd_input_bytes(0, remaining.into_bytes(), false);
+            }
+        }
         if self.fd_table.is_open(source_fd) {
             if self.fd_table.dup_input(target_fd, source_fd).is_ok() {
                 self.record_input_fd_ledger(target_fd);
@@ -2477,7 +2611,8 @@ impl Executor {
                 || cmd.append.is_some()
                 || cmd.redirect_err.is_some()
                 || cmd.redirect_err_append.is_some()
-                || cmd.redirect_in.is_some())
+                || cmd.redirect_in.is_some()
+                || !cmd.redirects.is_empty())
     }
 }
 
@@ -2499,7 +2634,8 @@ fn is_dynamic_fd_exec_redirect(cmd: &CommandNode) -> bool {
             || cmd.redirect_out.is_some()
             || cmd.append.is_some()
             || cmd.here_string.is_some()
-            || cmd.heredoc.is_some())
+            || cmd.heredoc.is_some()
+            || !cmd.redirects.is_empty())
 }
 
 fn exec_has_only_redirects(cmd: &CommandNode) -> bool {

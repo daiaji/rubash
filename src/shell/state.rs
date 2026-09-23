@@ -79,6 +79,14 @@ pub struct ShellState {
     /// `$( )`/backtick body runs (shared-executor and cloned-executor
     /// paths). jobs.c:3837-3843 start_job refuses fg/bg inside it.
     pub(crate) in_command_substitution: Cell<bool>,
+    /// execute_cmd.c:199 stdin_redir — the global recording whether the
+    /// currently executing control structure redirected fd 0
+    /// (execute_cmd.c:828 sets it from stdin_redirects, redir.c:1435).
+    /// eval.c:181 clears it before each top-level reader command. An
+    /// async `cmd &` consults it (execute_cmd.c:2837): with job control
+    /// off or inside a subshell, a cleared flag sends the child's stdin to
+    /// /dev/null; a set flag inherits the redirected stream instead.
+    pub(crate) stdin_redir: Cell<bool>,
     /// jobs.c bookkeeping — the job registry (jobs.c `jobs` array /
     /// `job_table`): bash-observable job identity, pipeline pids, states,
     /// and notification bits. Process handles are Executor resources and
@@ -130,6 +138,7 @@ pub struct ShellState {
 pub(crate) struct InteriorSnapshot {
     subshell_depth: usize,
     in_command_substitution: bool,
+    stdin_redir: bool,
     arithmetic_expansion_error: bool,
     arithmetic_nonfatal_error: bool,
     arithmetic_fatal_error: bool,
@@ -156,6 +165,7 @@ impl ShellState {
         InteriorSnapshot {
             subshell_depth: self.subshell_depth.get(),
             in_command_substitution: self.in_command_substitution.get(),
+            stdin_redir: self.stdin_redir.get(),
             arithmetic_expansion_error: self.arithmetic_expansion_error.get(),
             arithmetic_nonfatal_error: self.arithmetic_nonfatal_error.get(),
             arithmetic_fatal_error: self.arithmetic_fatal_error.get(),
@@ -171,6 +181,7 @@ impl ShellState {
         self.subshell_depth.set(snapshot.subshell_depth);
         self.in_command_substitution
             .set(snapshot.in_command_substitution);
+        self.stdin_redir.set(snapshot.stdin_redir);
         self.arithmetic_expansion_error
             .set(snapshot.arithmetic_expansion_error);
         self.arithmetic_nonfatal_error
@@ -213,6 +224,7 @@ impl Clone for ShellState {
             random_state: self.random_state.clone_state(),
             subshell_depth: Cell::new(self.subshell_depth.get()),
             in_command_substitution: Cell::new(self.in_command_substitution.get()),
+            stdin_redir: Cell::new(self.stdin_redir.get()),
             job_table: self.job_table.clone(),
             last_background_pid: self.last_background_pid,
             coproc_names: self.coproc_names.clone(),

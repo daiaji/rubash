@@ -28,7 +28,7 @@ impl Executor {
             .collect();
 
         if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_null_device(&target) {
                 return self.execute_unset_with_stderr(
                     &cmd.words[1..],
@@ -41,7 +41,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)

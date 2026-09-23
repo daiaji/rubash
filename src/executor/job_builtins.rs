@@ -1686,7 +1686,9 @@ impl Executor {
                     },
                 );
                 self.apply_command_output_redirects(cmd, &mut ast)?;
-                self.execute_ast(&ast)?;
+                self.with_compound_output_redirects(cmd, |executor| {
+                    executor.execute_ast(&ast)
+                })?;
                 Ok(self.exit_code)
             }
             crate::builtins::fc::FcResult::Status(status) => Ok(status),
@@ -1720,7 +1722,9 @@ impl Executor {
                     },
                 );
                 self.apply_command_output_redirects(cmd, &mut ast)?;
-                self.execute_ast(&ast)?;
+                self.with_compound_output_redirects(cmd, |executor| {
+                    executor.execute_ast(&ast)
+                })?;
                 Ok(self.exit_code)
             }
         }

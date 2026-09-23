@@ -907,7 +907,7 @@ impl Executor {
             if redirect.fd.unwrap_or(0) != 0 {
                 return None;
             }
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
                 return None;
             }

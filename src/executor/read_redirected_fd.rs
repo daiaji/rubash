@@ -29,7 +29,7 @@ impl Executor {
             ));
         }
 
-        let target = self.expand_word(&redirect.target);
+        let target = self.expand_redirect_target(redirect);
         if is_closed_redirect_target(&target) {
             return None;
         }

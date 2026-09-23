@@ -330,11 +330,14 @@ pub(in crate::executor) fn read_stdin_until(
         return Ok((0, String::new()));
     }
 
-    // TODO(builtins/read.def/input.c): Avoid buffered prefetching so callers
-    // that read commands from stdin can let child scripts consume the next
-    // physical line, as Bash does for tests/input-line.sh.
-    let mut stdin = std::io::stdin().lock();
-    let mut bytes = [0_u8; 1];
+    // GNU builtins/read.def reads fd 0 through zread (lib/sh/zread.c) — one
+    // raw read syscall per byte, no userspace buffer. std::io::stdin()
+    // instead owns a process-wide BufReader whose fill_buf prefetches the
+    // whole pipe/file: a child sharing the parent's stdin offset (async
+    // `{ read; } &` inside a `done <file` loop — redir.tests) would find the
+    // descriptor already at EOF. Read the raw OS handle directly so the
+    // shared file offset advances only by what was actually consumed.
+    let stdin_handle = crate::fd::process_std_handle(0);
     let mut output = String::new();
     let mut read = 0;
     let mut decoder = StdinCharDecoder::new();
@@ -342,14 +345,14 @@ pub(in crate::executor) fn read_stdin_until(
     let mut eof = false;
     loop {
         if !decoder.has_queued() {
-            match stdin.read(&mut bytes)? {
-                0 => {
+            match crate::fd::read_some(stdin_handle, 1)? {
+                buf if buf.is_empty() => {
                     eof = true;
                     break;
                 }
-                count => {
-                    read += count;
-                    decoder.queue_byte(bytes[0]);
+                buf => {
+                    read += buf.len();
+                    decoder.queue_byte(buf[0]);
                 }
             }
         }
@@ -615,7 +618,13 @@ impl Executor {
             } else {
                 unescape_read_backslashes(line)
             };
-            return i32::from(self.apply_shell_assignment_command("read", &names[0], value));
+            // GNU read.def bind_read_variable: success -> EXECUTION_SUCCESS;
+            // failure of the last (only) name -> EXECUTION_FAILURE.
+            return if self.apply_shell_assignment_command("read", &names[0], value) {
+                0
+            } else {
+                1
+            };
         }
 
         let ifs = self

@@ -175,7 +175,7 @@ impl Executor {
             // and inherited stdin handling.
             if let Some(redirect) = &cmd.redirect_in {
                 if redirect.fd.unwrap_or(0) == 0 {
-                    let target = self.expand_word(&redirect.target);
+                    let target = self.expand_redirect_target(redirect);
                     if !target.starts_with("<(") && !is_closed_redirect_target(&target) {
                         let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
                         if let Ok(input) =
@@ -219,7 +219,7 @@ impl Executor {
         }
         cmd.redirects.iter().rev().any(|redirect| {
             redirect.fd == Some(fd)
-                && !is_closed_redirect_target(&self.expand_word(&redirect.target))
+                && !is_closed_redirect_target(&self.expand_redirect_target(redirect))
         })
     }
 
@@ -240,7 +240,7 @@ impl Executor {
             return self.process_substitution_output(source);
         }
 
-        let target = self.expand_word(&redirect.target);
+        let target = self.expand_redirect_target(redirect);
         if is_closed_redirect_target(&target) {
             return None;
         }

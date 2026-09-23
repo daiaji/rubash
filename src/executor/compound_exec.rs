@@ -97,6 +97,23 @@ fn strip_consumed_redirects(command: &mut CommandNode, consumed: &[bool]) {
     if !consumed.iter().any(|consumed| *consumed) {
         return;
     }
+    // Capture the consumed heredoc/here-string descriptors before retain
+    // mutates the list: (fd, here_string) pairs in redirect order, matching
+    // the ordinal correlation materialize_async_stdin_body uses against
+    // `heredoc_redirects`.
+    let mut consumed_bodies: Vec<(Option<u32>, bool)> = Vec::new();
+    for (index, redirect) in command.redirects.iter().enumerate() {
+        let kind = match redirect.kind {
+            crate::parser::RedirectKind::HereDoc => Some(false),
+            crate::parser::RedirectKind::HereString => Some(true),
+            _ => None,
+        };
+        if let Some(here_string) = kind {
+            if consumed.get(index).copied().unwrap_or(false) {
+                consumed_bodies.push((redirect.fd, here_string));
+            }
+        }
+    }
     let mut index = 0;
     command.redirects.retain(|_| {
         let keep = !consumed[index];
@@ -120,6 +137,37 @@ fn strip_consumed_redirects(command: &mut CommandNode, consumed: &[bool]) {
             .is_some_and(|redirect| !remaining.contains(redirect))
         {
             *field = None;
+        }
+    }
+    // Materialized stdin bodies must not resurface in the child: drop the
+    // consumed heredoc_redirects rows and clear the fd-0 legacy fields when
+    // no surviving redirect still feeds them — otherwise `here_string`
+    // would be re-serialized as `<<<` and double the child's input.
+    if !consumed_bodies.is_empty() {
+        let mut pending = consumed_bodies;
+        command.heredoc_redirects.retain(|entry| {
+            let key = (entry.fd, entry.here_string);
+            if let Some(position) = pending.iter().position(|k| *k == key) {
+                pending.remove(position);
+                false
+            } else {
+                true
+            }
+        });
+        if !remaining.iter().any(|redirect| {
+            redirect.fd.is_none()
+                && matches!(redirect.kind, crate::parser::RedirectKind::HereDoc)
+        }) {
+            command.heredoc = None;
+            command.heredoc_body = None;
+            command.heredoc_delimiter = None;
+        }
+        if !remaining.iter().any(|redirect| {
+            redirect.fd.is_none()
+                && matches!(redirect.kind, crate::parser::RedirectKind::HereString)
+        }) {
+            command.here_string = None;
+            command.here_string_carrier = None;
         }
     }
 }
@@ -483,12 +531,29 @@ impl Executor {
     /// returned `consumed` map as false so it stays in the child's `-c`
     /// source, where the child re-runs it and reports the same diagnostic
     /// GNU's subshell would.
-    fn resolve_background_stdio(&self, command: &CommandNode) -> ([BackgroundStdio; 3], Vec<bool>) {
+    fn resolve_background_stdio(&mut self, command: &CommandNode) -> ([BackgroundStdio; 3], Vec<bool>) {
         use crate::parser::RedirectKind;
-        // GNU execute_cmd.c:595 async_redirect_stdin + :1589-1591
-        // (should_redir_stdin): an async command with no stdin redirect gets
-        // fd 0 from /dev/null, so the base disposition for fd 0 is Null.
-        let mut fd0 = BackgroundStdio::Null;
+        // GNU execute_cmd.c:2837-2841 (execute_connection '&') + :595
+        // async_redirect_stdin: CMD_STDIN_REDIR is set — and the spawned
+        // child dups /dev/null onto fd 0 — only when the shell is in a
+        // subshell or lacks job control AND the enclosing control structure
+        // did not redirect stdin. The global stdin_redir (execute_cmd.c:828,
+        // cleared per reader command at eval.c:181) decides: `{ read; } &`
+        // inside `while ... done <<EOF` inherits the heredoc, while a bare
+        // `sleep 5 &` gets /dev/null.
+        let job_control = crate::builtins::set::shell_option_enabled(
+            &self.shell_state.env_vars,
+            "monitor",
+        );
+        let subshell_environment = self.shell_state.subshell_depth.get() > 0
+            || self.shell_state.in_command_substitution.get();
+        let mut fd0 = if (subshell_environment || !job_control)
+            && !self.shell_state.stdin_redir.get()
+        {
+            BackgroundStdio::Null
+        } else {
+            self.inherited_async_stdin()
+        };
         let mut fd1 = BackgroundStdio::Inherit;
         let mut fd2 = BackgroundStdio::Inherit;
         let mut consumed = vec![false; command.redirects.len()];
@@ -504,9 +569,30 @@ impl Executor {
 
         for (index, redirect) in command.redirects.iter().enumerate() {
             match redirect.kind {
-                // The heredoc/here-string body travels inside the child's
-                // `-c` source; the child's own redirect pass feeds it.
-                RedirectKind::HereDoc | RedirectKind::HereString => continue,
+                // GNU here_document_to_fd (redir.c): a forked async subshell
+                // finds the heredoc already staged on a real fd — the body
+                // text cannot ride the child's `-c` source, so expand and
+                // materialize it into a temp file here and hand the child
+                // that descriptor, exactly like do_redirections does in the
+                // subshell.
+                RedirectKind::HereDoc | RedirectKind::HereString => {
+                    let fd = redirect.fd.unwrap_or(0);
+                    if fd > 2 || redirect.fd_var.is_some() {
+                        continue;
+                    }
+                    match self.materialize_async_stdin_body(command, index) {
+                        Some(file) => {
+                            consumed[index] = true;
+                            match fd {
+                                0 => fd0 = BackgroundStdio::File(file),
+                                1 => fd1 = BackgroundStdio::File(file),
+                                _ => fd2 = BackgroundStdio::File(file),
+                            }
+                        }
+                        None => continue,
+                    }
+                    continue;
+                }
                 _ => {}
             }
             // `{fd}>file` dynamic fd bindings and `<(cmd)`/`>(cmd)` process
@@ -530,7 +616,7 @@ impl Executor {
             }
             let resolved = match redirect.kind {
                 RedirectKind::Input => {
-                    let target = self.expand_word(&redirect.target);
+                    let target = self.expand_redirect_target(redirect);
                     if is_closed_redirect_target(&target) {
                         BackgroundStdio::Null
                     } else if redirect_target_fd(&target).is_some() {
@@ -543,7 +629,7 @@ impl Executor {
                     }
                 }
                 RedirectKind::DuplicateInput | RedirectKind::DuplicateOutput => {
-                    let target = self.expand_word(&redirect.target);
+                    let target = self.expand_redirect_target(redirect);
                     if is_closed_redirect_target(&target) {
                         BackgroundStdio::Null
                     } else if let Some(source_fd) = redirect_target_fd(&target) {
@@ -561,7 +647,7 @@ impl Executor {
                 }
                 RedirectKind::CloseInput | RedirectKind::CloseOutput => BackgroundStdio::Null,
                 RedirectKind::Output | RedirectKind::ClobberOutput => {
-                    let target = self.expand_word(&redirect.target);
+                    let target = self.expand_redirect_target(redirect);
                     if is_closed_redirect_target(&target) {
                         BackgroundStdio::Null
                     } else if redirect_target_fd(&target).is_some() {
@@ -576,7 +662,7 @@ impl Executor {
                     }
                 }
                 RedirectKind::Append => {
-                    let target = self.expand_word(&redirect.target);
+                    let target = self.expand_redirect_target(redirect);
                     if is_closed_redirect_target(&target) {
                         BackgroundStdio::Null
                     } else if redirect_target_fd(&target).is_some() {
@@ -595,7 +681,7 @@ impl Executor {
                     }
                 }
                 RedirectKind::ReadWrite => {
-                    let target = self.expand_word(&redirect.target);
+                    let target = self.expand_redirect_target(redirect);
                     match OpenOptions::new()
                         .read(true)
                         .write(true)
@@ -608,7 +694,7 @@ impl Executor {
                 }
                 RedirectKind::CombinedOutput | RedirectKind::CombinedAppend => {
                     // `&>file` / `&>>file`: one open, both fds share it.
-                    let target = self.expand_word(&redirect.target);
+                    let target = self.expand_redirect_target(redirect);
                     let file = if is_null_device(&target) {
                         fd1 = BackgroundStdio::Null;
                         fd2 = BackgroundStdio::Null;
@@ -647,6 +733,147 @@ impl Executor {
         }
 
         ([fd0, fd1, fd2], consumed)
+    }
+
+    /// GNU make_child fork semantics for an async command that inherits
+    /// fd 0 (stdin_redir set, or job-control shell outside a subshell):
+    /// the child shares the parent's open file description, file offset
+    /// included. Handle-backed endpoints map to DuplicateHandle dups, which
+    /// share the file pointer exactly like a fork. Text endpoints and the
+    /// FUNCTION_STDIN channel have no kernel object, so the unread tail is
+    /// written to a temp file and fd 0 is moved onto it — the same trick
+    /// GNU gets for free because here-documents already live in an
+    /// unlinked temp file (redir.c here_document_to_fd).
+    fn inherited_async_stdin(&mut self) -> BackgroundStdio {
+        // FUNCTION_STDIN is the newest fd-0 authority when present: a
+        // compound `done <<EOF` stages the body on the text channel while a
+        // previous `exec 0<real` may still hold a File endpoint on slot 0 —
+        // the virtual text wins, exactly like GNU's dup2 of the heredoc
+        // temp file over the earlier descriptor.
+        if let Some(remaining) = self.function_stdin_remaining() {
+            let bytes = remaining.into_bytes();
+            match self.materialize_virtual_stdin_fd0(&bytes) {
+                Some(file) => {
+                    // fd 0 now owns a real endpoint; drop the text channel
+                    // so no consumer double-sources it. The compound-command
+                    // restore puts the parent's FUNCTION_STDIN back when the
+                    // scope ends.
+                    self.shell_state.env_vars.remove(FUNCTION_STDIN);
+                    self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
+                    return BackgroundStdio::File(file);
+                }
+                None => return BackgroundStdio::Null,
+            }
+        }
+        match self.fd_table.read_endpoint(0) {
+            Some(FdReadEndpoint::File(file))
+            | Some(FdReadEndpoint::CoprocStdout { fd: file, .. }) => {
+                match crate::fd::duplicate_handle_inheritable(file.handle) {
+                    Ok(dup) => BackgroundStdio::File(crate::fd::handle_to_file(dup)),
+                    Err(_) => BackgroundStdio::Null,
+                }
+            }
+            Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
+                let bytes = self
+                    .fd_table
+                    .input_snapshot_bytes(0)
+                    .map(|(data, offset)| data[offset.min(data.len())..].to_vec())
+                    .unwrap_or_default();
+                match self.materialize_virtual_stdin_fd0(&bytes) {
+                    Some(file) => BackgroundStdio::File(file),
+                    None => BackgroundStdio::Null,
+                }
+            }
+            Some(FdReadEndpoint::InheritedProcessStdin) => BackgroundStdio::Inherit,
+            // fd 0 closed or absent: the closest spawnable state to GNU's
+            // inherited-but-unreadable descriptor.
+            None => BackgroundStdio::Null,
+        }
+    }
+
+    /// Move fd 0 onto a real temp file holding `bytes`: the FileFd on the
+    /// slot keeps the parent's read position in lockstep with any child's
+    /// dup (shared file object), which is exactly what GNU's inherited fd
+    /// gives a forked async subshell.
+    fn materialize_virtual_stdin_fd0(&mut self, bytes: &[u8]) -> Option<std::fs::File> {
+        let path = self.process_substitution_temp_path().ok()?;
+        fs::write(&path, bytes).ok()?;
+        let file_fd = FileFd::open_read(path).ok()?;
+        let dup = crate::fd::duplicate_handle_inheritable(file_fd.handle).ok()?;
+        self.set_fd_input_file(0, file_fd, false);
+        Some(crate::fd::handle_to_file(dup))
+    }
+
+    /// Expand the body behind `command.redirects[index]` (a HereDoc or
+    /// HereString entry) and stage it on a real temp file, mirroring GNU's
+    /// here_document_to_fd so the spawned `-c` child reads an actual
+    /// descriptor. `heredoc_redirects` is the parallel store for bodies; an
+    /// entry correlates by fd, here-string flag, and ordinal among the
+    /// matching `redirects` entries, with the fd-0 legacy fields
+    /// (`heredoc`/`here_string` and their carriers) as fallback.
+    fn materialize_async_stdin_body(
+        &mut self,
+        command: &CommandNode,
+        index: usize,
+    ) -> Option<std::fs::File> {
+        use crate::parser::RedirectKind;
+        let redirect = &command.redirects[index];
+        let want_string = matches!(redirect.kind, RedirectKind::HereString);
+        let ordinal = command.redirects[..index]
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    RedirectKind::HereDoc | RedirectKind::HereString
+                ) && matches!(entry.kind, RedirectKind::HereString) == want_string
+                    && entry.fd == redirect.fd
+            })
+            .count();
+        let expanded = command
+            .heredoc_redirects
+            .iter()
+            .filter(|entry| entry.fd == redirect.fd && entry.here_string == want_string)
+            .nth(ordinal)
+            .map(|entry| {
+                if entry.body_carrier.is_some() {
+                    if entry.here_string {
+                        self.expand_here_string_mut_from_carrier(&entry.body_carrier)
+                    } else {
+                        self.expand_heredoc_body_mut_from_carrier(&entry.body_carrier)
+                    }
+                } else {
+                    entry
+                        .body
+                        .as_deref()
+                        .map(|body| self.expand_heredoc_body_mut(body))
+                        .unwrap_or_default()
+                }
+            })
+            .or_else(|| {
+                if redirect.fd.is_some() {
+                    return None;
+                }
+                if want_string {
+                    if command.here_string_carrier.is_some() {
+                        Some(
+                            self.expand_here_string_mut_from_carrier(
+                                &command.here_string_carrier,
+                            ),
+                        )
+                    } else {
+                        let body = command.here_string.clone()?;
+                        Some(self.expand_here_string_mut(&body))
+                    }
+                } else if command.heredoc_body.is_some() {
+                    Some(self.expand_heredoc_body_mut_from_carrier(&command.heredoc_body))
+                } else {
+                    let body = command.heredoc.clone()?;
+                    Some(self.expand_heredoc_body_mut(&body))
+                }
+            })?;
+        let path = self.process_substitution_temp_path().ok()?;
+        fs::write(&path, expanded.as_bytes()).ok()?;
+        std::fs::File::open(&path).ok()
     }
 
     fn background_command_source(&self, command: &CommandNode) -> String {
@@ -899,7 +1126,14 @@ impl Executor {
             ran_body = true;
             self.shell_state.loop_depth += 1;
             let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_BODY);
-            let result = self.execute_ast(&body_ast);
+            // execute_cmd.c:3236: line_number = arith_for_command->line is
+            // the ambient for the body's non-line-setting commands.
+            let for_ambient = for_line
+                .as_deref()
+                .and_then(|line| line.parse::<usize>().ok());
+            let result = self.with_ambient_line(for_ambient, |executor| {
+                executor.execute_ast(&body_ast)
+            });
             drop(_t);
             self.shell_state.loop_depth -= 1;
             match result {
@@ -1088,88 +1322,91 @@ impl Executor {
             stdio_redirect_cmd.redirect_err_append = None;
         }
         self.apply_command_output_redirects(&stdio_redirect_cmd, &mut body)?;
-        // Preserve numbered redirects on every body command so its virtual fd
-        // state sees the same left-to-right ordering.
-        let mut numbered_redirects = redirect_cmd
-            .redirects
-            .iter()
-            .filter(|redirect| is_numbered(redirect))
-            .cloned()
-            .collect::<Vec<_>>();
         // GNU execute_cmd.c resolves subshell redirections in the parent
         // context before the body runs: expand and anchor relative file
         // targets now, or a `cd` in the body relocates them (niubash#118).
-        for redirect in &mut numbered_redirects {
-            if redirect.fd_var.is_some()
-                || matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
-                )
-            {
-                continue;
-            }
-            let expanded = self.expand_word(&redirect.target);
-            let anchored = self.anchor_compound_redirect_target(&expanded);
-            if anchored != redirect.target {
-                redirect.target_metadata = Box::new(crate::parser::WordMetadata::new(
-                    0,
-                    anchored.clone(),
-                    anchored.clone(),
-                ));
-                redirect.target = anchored;
-            }
-        }
-        if !numbered_redirects.is_empty() {
-            for command in &mut body.commands {
-                command.redirects.splice(0..0, numbered_redirects.clone());
-            }
-        }
+        // Numbered output redirects bind fd-table slots for the body's
+        // duration through open_compound_output_redirects inside
+        // with_command_input_redirects (redir.c do_redirection_internal).
+        // GNU execute_cmd.c:696 SET_LINE_NUMBER(command->value.Subshell->line):
+        // the subshell body runs under the `)` line as its ambient
+        // line_number — inner while/if/group diagnostics report it, while
+        // inner simple commands stamp and restore their own.
+        let subshell_line = cmd.end_line.or(cmd.line);
+        // The subshell's EXIT trap runs inside the scoped fd bindings: GNU's
+        // execute_in_subshell forks, applies do_redirections to the child's
+        // real descriptors, and runs run_exit_trap before the child exits —
+        // the redirections are never undone in the child, so the trap writes
+        // through the same open file descriptions as the body
+        // (execute_cmd.c:1576-1763, redir.c:767-955). Re-binding `>file`
+        // after the scope would re-open and truncate it, clobbering the
+        // body's output.
+        let mut body_status: Option<i32> = None;
+        let mut trap_result: Option<Result<i32, ExecuteError>> = None;
         let result = self.with_loop_fd_heredocs(cmd, |executor| {
-            executor.with_command_input_redirects(cmd, |executor| executor.execute_ast(&body))
+            executor.with_ambient_line(subshell_line, |executor| {
+                executor.with_command_input_redirects(cmd, |executor| {
+                    let body_result = executor.execute_ast(&body);
+                    // GNU execute_cmd.c execute_in_subshell: expr.c
+                    // evalerror's jump_to_top_level(DISCARD) reaches only the
+                    // forked subshell's own top level — the abort dies with
+                    // the subshell (status 1) and cannot discard parent
+                    // commands (`( a[$bad]=v ); echo after` prints `after` —
+                    // verified GNU 5.3).
+                    executor.evalerror_pending.set(false);
+                    executor.evalerror_line.set(None);
+                    // Bash runs a subshell with errexit active; a failing
+                    // command exits the subshell with that status but the
+                    // parent script continues. Catch ExitCode errors at the
+                    // subshell boundary. `return N` inside a subshell
+                    // likewise only ends the subshell with status N: the
+                    // forked child longjmps to its own copy of
+                    // execute_function's return_catch (return.def
+                    // return_builtin) and exits N, so the function continues
+                    // with $? = N (func.tests: `( return 5 ); status=$?`
+                    // prints 5, 5).
+                    let status = match body_result {
+                        Ok(()) => executor.exit_code,
+                        Err(ExecuteError::ExitCode(code))
+                        | Err(ExecuteError::ExpansionFailure(code))
+                        | Err(ExecuteError::FatalFunctionError(code))
+                        | Err(ExecuteError::Return(code)) => code,
+                        Err(error) => return Err(error),
+                    };
+                    body_status = Some(status);
+                    // GNU execute_cmd.c runs the subshell's own EXIT trap
+                    // (trap.c run_exit_trap) while the subshell state is
+                    // still live: `( trap "echo T" EXIT; echo body )` prints
+                    // body then T (niubash#70). reset_for_subshell cleared
+                    // the inherited traps at entry, so a pending EXIT here
+                    // can only have been registered by the body itself; a
+                    // trap action that calls exit N replaces the subshell
+                    // status (bash exit_shell semantics).
+                    trap_result = Some(executor
+                        .run_exit_trap_for_status_with_output_redirects(
+                            status,
+                            Some(&stdio_redirect_cmd),
+                        ));
+                    Ok(())
+                })
+            })
         });
-        // GNU execute_cmd.c execute_in_subshell: expr.c evalerror's
-        // jump_to_top_level(DISCARD) reaches only the forked subshell's own
-        // top level — the abort dies with the subshell (status 1) and cannot
-        // discard parent commands (`( a[$bad]=v ); echo after` prints
-        // `after` — verified GNU 5.3).
-        self.evalerror_pending.set(false);
-        self.evalerror_line.set(None);
-        // Bash runs a subshell with errexit active; a failing command exits
-        // the subshell with that status but the parent script continues.
-        // Catch ExitCode errors at the subshell boundary. `return N` inside a
-        // subshell likewise only ends the subshell with status N: the forked
-        // child longjmps to its own copy of execute_function's return_catch
-        // (return.def return_builtin) and exits N, so the function continues
-        // with $? = N (func.tests: `( return 5 ); status=$?` prints 5, 5).
         let status = match result {
-            Ok(()) => self.exit_code,
-            Err(ExecuteError::ExitCode(code))
-            | Err(ExecuteError::ExpansionFailure(code))
-            | Err(ExecuteError::FatalFunctionError(code))
-            | Err(ExecuteError::Return(code)) => code,
+            Ok(()) => body_status.unwrap_or(self.exit_code),
             Err(error) => {
                 self.restore_flat_subshell(saved_state.clone(), saved_cwd.clone());
                 self.fd_table = saved_fd_table.clone();
                 return Err(error);
             }
         };
-
-        // GNU execute_cmd.c runs the subshell's own EXIT trap (trap.c
-        // run_exit_trap) while the subshell state is still live, before the
-        // parent environment returns: `( trap "echo T" EXIT; echo body )`
-        // prints body then T (niubash#70). reset_for_subshell cleared the
-        // inherited traps at entry, so a pending EXIT here can only have
-        // been registered by the body itself; a trap action that calls
-        // exit N replaces the subshell status (bash exit_shell semantics).
-        let status = match self
-            .run_exit_trap_for_status_with_output_redirects(status, Some(&stdio_redirect_cmd))
-        {
-            Ok(trap_status) => trap_status,
-            Err(error) => {
+        let status = match trap_result {
+            Some(Ok(trap_status)) => trap_status,
+            Some(Err(error)) => {
                 self.restore_flat_subshell(saved_state.clone(), saved_cwd.clone());
                 self.fd_table = saved_fd_table.clone();
                 return Err(error);
             }
+            None => status,
         };
 
         self.restore_flat_subshell(saved_state, saved_cwd);
@@ -1699,7 +1936,7 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) == 0 {
-                let target = self.expand_word(&redirect.target);
+                let target = self.expand_redirect_target(redirect);
                 if is_closed_redirect_target(&target) {
                     child.stdin(Stdio::null());
                 } else if redirect_target_fd(&target).is_none() {
@@ -1709,7 +1946,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
                 child.stdout(Stdio::null());
             } else if redirect_target_fd(&target).is_none() {
@@ -1718,7 +1955,7 @@ impl Executor {
                 ));
             }
         } else if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
                 child.stdout(Stdio::null());
             } else if redirect_target_fd(&target).is_none() {
@@ -1732,7 +1969,7 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
                 child.stderr(Stdio::null());
             } else if redirect_target_fd(&target).is_none() {
@@ -1741,7 +1978,7 @@ impl Executor {
                 ));
             }
         } else if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
                 child.stderr(Stdio::null());
             } else if redirect_target_fd(&target).is_none() {
@@ -1887,8 +2124,13 @@ impl Executor {
             finish_result?;
             return Err(error);
         }
+        // GNU execute_cmd.c:3653 `line_number = case_command->line`: the
+        // `case` keyword's line is the ambient while a clause body runs.
+        let case_line = cmd.line;
         let result = self.with_command_input_redirects(cmd, |executor| {
-            executor.execute_case_command(&case_command)
+            executor.with_ambient_line(case_line, |executor| {
+                executor.execute_case_command(&case_command)
+            })
         });
         let status = self.exit_code;
         let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
@@ -1905,7 +2147,7 @@ impl Executor {
         case_command: &mut CaseCommand,
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
@@ -1918,14 +2160,14 @@ impl Executor {
             }
         } else if let Some(redirect) = &cmd.append {
             let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_word(&redirect.target);
+            append_redirect.target = self.expand_redirect_target(redirect);
             for clause in &mut case_command.clauses {
                 apply_stdout_append_redirect(&mut clause.body, &append_redirect);
             }
         }
 
         if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
@@ -1938,7 +2180,7 @@ impl Executor {
             }
         } else if let Some(redirect) = &cmd.redirect_err_append {
             let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_word(&redirect.target);
+            append_redirect.target = self.expand_redirect_target(redirect);
             for clause in &mut case_command.clauses {
                 apply_stderr_append_redirect(&mut clause.body, &append_redirect);
             }

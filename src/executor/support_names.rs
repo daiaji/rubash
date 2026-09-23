@@ -362,10 +362,16 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
         // still needs the outer redirect first so the alias resolves to the
         // group target ({ printf x >>/dev/stdout; } >>so writes to so —
         // niubash#118).
+        // The stdio mirror fields are fd-blind (a `3>&1` lands in
+        // redirect_out too); only fd-1 entries count as the command's own
+        // stdout redirect — numbered fd redirects propagate through the
+        // redirects list itself.
+        let own_fd1 = |r: &Redirect| r.fd.unwrap_or(1) == 1;
         let own_output_is_fd_alias = command
             .redirect_out
             .iter()
             .chain(command.append.iter())
+            .filter(|own| own_fd1(own))
             .any(|own| {
                 let target = own.target.trim_start_matches([crate::executor::markers::QUOTED_WORD_PREFIX, STORAGE_WORD_PREFIX]);
                 crate::executor::execution_misc::redirect_target_fd(target).is_some()
@@ -375,8 +381,11 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
         // shields its body from the outer redirect entirely: GNU opens the
         // inner redirect before the body runs, so `{ { echo a; } >n1; } >n2`
         // sends `a` to n1 and never lets n2 reach the body (niubash#118).
-        let has_own_output_redirect = command.redirect_out.is_some()
-            || command.append.is_some()
+        let has_own_output_redirect = command
+            .redirect_out
+            .as_ref()
+            .is_some_and(|r| own_fd1(r))
+            || command.append.as_ref().is_some_and(|r| own_fd1(r))
             || command.redirects.iter().any(|existing| {
                 matches!(
                     existing.kind,
@@ -388,11 +397,16 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
                         | crate::parser::RedirectKind::CombinedAppend
                 ) && existing.fd.unwrap_or(1) == 1
             });
+        let no_own_stdout_field = !command
+            .redirect_out
+            .as_ref()
+            .is_some_and(|r| own_fd1(r))
+            && !command.append.as_ref().is_some_and(|r| own_fd1(r));
         if own_output_is_fd_alias {
             command
                 .redirects
                 .insert(0, injected_group_redirect(&redirect));
-        } else if command.redirect_out.is_none() && command.append.is_none() {
+        } else if no_own_stdout_field {
             command.append = Some(injected_group_redirect(redirect));
             if command.redirects.iter().any(|existing| {
                 matches!(
@@ -416,7 +430,13 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
             apply_stdout_append_redirect(&mut for_command.body, redirect);
         }
         if let Some(pipeline_command) = &mut command.pipeline_command {
-            apply_stdout_append_redirect(&mut pipeline_command.stages, redirect);
+            // GNU execute_cmd.c execute_pipeline (2702-2723): every
+            // element's fd 1 is the pipe except the LAST, whose fd 1 stays
+            // the command's — `{ a | b; } >f` sends a down the pipe and
+            // only b's output to f.
+            if let Some(last) = pipeline_command.stages.last_mut() {
+                apply_stdout_append_redirect(std::slice::from_mut(last), redirect);
+            }
         }
         if let Some(and_or_list) = &mut command.and_or_list {
             apply_stdout_append_redirect(&mut and_or_list.commands, redirect);
@@ -556,6 +576,8 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
         }
     }
 }
+
+
 
 pub(in crate::executor) fn split_shell_path(path: &str) -> Vec<String> {
     if cfg!(windows) {

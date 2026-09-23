@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::pipeline_exec::command_is_compound_pipeline_stage;
 
 impl Executor {
     pub(in crate::executor) fn execute_lastpipe_stage(
@@ -19,15 +20,16 @@ impl Executor {
         self.stdout_capture = Some(Vec::new());
         self.stderr_capture = Some(Vec::new());
 
-        let mut stage_command = command.clone();
-        stage_command.redirect_out = None;
-        stage_command.append = None;
-
+        // The element's own output redirections stay on the command: the
+        // lastpipe element runs in the current shell, and its `>file` /
+        // `>/dev/null` must rebind fd 1 for the body the way GNU's
+        // do_redirection_internal does inside the element (see
+        // execute_compound_pipeline_stage).
         // Direct-stdout builtins in the stage consult the thread-local
         // capture, which belongs to an enclosing capture when this pipeline
         // runs inside one; give the stage its own capture.
         let (thread_captured, result) =
-            crate::executor::shell_options::capture_stdout(|| self.execute_command(&stage_command));
+            crate::executor::shell_options::capture_stdout(|| self.execute_command(command));
         let mut output = self.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&thread_captured);
         let stderr = self.stderr_capture.take().unwrap_or_default();
@@ -98,10 +100,13 @@ impl Executor {
 
         subshell.stdout_capture = Some(Vec::new());
         subshell.stderr_capture = Some(Vec::new());
-        let mut stage_command = command.clone();
-        stage_command.redirect_out = None;
-        stage_command.append = None;
 
+        // GNU execute_cmd.c execute_pipeline + redir.c do_redirection_internal:
+        // inside the element's subshell the pipe is bound to fd 1 first and
+        // the element's own redirections run after it — `( inner ) >/dev/null`
+        // rebinds fd 1 for the whole body, so an inner `3>&1` duplicates the
+        // null device, not the pipe. Keep redirect_out/append on the stage
+        // command so the compound-redirect propagation applies them inside.
         // Builtins that write the process stdout directly (notably the exec
         // builtin's printenv/external fallback via io::stdout()) bypass the
         // subshell's stdout_capture field, so their output would leak past a
@@ -110,12 +115,12 @@ impl Executor {
         // capture sources.
         let saved_capture = crate::executor::shell_options::begin_stdout_capture();
 
-        let result = if stage_command.brace_group.is_some() {
+        let result = if command.brace_group.is_some() {
             subshell
-                .execute_brace_group_pipeline(&stage_command)
+                .execute_brace_group_pipeline(command)
                 .map(|_| ())
         } else {
-            subshell.execute_command(&stage_command)
+            subshell.execute_command(command)
         };
         let mut thread_output = crate::executor::shell_options::take_stdout_capture();
         let mut output = subshell.stdout_capture.take().unwrap_or_default();
@@ -378,7 +383,7 @@ impl Executor {
             // `2>file` writes it there, and `2>&1` sends it down this
             // stage's pipe (issue #70's `git ... 2>/dev/null | sed` idiom).
             if let Some(redirect) = &command.redirect_err {
-                let target = self.expand_word(&redirect.target);
+                let target = self.expand_redirect_target(redirect);
                 if redirect_target_fd(&target) == Some(1) {
                     return Ok(Some((diagnostic, String::new(), 127)));
                 }
@@ -389,7 +394,7 @@ impl Executor {
                     return Ok(Some((String::new(), String::new(), 127)));
                 }
             } else if let Some(redirect) = &command.redirect_err_append {
-                let target = self.expand_word(&redirect.target);
+                let target = self.expand_redirect_target(redirect);
                 if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                     if let Ok(mut file) = OpenOptions::new()
                         .create(true)
@@ -482,7 +487,7 @@ impl Executor {
         // "cannot access" leak past `2>/dev/null` (issue #70).
         let mut stderr_merges_into_stdout = false;
         if let Some(redirect) = &command.redirect_err {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target) == Some(1) {
                 stderr_merges_into_stdout = true;
                 process.stderr(Stdio::piped());
@@ -492,7 +497,7 @@ impl Executor {
                 }
             }
         } else if let Some(redirect) = &command.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
+            let target = self.expand_redirect_target(redirect);
             if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 if let Ok(file) = OpenOptions::new()
                     .create(true)
@@ -544,23 +549,55 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         output: &str,
+        already_routed: bool,
     ) -> Result<(), ExecuteError> {
         // Final pipeline output is a byte boundary: decode owner-tagged
         // raw-byte markers exactly once before reaching files, captures,
         // or stdout.
+        // Compound stages propagated their own output redirections into the
+        // body already (execute_compound_pipeline_stage keeps redirect_out so
+        // inner `3>&1` resolves the redirected fd 1), so only what escaped to
+        // fd 1 remains here. Simple stages still carry theirs — resolve them
+        // like the intermediate-stage routing does, covering `>f`, `1>&2`,
+        // `>&-`, and numbered fds the way do_redirection_internal would (the
+        // old mirror-only path once wrote `cat 1>&2`'s payload to a literal
+        // file named `&2`). Callers that already ran
+        // route_pipeline_stage_streams for the stage (the sequential stage
+        // loop, and lastpipe/compound stages whose redirections were applied
+        // inside) pass already_routed — a second pass would reopen `>f` and
+        // truncate what the first pass wrote.
+        if !already_routed && !command_is_compound_pipeline_stage(command) {
+            let mut stdout = output.to_string();
+            let mut stderr = String::new();
+            let mut status = 0;
+            if self.route_pipeline_stage_streams(
+                command,
+                &mut stdout,
+                &mut stderr,
+                &mut status,
+            )? {
+                if status != 0 {
+                    self.exit_code = status;
+                }
+                if !stdout.is_empty() {
+                    let payload =
+                        crate::executor::substitution_metadata::shell_text_to_raw_bytes(&stdout);
+                    if let Some(capture) = &mut self.stdout_capture {
+                        capture.write_all(&payload)?;
+                    } else {
+                        self.write_default_stdout(&payload)?;
+                    }
+                }
+                if !stderr.is_empty() {
+                    let payload =
+                        crate::executor::substitution_metadata::shell_text_to_raw_bytes(&stderr);
+                    self.write_default_stderr(&payload)?;
+                }
+                return Ok(());
+            }
+        }
         let payload = crate::executor::substitution_metadata::shell_text_to_raw_bytes(output);
-        if let Some(redirect) = &command.redirect_out {
-            let target = self.expand_word(&redirect.target);
-            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-            file.write_all(&payload)?;
-        } else if let Some(redirect) = &command.append {
-            let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-            file.write_all(&payload)?;
-        } else if let Some(capture) = &mut self.stdout_capture {
+        if let Some(capture) = &mut self.stdout_capture {
             capture.write_all(&payload)?;
         } else {
             self.write_default_stdout(&payload)?;
