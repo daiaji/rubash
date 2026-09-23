@@ -148,7 +148,7 @@ impl Executor {
             };
             if let Ok(fd) = num.parse::<u32>() {
                 let handle =
-                    isize::from_str_radix(value.trim_start_matches("0x"), 16).ok();
+                    crate::fd::HANDLE::from_str_radix(value.trim_start_matches("0x"), 16).ok();
                 let entry = inherited_fd_handles.entry(fd).or_default();
                 if is_write {
                     entry.1 = handle;

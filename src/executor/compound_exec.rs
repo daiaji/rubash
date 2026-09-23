@@ -409,9 +409,10 @@ impl Executor {
         // across), so resolve each stdio disposition to an owned inheritable
         // HANDLE and spawn through STARTUPINFOEXW +
         // PROC_THREAD_ATTRIBUTE_HANDLE_LIST (src/fd::spawn_whitelisted).
+        #[cfg(windows)]
         use std::os::windows::io::AsRawHandle;
         let mut owned_handles: Vec<crate::fd::HANDLE> = Vec::new();
-        let mut std_handles = [0isize; 3];
+        let mut std_handles = [0 as crate::fd::HANDLE; 3];
         for (fd, resolved) in stdio.iter().enumerate() {
             let h = match resolved {
                 BackgroundStdio::Inherit => {
@@ -423,9 +424,20 @@ impl Executor {
                     }
                 }
                 BackgroundStdio::Null => crate::fd::open_null_device_inheritable()?,
-                BackgroundStdio::File(file) => crate::fd::duplicate_handle_inheritable(
-                    file.as_raw_handle() as crate::fd::HANDLE,
-                )?,
+                BackgroundStdio::File(file) => {
+                    #[cfg(windows)]
+                    {
+                        crate::fd::duplicate_handle_inheritable(
+                            file.as_raw_handle() as crate::fd::HANDLE,
+                        )?
+                    }
+                    #[cfg(unix)]
+                    {
+                        crate::fd::duplicate_handle_inheritable(
+                            std::os::unix::io::AsRawFd::as_raw_fd(file),
+                        )?
+                    }
+                }
             };
             owned_handles.push(h);
             std_handles[fd] = h;
@@ -1734,13 +1746,12 @@ impl Executor {
                     // pair, so `${COPROC[@]}` is literally "63 60". The parent
                     // ends live in fd_table as real HANDLE endpoints (Rc'd
                     // FileFd), so dup/close/fork share them like GNU's fork.
-                    use std::os::windows::io::IntoRawHandle;
                     let coproc_write_file = Rc::new(FileFd {
-                        handle: stdin_writer.into_raw_handle() as crate::fd::HANDLE,
+                        handle: crate::fd::into_handle(stdin_writer),
                         path: std::path::PathBuf::from(format!("coproc:{pid}:stdin")),
                     });
                     let coproc_read_file = Rc::new(FileFd {
-                        handle: stdout_reader.into_raw_handle() as crate::fd::HANDLE,
+                        handle: crate::fd::into_handle(stdout_reader),
                         path: std::path::PathBuf::from(format!("coproc:{pid}:stdout")),
                     });
                     let coproc_read_fd = self.allocate_coproc_fd(0);
