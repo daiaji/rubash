@@ -328,24 +328,14 @@ fn glob_pattern_p_component(pattern: &str) -> bool {
     false
 }
 
-/// Split at the LAST unquoted `/` (glob.c:1137-1147 strrchr/glob_dirscan): a
-/// backslash- or CTLESC-quoted slash is data, not a separator. The directory
-/// part keeps its trailing slash.
+/// Split at the LAST `/` (glob.c:1136 `strrchr (pathname, '/')`): the split
+/// is quoting-blind — a `\/` or CTLESC-quoted slash still separates the
+/// directory part from the filename (`a\/b*` globs directory `a` for `b*`).
+/// glob_dirscan additionally skips extglob `x(...)` spans when extended_glob
+/// is set; that nuance is handled by the extglob paths, not here. The
+/// directory part keeps its trailing slash.
 fn split_last_unquoted_slash(pattern: &str) -> (&str, &str) {
-    let mut last: Option<usize> = None;
-    let mut escaped = false;
-    for (offset, ch) in pattern.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' | CTLESC => escaped = true,
-            '/' => last = Some(offset),
-            _ => {}
-        }
-    }
-    match last {
+    match pattern.rfind('/') {
         Some(offset) => {
             let slash_end = offset + '/'.len_utf8();
             (&pattern[..slash_end], &pattern[slash_end..])
@@ -1235,12 +1225,14 @@ fn sdot_or_dotdot_at(name: &[char], n: usize) -> bool {
 }
 
 /// True when the pattern begins with a literal dot as glob.c skipname counts
-/// it: a raw `.` or a backslash-escaped `\.` (glob.c:271-272,287-288). A
-/// CTLESC-quoted dot is deliberately NOT counted, mirroring the C check.
+/// it (glob.c:271-272,287-288): a raw `.` or an escaped `\.`. GNU sees the
+/// escaped form as `\` + `.` because shell_glob_filename re-quotes the word
+/// with quote_string_for_globbing (pathexp.c:447-453), translating the
+/// lexer's CTLESC back to a backslash — so the CTLESC-quoted dot counts too.
 fn pattern_leading_dot(pattern: &[char]) -> bool {
     match pattern.first() {
         Some('.') => true,
-        Some('\\') => pattern.get(1) == Some(&'.'),
+        Some(&c) if c == '\\' || c == CTLESC => pattern.get(1) == Some(&'.'),
         _ => false,
     }
 }

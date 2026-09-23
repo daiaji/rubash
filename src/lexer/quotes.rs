@@ -205,7 +205,22 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                     // Keep a literal backslash distinct from the protected
                     // double-quote marker used by expansion internals.
                     out.push(crate::executor::markers::DATA_BACKSLASH);
-                } else if matches!(escaped, '*' | '?' | '[' | '@' | '+' | '!') {
+                } else if matches!(
+                    escaped,
+                    '*' | '?' | '[' | ']' | '@' | '+' | '!' | '(' | ')' | '|' | '/' | '-'
+                        | '^' | '.' | '=' | ':'
+                ) {
+                    // GNU parse.y:5694-5706 got_escaped_character marks EVERY
+                    // backslash-quoted char with CTLESC; the glob layer relies
+                    // on it to tell quoted pattern-significant chars from
+                    // syntax: `\/` is a legal bracket member while `/` voids
+                    // the expression (pathexp.c:88-100, sm_loop.c:527-534),
+                    // `[\^a]` is a set while `[^a]` is a negation, `[a\-z]`
+                    // is a member list while `[a-z]` is a range, and the
+                    // `[. .]`/`[= =]`/`[: :]` introducers must not fire on a
+                    // quoted `.`/`=`/`:`, and `\|`/`\(`/`\)` are data, not
+                    // extglob separators/group edges. Escaped chars with no
+                    // pattern role stay plain data.
                     out.push(crate::executor::markers::CTLESC);
                     out.push(escaped);
                 } else {
