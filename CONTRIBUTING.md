@@ -17,6 +17,15 @@
 3. 提供复现步骤和预期行为
 4. 包含您的环境和版本信息
 
+### 实现方法论（务必先读）
+
+Rubash 是对 GNU Bash **语义**的从零重写，兼容性以 GNU Bash 5.3.0 的**可观测行为**为准，通过黑盒差分测试验证。贡献代码前请阅读 [`docs/PROVENANCE.md`](docs/PROVENANCE.md)，并遵守四条规范：
+
+1. **从观测行为出发实现**：先对 GNU Bash 5.3.0 跑探针，让 Rubash 对齐观测到的输出；vendored 源码只用于理解语义
+2. **commit 与注释用"行为对齐"语言**：写清对齐了哪条 GNU 行为、用什么探针验证（如 `fix(jobs): wait interrupted by trapped signal, status 128+sig (jobs.tests jobs9.sub; byte-verified vs 5.3.0)`），不要用"移植自 X.c:NNN"作为变更的主描述
+3. **保持表达独立**：新代码遵循 Rust 惯用法和 Rubash 现有模块结构，不镜像 GNU C 的控制流与布局
+4. **GPL 物料不进 MIT 路径**：GNU 树的测试数据/夹具/文档只活在 `third_party/bash` 子模块内；Rubash 侧夹具只记录参考 shell 的**观测输出**
+
 ### 提交代码
 
 #### 1. Fork 并克隆仓库

@@ -1,6 +1,6 @@
 # Rubash
 
-A GNU Bash-compatible shell implementation written in Rust.
+An embeddable GNU Bash-compatible shell engine, written from scratch in Rust.
 
 [中文](README.zh-CN.md)
 
@@ -10,13 +10,17 @@ A GNU Bash-compatible shell implementation written in Rust.
 
 ## What Is Rubash
 
-Rubash is a from-scratch reimplementation of GNU Bash in Rust — lexer, parser, expansion engine, executor, builtins, and all. It targets byte-level compatibility with GNU Bash 5.3.0 and runs on Windows natively.
+Rubash is a from-scratch reimplementation of GNU Bash semantics in Rust, packaged as an **embeddable, headless engine** — lexer, parser, expansion engine, executor, builtins, and all. It targets byte-level compatibility with GNU Bash 5.3.0 and runs on Windows natively.
 
-**Why native matters**: shells billed as "bash on Windows" (Git Bash, MSYS2) ship a ported bash that rides on a POSIX emulation layer (`msys-2.0.dll`), with fork emulation and path translation that leak quirks into every script. Rubash has no such layer — one self-contained binary speaking Win32 directly. To our knowledge it is also the most thoroughly verified native Windows bash: compatibility is measured, not claimed, against GNU Bash's own 83-suite test corpus (58 suites byte-identical today, ledger below).
+Rubash itself is not a shell product. It ships with a reference CLI used by the compatibility harness and tooling, while interactive shells are built *on top of* the engine: niubash embeds Rubash for all bash semantics and owns line editing, prompt rendering, and completions itself.
+
+**Measured, not claimed**: compatibility is verified against GNU Bash's own 83-suite upstream test corpus — 58 suites byte-identical today, every remaining diff line individually audited (ledger below).
+
+**Why native matters**: shells billed as "bash on Windows" (Git Bash, MSYS2) ship a ported bash that rides on a POSIX emulation layer (`msys-2.0.dll`), with fork emulation and path translation that leak quirks into every script. Rubash has no such layer — one self-contained binary speaking Win32 directly.
 
 **Paths are first-class, not converted**: the MSYS model *guesses* which arguments look like paths and rewrites them — which is why every AI agent and script has to set `MSYS_NO_PATHCONV=1` to stop `/flags` from becoming `C:/Program Files/Git/flags`. Rubash inverts the model: Windows paths are the native currency. POSIX-style and WSL-style paths are accepted as input and resolved to real Windows paths, so what a native Windows program receives is always a valid Win32 path — no conversion heuristics, no `MSYS_NO_PATHCONV`, no surprises at the process boundary.
 
-**Current status**: 58 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 407 raw lines (down from 3427 on Sep 9). This is the first ledger measured with **all upstream-script replay stubs disabled** (`__RUBASH_NO_UPSTREAM_SCRIPTS` finally crosses the WSL→Win32 boundary via `WSLENV`) and a real `/bin/sh` fixture: `/bin/sh` resolves to a niubash binary mounted on this worktree (`$BASH` → niu), `/bin|/usr/bin/X` resolves through PATH, and per-suite `TMPDIR` is isolated. Every remaining line was audited individually — ~390 are genuine engine diffs (job-control hang at `wait-for-job`, LC_COLLATE glob ordering, fd-redirection and `fc` families), ~15 are environment-bound (binary names, `/etc/passwd`, PWD spelling). Full per-line audit in [`docs/diff-audit-20260922.md`](docs/diff-audit-20260922.md), suite ledger in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
+**Platform status**: Windows is the current focus and the only platform with the full stack today. macOS and Linux adaptation is planned but has not started. The engine's semantic model (in-process subshells, fd-table semantics, process boundaries) is deliberately platform-neutral, so the same 83-suite ledger is designed to travel to other platforms.
 
 ## Compatibility at a Glance
 
@@ -24,87 +28,21 @@ Rubash is a from-scratch reimplementation of GNU Bash in Rust — lexer, parser,
 GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
 (ledger: 2026-09-22 re-run on master 44a56d1c — no upstream-script
 stubs, niu-mounted /bin/sh fixture, per-suite TMPDIR, foreground
-timeout; supersedes the earlier same-day 57/464 ledger that still
-measured canned upstream replay)
+timeout)
 
   PASS (0 diff):   58 suites  █████████████████████░░░░░░░░░  70%
   DIFF (1-50):     23 suites  ████████░░░░░░░░░░░░░░░░░░░░░░  28%
   DIFF (51-250):    2 suites  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   2%
   DIFF (251+):      0 suites  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%
   ────────────────────────────────────────────────────────────────
-  Total diff:      407 raw lines — audited line-by-line
-                   (docs/diff-audit-20260922.md); ~390 genuine
-                   engine diffs, ~15 environment-bound; `jobs` 62
-                   includes a rubash-side 120s timeout kill (real
-                   job-control hang at `wait-for-job`)
+  Total diff:      407 raw lines — audited line-by-line;
+                   ~390 genuine engine diffs, ~15 environment-bound
   Was 3427 on Sep 9 → −88% raw in 13 days
 ```
 
 ### Fully passing suites (zero diff)
 
 `alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `histexp` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `nameref` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `varenv`
-
-
-### Major recent fixes (Sep 2026)
-
-| Area | Before → After | What changed |
-|------|----------------|-------------|
-| **dbg-support** | 635 → 0 | AND-list dual fire, source-scope trap inheritance, `{` regression |
-| **rsh** | 194 → 0 | `set +o restricted` silent lift, full restricted-shell enforcement |
-| **invocation** | 14 → 0 | `BASH_ARGV0`, long options, `--pretty-print`, `-o`/`-O` prologs |
-| **trap** | 3 → ~5 (racy) | ERR line binding, SIGCHLD queue, background child trap isolation; residual diff is SIGCHLD/`wait` timing, nondeterministic |
-| **func** | 58 → 0 | POSIX funcname rules, AST printer, special-builtin precedence |
-| **complete** | 115 → 0 | Multi-operand compspec registration |
-| **history** | 190 → 40 | `history -d start-end` range deletion (GNU 5.3 feature), GNU argument grammar (`too many arguments`/`numeric argument required` rc=2), foreground-timeout harness removed the 173-line truncation artifact |
-| **globstar** | 182 → 4 | Multiplicity fix, command lookup cache, `checkhash` bypass (residual is WinuxCmd `ls` ordering, not rubash) |
-| **array/assoc** | 444+358 → 148+187 | Compound assignment quote grouping, `"$@"`/`$0` expansion, arithmetic subscript side effects (`count++`) |
-| **compound-array quoting** | intl 1194→1192 fails | Escaped `\"`/`\'`/`\\`/`` \` `` preserved through compound RHS; `quote_array_value` double-escape fix; data/syntax quote distinction in unquoted assignment RHS (`EChar=${Array[0x0022]}`) |
-| **signals** | BSD table → Linux table | USR1=10, CHLD=17, RTMIN=34, matching GNU 5.3.0 WSL contract |
-
-### Fixed today (Sep 16, 2026 — PR #111 + local batch landed on master)
-
-| Area | Before → After | What changed |
-|------|----------------|-------------|
-| **CRLF scripts (niubash #106)** | v1.1.2 regression → fixed | `\r\n` is stripped as a line terminator at lexer line-split time (main loop + heredoc bodies, so `<<EOF` delimiters match again); a lone `\r` not followed by `\n` is still ordinary word text, keeping the GNU-fidelity case intact |
-| **`-c` option parsing (niubash #107)** | broken → GNU-conformant | `-c` takes the *first non-option argument* as the command string; `bash -c -l 'script'` works and unblocks AI-agent/invoker tooling; bare `bash -c` keeps GNU's usage error (rc 2) |
-| **`type` output capture (niubash #108)** | leaked → captured | `$(type -t ls)` now returns `file` instead of printing to the process stdout and assigning an empty string |
-| **nameref** | 558 → 226 diff lines (run-83 check) | Indirect expansion, unset propagation and scoping fixes from the local batch |
-| **history** | 323 → 250 diff lines (run-83 check) | Nested same-shell script output ordering and IFS isolation fixes from the local batch |
-| **trap EXIT in `$( )` / `printf` exit path** | debug leftovers stripped | WIP `[DEBUG]` eprintln instrumentation removed before landing |
-
-### What Rubash can already run
-
-- **bashdb** — core debugger loop (list, step, next, where, continue, quit) works under rubash
-- **Complex Bash scripts** — arrays, associative arrays, arithmetic, conditionals, namerefs, command substitution, brace expansion, process substitution, coproc, `eval`, `trap`, `source`
-- **GNU Bash test suite** — 83 upstream test files with automated diff measurement
-
-## Quick Start
-
-### Build from Source
-
-```bash
-git clone https://github.com/unixwin/rubash.git
-cd rubash
-cargo build
-target/debug/rubash --version
-```
-
-### Run a Script
-
-```bash
-target/debug/rubash path/to/script.sh
-target/debug/rubash -c 'echo hello from rubash'
-```
-
-### Run the Compatibility Suite
-
-```bash
-# Full 83-suite measurement (requires WSL with GNU Bash 5.3.0)
-MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh
-
-# Single suite
-MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh array
-```
 
 ## Architecture
 
@@ -123,6 +61,46 @@ src/
 - **Expansion**: Variables, positional parameters, indexed and associative arrays, command substitution, arithmetic expansion, brace expansion, tilde expansion, pathname globbing, `${parameter...}` operators, case/replacement transforms.
 - **Builtins**: `alias`, `cd`, `declare`/`typeset`/`local`, `echo`, `eval`, `exec`, `export`/`readonly`, `getopts`, `hash`, `jobs`, `kill`, `let`, `mapfile`, `printf`, `pushd`/`popd`/`dirs`, `read`, `return`, `set`, `shopt`, `source`, `test`/`[`, `trap`, `type`, `ulimit`, `umask`, `unset`, `wait`, and more.
 
+### Subshells without fork
+
+POSIX `fork()` has no Win32 equivalent. Emulation layers (MSYS2, Cygwin) fake it at the syscall level — expensive, fragile, and the source of their best-known quirks. Rubash reproduces fork's *semantics* instead, at three layers:
+
+1. **In-process subshells.** `( list )` and `$( )` never spawn a process. `ShellState::clone` produces the child's variables, aliases, functions, traps, and history — the memory side of a fork — and the copy is discarded when the subshell ends.
+2. **A real-handle fd table with POSIX `dup` semantics.** Slots hold raw Windows `HANDLE`s, and `DuplicateHandle` duplicates share the same kernel file object — therefore the same file offset. That is exactly POSIX "dup shares the open file description", verified empirically in a POC before landing. `fork_table()` duplicates the whole table handle-by-handle, the way `fork` copies the fd table but not the file objects.
+3. **Real processes only at true process boundaries.** External commands and pipeline members run via `CreateProcess` + `os_pipe`; background jobs and coprocs get their own processes, with job control on Job Objects and SIGCONT via `ResumeThread`.
+
+The result: subshells and command substitutions pay zero process-creation cost, while everything a script can observe — exit codes, fd inheritance, shared offsets, signal dispositions — behaves like GNU Bash.
+
+## Quick Start
+
+### Build from Source
+
+> Full functionality requires Windows today.
+
+```bash
+git clone https://github.com/unixwin/rubash.git
+cd rubash
+cargo build
+target/debug/rubash --version
+```
+
+### Run a Script
+
+```bash
+target/debug/rubash path/to/script.sh
+target/debug/rubash -c 'echo hello from rubash'
+```
+
+### Run the Compatibility Suite
+
+```bash
+# Full 83-suite measurement (requires WSL + GNU Bash 5.3.0)
+MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh
+
+# Single suite
+MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh array
+```
+
 ## Testing
 
 ```bash
@@ -136,9 +114,12 @@ cargo test --test cli_tests bashdb_compat -- --nocapture
 cargo test --test cli_tests source_expands -- --nocapture
 ```
 
+The engine also runs the [bashdb](https://github.com/Trepan-Debuggers/bashdb) core debugger loop (list, step, next, where, continue, quit) end-to-end.
+
 ## Documentation
 
 - [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md) — **single source of truth** for Rubash ↔ GNU Bash compatibility status
+- [`docs/PROVENANCE.md`](docs/PROVENANCE.md) — provenance statement: what Rubash is relative to GNU Bash, and contributor methodology rules
 - [`docs/builtins.md`](docs/builtins.md) — builtin inventory and dispatch model
 - [`docs/bashdb-debugging-rubash.md`](docs/bashdb-debugging-rubash.md) — bashdb fixture setup and smoke test
 - [`docs/bash-upstream-tests.md`](docs/bash-upstream-tests.md) — how to run GNU Bash upstream tests
@@ -150,6 +131,10 @@ cargo test --test cli_tests source_expands -- --nocapture
 - Every failing bashdb command is an opportunity to find and fix a Rubash compatibility gap.
 - Compatibility baseline is GNU Bash 5.3.0 (owner-compiled at `/usr/local/bin/bash`).
 
+## Provenance
+
+Rubash is a **from-scratch rewrite of GNU Bash semantics in Rust** — not a port or translation of the GNU Bash C code. No GNU Bash source is compiled into, linked with, or copied into Rubash's own code. Compatibility is defined against the *observable behavior* of GNU Bash 5.3.0 and verified by black-box differential testing. The vendored GNU Bash source lives in the separate `third_party/bash` submodule under its original GPL-3.0-or-later license and serves only as a semantic reference and test oracle. Full statement and contributor rules in [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
@@ -160,10 +145,10 @@ Issues, compatibility reproductions, focused regression tests, and implementatio
 
 ## Acknowledgements
 
-- GNU Bash team — the original implementation being re-emplemented
+- GNU Bash team — the reference implementation whose observable behavior defines our compatibility target
 - Trepan-Debuggers/bashdb — external debugger and compatibility stress test
 - Rust community — language and tooling
 
 ---
 
-*Last updated: 2026-09-22*
+*Last updated: 2026-09-23*

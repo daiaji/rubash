@@ -1,6 +1,6 @@
 # Rubash
 
-使用 Rust 从零实现的 GNU Bash 兼容 Shell。
+用 Rust 从零实现的可嵌入 GNU Bash 兼容 shell 引擎。
 
 [English](README.md)
 
@@ -10,72 +10,71 @@
 
 ## 什么是 Rubash
 
-Rubash 是用 Rust 从零实现的 GNU Bash —— 词法分析、解析器、展开引擎、执行器、内建命令，全部重写。目标是与 GNU Bash 5.3.0 逐字节兼容，原生运行在 Windows 上。
+Rubash 是用 Rust 对 GNU Bash 语义的从零重实现，以**可嵌入的无头引擎**形态交付——词法分析、解析器、展开引擎、执行器、内建命令，全部重写。目标是与 GNU Bash 5.3.0 逐字节兼容，原生运行在 Windows 上。
 
-**原生的意义**：打着"Windows 上的 bash"旗号的方案（Git Bash、MSYS2）装的是移植版 bash，骑在 POSIX 模拟层（`msys-2.0.dll`）上——fork 模拟、路径翻译的怪癖会渗进每一个脚本。Rubash 没有这层：一个自包含二进制，直接对话 Win32。据我们所知，它也是**验证最充分的 Windows 原生 bash**：兼容性不是宣称出来的，是用 GNU Bash 自己的 83 套件语料实测出来的（当前 58 套件逐字节一致，台账见下）。
+Rubash 本身不是 shell 产品。它自带一个参考 CLI（供兼容性 harness 和工具链使用），而交互式 shell 构建于引擎**之上**：niubash 嵌入 Rubash 承担全部 bash 语义，自己只负责行编辑、prompt 渲染与补全。
+
+**实测而非宣称**：兼容性用 GNU Bash 自己的 83 套上游测试语料验证——当前 58 套件逐字节一致，每一条残余差异行都经过逐行审计（台账见下）。
+
+**原生的意义**：打着"Windows 上的 bash"旗号的方案（Git Bash、MSYS2）装的是移植版 bash，骑在 POSIX 模拟层（`msys-2.0.dll`）上——fork 模拟、路径翻译的怪癖会渗进每一个脚本。Rubash 没有这层：一个自包含二进制，直接对话 Win32。
 
 **路径是一等公民，不是转换对象**：MSYS 的模型是*猜*哪些参数像路径然后改写——这就是为什么每个 AI agent 和脚本都得设置 `MSYS_NO_PATHCONV=1`，防止 `/flag` 被改成 `C:/Program Files/Git/flag`。Rubash 把模型反过来：Windows 路径是原生货币。POSIX 风格和 WSL 风格的路径都接受输入、解析成真实的 Windows 路径，原生 Windows 程序拿到的永远是合法的 Win32 路径——没有转换启发式、不需要 `MSYS_NO_PATHCONV`、进程边界零意外。
 
-**当前状态**：83 个 GNU Bash 上游测试套件中 58 个零差异通过。全部 83 套件总差异 407 原始行（2026-09-22 深夜，`44a56d1c`），13 天内从 3427 行下降 88%。这是**首份无桩引擎级台账**：`__RUBASH_NO_UPSTREAM_SCRIPTS` 经 `WSLENV` 首次真实跨 WSL→Win32 边界（此前全部历史台账均在测量 canned upstream 回放）；`/bin/sh` 解析为挂载本工作树 rubash 的 niubash（`$BASH`→niu），`/bin|/usr/bin/X` 走 PATH basename 回退。407 行已逐行审计：~390 行真语义差（`jobs` 62 含 `wait-for-job` 真挂起被杀、glob/extglob ~60 行 LC_COLLATE 排序族、fd 重定向族 ~50、fc 族 32），~15 行环境绑定（二进制名、`/etc/passwd`、PWD 拼写）。逐行审计见 [`docs/diff-audit-20260922.md`](docs/diff-audit-20260922.md)，套件台账见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
+**平台状态**：当前阶段的中心是 Windows，也是唯一拥有完整技术栈的平台。macOS 与 Linux 适配在计划中，尚未开始。引擎的语义模型（进程内子壳、fd 表语义、进程边界）刻意保持平台中立，设计目标是让同一本 83 套件账本未来可以携带到其他平台。
 
 ## 兼容性一览
 
 ```
 GNU Bash 5.3.0 测试套件 — 83 个文件，true-baseline 实测
-（台账：2026-09-22 深夜，master `44a56d1c`；无 upstream 脚本桩 +
- niu 挂载 /bin/sh 夹具 + 逐套件 TMPDIR 隔离 + 前台进程组超时；
- 逐行审计 docs/diff-audit-20260922.md）
+（台账：2026-09-22 深夜，master 44a56d1c——无 upstream 脚本桩、
+ niu 挂载 /bin/sh 夹具、逐套件 TMPDIR 隔离、前台进程组超时）
 
   零差通过：      58 套件  █████████████████████░░░░░░░░░  70%
-  小差异(1-50)：  23 套件  █████████░░░░░░░░░░░░░░░░░░░░░  28%
+  小差异(1-50)：  23 套件  ████████░░░░░░░░░░░░░░░░░░░░░░  28%
   中差异(51-250)： 2 套件  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   2%
   大差异(251+)：   0 套件  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%
   ────────────────────────────────────────────────────────────────
-  总差异：        407 原始行（stdout 台账口径，逐行审计：
-                 ~390 真语义差 / ~15 环境绑定；`jobs` 62 含 rubash
-                 侧 120s 超时真挂起 wait-for-job）
-  9月9日为 3427 行 → 13 天内 −88%
+  总差异：        407 原始行——已逐行审计；
+                 ~390 行真语义差 / ~15 行环境绑定
+  9 月 9 日为 3427 行 → 13 天内 −88%
 ```
 
 ### 完全通过的套件（零差异）
 
 `alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `histexp` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `nameref` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `varenv`
 
-### 近期重大修复（2026 年 9 月）
+## 架构
 
-| 领域 | 修复前 → 修复后 | 改了什么 |
-|------|----------------|---------|
-| **dbg-support** | 635 → 0 | AND 列表双触发、source-scope trap 继承、`{` 回归 |
-| **rsh** | 194 → 0 | `set +o restricted` 静默解除修复、受限 shell 全链路 |
-| **invocation** | 14 → 0 | `BASH_ARGV0`、长选项表、`--pretty-print`、`-o`/`-O` 启动报错 |
-| **trap** | 3 → ~5（竞态） | ERR 行号绑定、SIGCHLD 排队、后台子进程 trap 隔离；残余差异为 SIGCHLD/`wait` 时序，非确定性 |
-| **func** | 58 → 0 | POSIX funcname 规则、AST printer、special-builtin 优先级 |
-| **complete** | 115 → 0 | 多操作数 compspec 注册 |
-| **history** | 190 → 127 | `history -d start-end` 范围删除（GNU 5.3 特性） |
-| **globstar** | 182 → 101 | 多重性修复、相邻 `**` 折叠、尾斜杠语义 |
-| **array/assoc** | 444+358 → 148+187 | 复合赋值引号分组、`"$@"`/`$0` 展开、算术下标副作用（`count++`） |
-| **信号表** | BSD 表 → Linux 表 | USR1=10、CHLD=17、RTMIN=34，与 GNU 5.3.0 WSL 契约一致 |
+```
+src/
+├── lexer/           词法分析器（引号、转义、heredoc、续行）
+├── parser/          递归下降（简单命令、管道、case、arith-for、[[ ]]）
+├── executor/        命令执行、内建命令、展开、glob、数组、trap
+├── builtins/        40+ 内建命令实现（declare、read、printf、kill、...）
+└── lib.rs           核心类型和错误处理
+```
 
-### 本轮修复（2026-09-16 — PR #111 + 本地批次合入 master）
+- **词法分析器**：Bash 风格引号、转义、注释、变量、命令替换、算术展开、here-doc/here-string token、常见重定向。
+- **解析器**：简单命令、管道、AND/OR 列表、函数、花括号/子 shell 组、`if`、`for`、算术 `for`、`while`、`until`、`case`、`select`、`[[ ... ]]`、`coproc`、`time` 前缀。
+- **执行器**：外部命令、管道、重定向、临时赋值、函数调用、`source`/`.`、`eval`、无 shebang 脚本回退、Windows/Git Bash 路径桥接。
+- **展开系统**：变量、位置参数、索引/关联数组、命令替换、算术展开、花括号展开、tilde 展开、路径名 glob、`${parameter...}` 操作符、大小写/替换变换。
+- **内建命令**：`alias`、`cd`、`declare`/`typeset`/`local`、`echo`、`eval`、`exec`、`export`/`readonly`、`getopts`、`hash`、`jobs`、`kill`、`let`、`mapfile`、`printf`、`pushd`/`popd`/`dirs`、`read`、`return`、`set`、`shopt`、`source`、`test`/`[`、`trap`、`type`、`ulimit`、`umask`、`unset`、`wait` 等。
 
-| 领域 | 修复前 → 修复后 | 改了什么 |
-|------|----------------|---------|
-| **CRLF 脚本（niubash #106）** | v1.1.2 回归 → 已修 | 词法器行切分时把 `\r\n` 作为整体行终止符剥掉（主循环 + heredoc body，`<<EOF` 分隔符恢复匹配）；孤立 `\r`（后不跟 `\n`）仍保留为词文本，GNU 保真场景不丢 |
-| **`-c` 选项解析（niubash #107）** | 损坏 → GNU 一致 | `-c` 取「第一个非选项参数」作为命令串；`bash -c -l 'script'` 可用，AI agent/调用方不再被挡；裸 `bash -c` 保持 GNU 用法报错（rc 2） |
-| **`type` 输出捕获（niubash #108）** | 泄漏 → 捕获 | `$(type -t ls)` 现在正确返回 `file`，不再打到进程 stdout 并赋空串 |
-| **nameref** | 558 → 226 diff 行（run-83 check） | 间接展开、unset 传播、作用域修复（本地批次） |
-| **history** | 323 → 250 diff 行（run-83 check） | 同 shell 嵌套脚本输出顺序、IFS 隔离修复（本地批次） |
-| **`$( )`/`printf` 退出路径的 trap** | 调试残留清除 | 合入前剥掉 WIP 遗留的 `[DEBUG]` eprintln 插桩 |
+### 无 fork 的子壳语义
 
-### Rubash 已经能跑什么
+POSIX `fork()` 没有 Win32 等价物。仿真层（MSYS2、Cygwin）在系统调用层面硬造它——昂贵、脆弱，也正是它们最出名怪癖的来源。Rubash 改为在**语义**层面复刻 fork，分三层：
 
-- **bashdb** — 核心调试闭环（list、step、next、where、continue、quit）在 rubash 下工作
-- **复杂 Bash 脚本** — 数组、关联数组、算术、条件、nameref、命令替换、花括号展开、进程替换、coproc、`eval`、`trap`、`source`
-- **GNU Bash 测试套件** — 83 个上游测试文件，自动化 diff 测量
+1. **进程内子壳**。`( list )` 和 `$( )` 从不创建进程。`ShellState::clone` 产出子壳的变量、别名、函数、trap 和历史——即 fork 的内存侧语义——子壳结束时副本直接丢弃。
+2. **带 POSIX `dup` 语义的真实句柄 fd 表**。槽位持有原生 Windows `HANDLE`，而 `DuplicateHandle` 复制的句柄共享同一内核文件对象——因此共享同一文件偏移。这正是 POSIX "dup 共享 open file description" 的语义，落地前在 POC 中实证过。`fork_table()` 逐句柄复制整表，正如 `fork` 复制 fd 表而不复制文件对象。
+3. **真实进程只出现在真实进程边界**。外部命令与管道成员走 `CreateProcess` + `os_pipe`；后台作业与 coproc 拥有独立进程，作业控制基于 Job Objects，SIGCONT 通过 `ResumeThread` 投递。
+
+结果：子壳与命令替换的创建成本为零，而脚本可观测的一切——退出码、fd 继承、共享偏移、信号处置——都与 GNU Bash 一致。
 
 ## 快速开始
 
 ### 从源码构建
+
+> 完整功能当前需要 Windows。
 
 ```bash
 git clone https://github.com/unixwin/rubash.git
@@ -101,23 +100,6 @@ MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh
 MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh array
 ```
 
-## 架构
-
-```
-src/
-├── lexer/           词法分析器（引号、转义、heredoc、续行）
-├── parser/          递归下降（简单命令、管道、case、arith-for、[[ ]]）
-├── executor/        命令执行、内建命令、展开、glob、数组、trap
-├── builtins/        40+ 内建命令实现（declare、read、printf、kill、...）
-└── lib.rs           核心类型和错误处理
-```
-
-- **词法分析器**：Bash 风格引号、转义、注释、变量、命令替换、算术展开、here-doc/here-string token、常见重定向。
-- **解析器**：简单命令、管道、AND/OR 列表、函数、花括号/子 shell 组、`if`、`for`、算术 `for`、`while`、`until`、`case`、`select`、`[[ ... ]]`、`coproc`、`time` 前缀。
-- **执行器**：外部命令、管道、重定向、临时赋值、函数调用、`source`/`.`、`eval`、无 shebang 脚本回退、Windows/Git Bash 路径桥接。
-- **展开系统**：变量、位置参数、索引/关联数组、命令替换、算术展开、花括号展开、tilde 展开、路径名 glob、`${parameter...}` 操作符、大小写/替换变换。
-- **内建命令**：`alias`、`cd`、`declare`/`typeset`/`local`、`echo`、`eval`、`exec`、`export`/`readonly`、`getopts`、`hash`、`jobs`、`kill`、`let`、`mapfile`、`printf`、`pushd`/`popd`/`dirs`、`read`、`return`、`set`、`shopt`、`source`、`test`/`[`、`trap`、`type`、`ulimit`、`umask`、`unset`、`wait` 等。
-
 ## 测试
 
 ```bash
@@ -131,9 +113,12 @@ cargo test --test cli_tests bashdb_compat -- --nocapture
 cargo test --test cli_tests source_expands -- --nocapture
 ```
 
+引擎还可以端到端运行 [bashdb](https://github.com/Trepan-Debuggers/bashdb) 核心调试闭环（list、step、next、where、continue、quit）。
+
 ## 文档
 
 - [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md) — **唯一权威来源**，Rubash ↔ GNU Bash 兼容性状态
+- [`docs/PROVENANCE.md`](docs/PROVENANCE.md) — 来源声明：Rubash 与 GNU Bash 源码的关系，以及贡献者方法论规范
 - [`docs/builtins.md`](docs/builtins.md) — 内建命令清单和分发模型
 - [`docs/bashdb-debugging-rubash.md`](docs/bashdb-debugging-rubash.md) — bashdb fixture 设置和 smoke test
 - [`docs/bash-upstream-tests.md`](docs/bash-upstream-tests.md) — 如何运行 GNU Bash 上游测试
@@ -145,6 +130,10 @@ cargo test --test cli_tests source_expands -- --nocapture
 - 每个失败的 bashdb 命令都是发现和修复 Rubash 兼容性缺口的机会。
 - 兼容性基线为 GNU Bash 5.3.0（业主编译于 `/usr/local/bin/bash`）。
 
+## 来源与实现方式
+
+Rubash 是对 GNU Bash 语义的 **Rust 从零重写（rewrite）**——不是对 GNU Bash C 代码的移植或翻译。GNU Bash 的任何源码都没有被编译进、链接进或复制进 Rubash 自身代码。兼容性以 GNU Bash 5.3.0 的**可观测行为**为定义，并通过黑盒差分测试验证。vendored 的 GNU Bash 源码位于独立的 `third_party/bash` 子模块，保持其原始 GPL-3.0-or-later 许可证，仅作为语义参考与测试 oracle 使用。完整声明与贡献者规范见 [`docs/PROVENANCE.md`](docs/PROVENANCE.md)。
+
 ## 许可证
 
 MIT — 详见 [`LICENSE`](LICENSE)。
@@ -155,10 +144,10 @@ MIT — 详见 [`LICENSE`](LICENSE)。
 
 ## 致谢
 
-- GNU Bash 团队 — 被重新实现的原始实现
+- GNU Bash 团队 — 其可观测行为定义了我们兼容性目标的参考实现
 - Trepan-Debuggers/bashdb — 外部调试器和兼容性压力测试
 - Rust 社区 — 语言和工具链
 
 ---
 
-*最后更新：2026-09-11*
+*最后更新：2026-09-23*

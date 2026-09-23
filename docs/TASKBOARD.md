@@ -4,7 +4,7 @@
 > 状态：DONE ✅ / IN-PROGRESS 🔵 / QUEUED ⏳ / BLOCKED ⛔
 > 纪律：每任务完成必须带回归测试；禁止新增哨兵字节；PASS 只认 WSL GNU 5.3.0
 > script-file 口径；完成后 master 复跑受影响基线切片。
-> 最后更新：2026-09-22 16:45
+> 最后更新：2026-09-23（新增 Q11 /proc 最小仿真）
 
 ## ✅ 已完成（2026-09-20 ~ 09-22 主冲刺）
 
@@ -47,6 +47,8 @@
 | Q8 | 差分模糊测试放量（60 → 1000+ case）| 等原型验收后 | 分歧清单产出 |
 | Q9 | pty 端到端测试（niu 侧 reedline/PS1）| 排队 | 交互探针集 |
 | Q10 | 性能专项（#71 冷启动/-c 固定开销）| 兼容性达标后 | 基准对比 |
+| Q11 | **/proc 最小仿真**（P1 引擎内合成：fd 别名 + open 咽喉；P2 参数经纪人物化，覆盖 bat 等第三方；计划见 docs/proc-vfs-plan.md）| P1 可立即（与 Q1/Q2 同域防冲突）；P2 依赖 P1 | P1: 字段格式单测 + read/mapfile/external_cat cli tests；P2: 外部 exe 以 /proc 参数读到内容（bat 探针）|
+| Q12 | **Linux 交叉编译修复 + CI 跨 target 门禁**（`cargo check --target x86_64-unknown-linux-gnu` 现报 80 错：`crate::fd` 为 windows 门内模块、11 文件 67 处无条件引用；unix fallback 使 fd 层 consumers 编译通过或同步 gated；CI ubuntu lib job 已连红）| 可立即，**优先**（CI 红）| 跨 target check 零错误；CI 恢复绿；CI 增加 linux/darwin check 门禁 |
 
 ## ⛔ 阻塞/等待
 

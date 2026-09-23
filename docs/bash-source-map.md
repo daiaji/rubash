@@ -1,5 +1,8 @@
 > **ARCHIVED** — This document is historical. Current compatibility status is in
 > [`COMPATIBILITY-STATUS.md`](COMPATIBILITY-STATUS.md). Last current: 2026-08-14.
+> For the authoritative statement of Rubash's relationship to the GNU Bash
+> source (rewrite of semantics, not a code port), read
+> [`PROVENANCE.md`](PROVENANCE.md) first.
 
 # Bash Source Map
 
@@ -7,7 +10,9 @@
 
 The canonical migration map is `docs/semantic-ownership.tsv`. It records
 semantic ownership rather than pretending that one GNU C file has one Rust
-translation. Its columns are:
+translation — each entry maps an *observable behavior contract* to its Rust
+owner, established and verified by black-box differential testing against
+GNU Bash 5.3.0 (see [`PROVENANCE.md`](PROVENANCE.md)). Its columns are:
 
 | Column | Meaning |
 |---|---|
