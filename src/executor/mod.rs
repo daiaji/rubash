@@ -667,6 +667,14 @@ pub struct Executor {
     /// last executed top-level command carried `!`; the drivers consult it
     /// before breaking (set-e1.sub `! true` under `set -o posix`).
     pub(crate) last_command_inverted: Cell<bool>,
+    /// The group's execute_ast ended by unwinding (`exit`, errexit, POSIX
+    /// special-builtin failure, fatal expansion — GNU's
+    /// jump_to_top_level(EXITPROG/ERREXIT/FORCE_EOF)). run_source converts
+    /// the ExecuteError into a bare status; this flag lets the grouped
+    /// drivers stop reading instead of treating it as an ordinary nonzero
+    /// command status (builtins source5.sub: `. missing` under `set -o
+    /// posix` exits the shell even without `set -e`).
+    pub(crate) exit_jump_pending: Cell<bool>,
     /// GNU execute_cmd.c:4887-4888 sets `special_builtin_failed = 1` when a
     /// POSIX special builtin returns an error status (> EX_SHERRBASE = 256).
     /// After the command (execute_cmd.c:1004-1017), if `posixly_correct &&

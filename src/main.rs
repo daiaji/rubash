@@ -984,6 +984,7 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
         let parse_error = executor.take_parse_error();
         pending.clear();
         if parse_error
+            || executor.take_exit_jump_pending()
             || (status != 0
                 && stdin_script_errexit_enabled(executor)
                 // execute_cmd.c:652-656: `! CMD` status is errexit-exempt.
@@ -1004,6 +1005,7 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
         );
         let parse_error = executor.take_parse_error();
         if parse_error
+            || executor.take_exit_jump_pending()
             || (status != 0
                 && stdin_script_errexit_enabled(executor)
                 && !executor.last_command_inverted())
@@ -1132,6 +1134,7 @@ fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 let parse_error = executor.take_parse_error();
                 pending.clear();
                 if parse_error
+                    || executor.take_exit_jump_pending()
                     || (status != 0
                         && stdin_script_errexit_enabled(executor)
                         && !executor.last_command_inverted())

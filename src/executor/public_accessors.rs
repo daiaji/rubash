@@ -72,6 +72,14 @@ impl Executor {
         self.last_command_inverted.get()
     }
 
+    /// GNU jump_to_top_level(EXITPROG/ERREXIT/FORCE_EOF): the group's
+    /// execute_ast ended by unwinding rather than by an ordinary command
+    /// status — the grouped drivers must stop reading. Take-style: each
+    /// check clears the flag.
+    pub fn take_exit_jump_pending(&mut self) -> bool {
+        self.exit_jump_pending.replace(false)
+    }
+
     pub fn shell_state(&self) -> &crate::shell::ShellState {
         &self.shell_state
     }

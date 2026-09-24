@@ -183,7 +183,11 @@ pub fn run_script_with_history_in(
         }
         let status = run_history_group(executor, &session, &group, start_line, redirect_cmd);
         let parse_error = executor.take_parse_error();
+        // A group that ended by unwinding (exit builtin, errexit, POSIX
+        // special-builtin failure) stops the reader unconditionally — GNU's
+        // jump_to_top_level cannot be resumed at the next command.
         if parse_error
+            || executor.take_exit_jump_pending()
             || (status != 0
                 && stdin_script_errexit_enabled(executor)
                 // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN
@@ -955,9 +959,21 @@ pub fn run_source_with_line_offset(
 
     match executor.execute_ast(&ast) {
         Ok(()) => executor.last_exit_code(),
-        Err(ExecuteError::ExitCode(code)) => code,
+        // ExitCode/FatalFunctionError reached the list top: GNU unwound via
+        // jump_to_top_level (exit, errexit, POSIX special-builtin failure).
+        // The grouped drivers must stop reading — record it before the
+        // status conversion loses the distinction.
+        Err(ExecuteError::ExitCode(code)) => {
+            executor.exit_jump_pending.set(true);
+            code
+        }
+        Err(ExecuteError::FatalFunctionError(code)) => {
+            executor.exit_jump_pending.set(true);
+            code
+        }
+        // ExpansionFailure is GNU's DISCARD: the command list aborted but
+        // the reader continues with the next complete command.
         Err(ExecuteError::ExpansionFailure(code)) => code,
-        Err(ExecuteError::FatalFunctionError(code)) => code,
         Err(e) => {
             if interactive {
                 eprintln!("Error: {}", e);
