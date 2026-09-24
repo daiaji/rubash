@@ -358,7 +358,7 @@ impl Executor {
             self.shell_state.env_vars.remove(FUNCTION_STDIN);
             self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
             self.shell_state.env_vars.remove(INHERIT_PROCESS_STDIN);
-        } else if let (Some(input), _) = self.function_call_stdin(cmd)? {
+        } else if let (Some(input), _, _) = self.function_call_stdin(cmd)? {
             self.shell_state
                 .env_vars
                 .insert(FUNCTION_STDIN.to_string(), input);

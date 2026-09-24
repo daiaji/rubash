@@ -63,6 +63,109 @@ impl Executor {
         }
     }
 
+    /// GNU test.c: `-t fd` answers isatty(fd) — whether the descriptor's
+    /// current target is a terminal. The builtin only receives env_vars,
+    /// so mirror the fd table plus the command's own (not yet bound)
+    /// redirects into __RUBASH_FD_TERMINAL_<fd> right before it runs.
+    /// Rewritten fresh each call so a stale mark can never outlive the
+    /// binding it described.
+    pub(in crate::executor) fn sync_fd_terminal_marks(&mut self, cmd: Option<&CommandNode>) {
+        self.shell_state
+            .env_vars
+            .retain(|key, _| !key.starts_with(FD_TERMINAL_PREFIX));
+        let mut marks: BTreeMap<u32, bool> = BTreeMap::new();
+        for (fd, entry) in &self.fd_table.entries {
+            if entry.closed {
+                continue;
+            }
+            let read_tty = match &entry.read {
+                Some(FdReadEndpoint::File(file)) => crate::fd::is_console_handle(file.handle),
+                Some(FdReadEndpoint::InheritedProcessStdin) => {
+                    crate::fd::is_console_handle(crate::fd::process_std_handle(0))
+                }
+                _ => false,
+            };
+            let write_tty = match &entry.write {
+                Some(FdWriteEndpoint::File(file)) => crate::fd::is_console_handle(file.handle),
+                Some(FdWriteEndpoint::Stdout) => {
+                    crate::fd::is_console_handle(crate::fd::process_std_handle(1))
+                }
+                Some(FdWriteEndpoint::Stderr) => {
+                    crate::fd::is_console_handle(crate::fd::process_std_handle(2))
+                }
+                _ => false,
+            };
+            marks.insert(*fd, read_tty || write_tty);
+        }
+        if let Some(cmd) = cmd {
+            // do_redirections would leave the dup'd target live while the
+            // builtin runs; the virtual-stdin model never bound it, so
+            // judge the redirect's effective endpoint directly.
+            if let Some(redirect) = &cmd.redirect_in {
+                let fd = redirect.fd.unwrap_or(0);
+                let target = self.expand_redirect_target(redirect);
+                if is_closed_redirect_target(&target) {
+                    marks.insert(fd, false);
+                } else if let Some(tty) = self.redirect_target_is_terminal(&target) {
+                    marks.insert(fd, tty);
+                }
+            }
+            for redirect in [
+                &cmd.redirect_out,
+                &cmd.append,
+                &cmd.redirect_err,
+                &cmd.redirect_err_append,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let fd = redirect.fd.unwrap_or(1);
+                let target = self.expand_redirect_target(redirect);
+                if let Some(tty) = self.redirect_target_is_terminal(&target) {
+                    marks.insert(fd, tty);
+                }
+            }
+        }
+        for (fd, tty) in marks {
+            self.shell_state
+                .env_vars
+                .insert(fd_terminal_key(fd), if tty { "1" } else { "0" }.to_string());
+        }
+    }
+
+    /// isatty() verdict for an expanded redirect target: `&N` and the
+    /// /dev/fd/N aliases consult fd N's bound endpoint; a path is probed
+    /// read-only (no create/truncate side effect) and judged by
+    /// GetConsoleMode — true for CON, false for NUL and disk files.
+    fn redirect_target_is_terminal(&self, target: &str) -> Option<bool> {
+        if let Some(source_fd) = redirect_target_fd(target) {
+            return Some(match self.fd_table.read_endpoint(source_fd) {
+                Some(FdReadEndpoint::File(file)) => crate::fd::is_console_handle(file.handle),
+                Some(FdReadEndpoint::InheritedProcessStdin) => {
+                    crate::fd::is_console_handle(crate::fd::process_std_handle(0))
+                }
+                Some(_) => false,
+                None => match self.fd_table.output_endpoint(source_fd) {
+                    Some(FdWriteEndpoint::File(file)) => {
+                        crate::fd::is_console_handle(file.handle)
+                    }
+                    Some(FdWriteEndpoint::Stdout) => {
+                        crate::fd::is_console_handle(crate::fd::process_std_handle(1))
+                    }
+                    Some(FdWriteEndpoint::Stderr) => {
+                        crate::fd::is_console_handle(crate::fd::process_std_handle(2))
+                    }
+                    _ => false,
+                },
+            });
+        }
+        let path = shell_path_to_windows(target, &self.shell_state.env_vars);
+        use std::os::windows::io::AsRawHandle;
+        File::open(&path)
+            .ok()
+            .map(|file| crate::fd::is_console_handle(file.as_raw_handle() as crate::fd::HANDLE))
+    }
+
     pub(in crate::executor) fn create_redirect_output(
         &self,
         target: &str,
@@ -974,6 +1077,20 @@ impl Executor {
                     .read(true)
                     .write(true)
                     .open(&path);
+            }
+            // GNU redir.c dup2's the descriptor — a character device has
+            // no EOF, so slurping blocks forever on the console
+            // (test.tests `t -t 0 < /dev/tty` hung via
+            // function_call_stdin). Decline the text channel; the caller
+            // binds the live fd for the command's duration instead.
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsRawHandle;
+                if let Ok(file) = File::open(&path) {
+                    if crate::fd::is_char_device_handle(file.as_raw_handle() as _) {
+                        return None;
+                    }
+                }
             }
             return fs::read_to_string(path).ok();
         }
