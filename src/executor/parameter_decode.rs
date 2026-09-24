@@ -512,8 +512,30 @@ pub(in crate::executor) fn mask_quoted_pattern_spans(
             while j < chars.len() {
                 let inner = chars[j];
                 if inner == '\\' && j + 1 < chars.len() {
-                    content.push(inner);
-                    content.push(chars[j + 1]);
+                    let next = chars[j + 1];
+                    // Inside `"..."`, `\` quotes only `$`, `` ` ``, `"`,
+                    // `\`, and newline (GNU subst.c
+                    // string_extract_double_quoted); every other `\X` is
+                    // literal backslash + X. Feed the expander an escaped
+                    // form for each literal char so `\'` stays `\'` and
+                    // `\a` stays `\a` instead of collapsing to `a`.
+                    match next {
+                        '$' | '`' | '"' | '\\' => {
+                            content.push(inner);
+                            content.push(next);
+                        }
+                        '\'' => {
+                            content.push('\\');
+                            content.push('\\');
+                            content.push('\\');
+                            content.push(next);
+                        }
+                        other => {
+                            content.push('\\');
+                            content.push('\\');
+                            content.push(other);
+                        }
+                    }
                     j += 2;
                     continue;
                 }
@@ -564,6 +586,17 @@ pub(in crate::executor) fn mask_quoted_pattern_spans(
                     closed = true;
                     j += 1;
                     break;
+                }
+                if inner == '\'' {
+                    // Inside `"..."` a `'` is literal data (GNU
+                    // string_extract_double_quoted keeps it verbatim); a
+                    // bare `'` handed to the embedded expander would be
+                    // eaten as an unclosed quote opener, so feed it the
+                    // escaped form (`${t//"'"/X}` in quote1.sub).
+                    content.push('\\');
+                    content.push(inner);
+                    j += 1;
+                    continue;
                 }
                 content.push(inner);
                 j += 1;
