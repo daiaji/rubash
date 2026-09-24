@@ -886,6 +886,45 @@ impl Executor {
                             } else {
                                 output.push_str(&value);
                             }
+                        } else {
+                            // GNU subst.c: `$[` is unambiguous arithmetic
+                            // (no `$(` comsub fallback like `$((`). An eval
+                            // error is a word-expansion failure — expr.c
+                            // evalerror DISCARDs the command, so the echo
+                            // never runs (errors.tests line 286).
+                            if self
+                                .shell_state
+                                .arithmetic_last_error_category
+                                .take()
+                                .is_some()
+                            {
+                                self.shell_state.arithmetic_fatal_error.set(true);
+                            }
+                            if !self
+                                .shell_state
+                                .arithmetic_expansion_error
+                                .replace(true)
+                            {
+                                // GNU evalexp reports against the
+                                // post-expansion string (expand_arith_string
+                                // ran first).
+                                let eval_input =
+                                    self.arithmetic_last_eval_input.borrow().clone();
+                                let display = if eval_input.is_empty() {
+                                    expression.as_str()
+                                } else {
+                                    eval_input.as_str()
+                                };
+                                if let Some(message) =
+                                    crate::executor::arithmetic::arithmetic_error_message(
+                                        display,
+                                        true,
+                                        &self.shell_state.env_vars,
+                                    )
+                                {
+                                    eprintln!("{}{}", self.diagnostic_prefix(), message);
+                                }
+                            }
                         }
                     } else {
                         output.push_str("$[");
