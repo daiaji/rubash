@@ -344,11 +344,16 @@ impl Executor {
         // Suites write $TMPDIR into generated scripts unquoted
         // (posix2.tests conftest2: `$TMPDIR/conftest2 "$@"`); an inherited
         // Windows backslash path is escape syntax to the shell reader and
-        // corrupts to `D:repo...`. Windows filesystem APIs accept forward
-        // slashes, so normalize the inherited value to the shell-safe form.
-        if let Some(tmpdir) = env_vars.get_mut("TMPDIR") {
-            if tmpdir.contains('\\') {
-                *tmpdir = tmpdir.replace('\\', "/");
+        // corrupts to `D:repo...`. $HOME has the same problem in pattern
+        // position (exp.tests: `${x#$HOME}` — `\U`/`\A` become pattern
+        // escapes so the prefix never strips). Windows filesystem APIs
+        // accept forward slashes, so normalize inherited values to the
+        // shell-safe form.
+        for name in ["TMPDIR", "HOME"] {
+            if let Some(value) = env_vars.get_mut(name) {
+                if value.contains('\\') {
+                    *value = value.replace('\\', "/");
+                }
             }
         }
         env_vars
