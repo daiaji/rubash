@@ -19,6 +19,12 @@ impl<'a> Lexer<'a> {
         let mut word_boundary = true;
         let mut current_word_boundary = true;
         let mut parameter_depth = 0usize;
+        // GNU read_token (parse.y:3630-3643): `#` introduces a comment only
+        // at a token boundary — after whitespace, a separator (`;&|()<>`),
+        // or at the start. `word.is_empty()` alone is wrong: `$`, quotes and
+        // other non-alphanumeric word characters never reach `word`, so
+        // `$(echo $#)` and `$(echo 'a'#b)` would misread `#` as a comment.
+        let mut token_boundary = true;
         while let Some(c) = self.advance() {
             if c == '\\' {
                 // GNU read_token_word: a backslash-quoted character is word
@@ -31,20 +37,17 @@ impl<'a> Lexer<'a> {
                         word.push('\u{1}');
                     }
                 }
+                token_boundary = false;
                 continue;
             }
-            // GNU read_token: `#` at a word start begins a comment through
-            // end of line — `word` empty means no word characters precede
-            // it. `word_boundary` is the narrower reserved-word flag and
-            // misses `#` after a completed word (`$(a # )`);
-            // `parameter_depth` keeps `${#x}` out of the comment rule.
-            if c == '#' && word.is_empty() && parameter_depth == 0 {
+            if c == '#' && token_boundary && parameter_depth == 0 {
                 while self.peek().is_some_and(|ch| ch != '\n') {
                     self.advance();
                 }
                 word.clear();
                 word_boundary = true;
                 current_word_boundary = true;
+                token_boundary = true;
                 continue;
             }
             if c == '$' && self.peek() == Some('{') {
@@ -66,6 +69,7 @@ impl<'a> Lexer<'a> {
             match c {
                 '`' => {
                     self.skip_backtick();
+                    token_boundary = false;
                     continue;
                 }
                 '(' if case_depth == 0 => depth += 1,
@@ -78,6 +82,7 @@ impl<'a> Lexer<'a> {
                 '$' if self.peek() == Some('\'') => {
                     self.advance();
                     self.skip_ansi_c_single();
+                    token_boundary = false;
                 }
                 '$' if self.peek() == Some('(') => {
                     self.advance();
@@ -87,9 +92,16 @@ impl<'a> Lexer<'a> {
                     } else {
                         self.skip_cmd_subst();
                     }
+                    token_boundary = false;
                 }
-                '\'' => self.skip_single(),
-                '"' => self.skip_double(),
+                '\'' => {
+                    self.skip_single();
+                    token_boundary = false;
+                }
+                '"' => {
+                    self.skip_double();
+                    token_boundary = false;
+                }
                 '<' if self.peek() == Some('<') && self.peek_after(1) == Some('<') => {
                     self.advance();
                     self.advance();
@@ -98,9 +110,15 @@ impl<'a> Lexer<'a> {
                     if self.skip_heredoc_in_command_substitution() {
                         break;
                     }
+                    // A heredoc terminator ends on its own line, so the next
+                    // character begins a fresh token.
+                    token_boundary = true;
+                    continue;
                 }
                 _ => {}
             }
+            token_boundary = c.is_whitespace()
+                || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         }
     }
 
@@ -903,6 +921,12 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     let mut word_boundary = true;
     let mut current_word_boundary = true;
     let mut parameter_depth = 0usize;
+    // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
+    // a token boundary — after whitespace, a separator (`;&|()<>`), or at
+    // the start. `word.is_empty()` alone is wrong: `$`, quotes and other
+    // non-alphanumeric word characters never reach `word`, so `$(echo $#)`
+    // and `$(echo 'a'#b)` would misread `#` as a comment.
+    let mut token_boundary = true;
     while index < chars.len() {
         let ch = chars[index];
         if single {
@@ -928,30 +952,32 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             let (next, _closes) =
                 super::heredoc_scan::skip_heredoc_in_chars_with_closure(chars, index);
             index = next;
+            // A heredoc terminator ends on its own line, so the next
+            // character begins a fresh token.
+            token_boundary = true;
             continue;
         }
-        // Comment inside command substitution: `#` at a word start (GNU
-        // read_token_word) — `word` empty means no word characters precede
-        // it. `word_boundary` is the narrower reserved-word flag and misses
-        // `#` after a completed word (`$(a # )`); `parameter_depth` keeps
-        // `${#x}` text out of the comment rule.
-        if ch == '#' && word.is_empty() && parameter_depth == 0 {
+        // `parameter_depth` keeps `${#x}` text out of the comment rule.
+        if ch == '#' && token_boundary && parameter_depth == 0 {
             while index + 1 < chars.len() && chars[index + 1] != '\n' {
                 index += 1;
             }
             word.clear();
             word_boundary = true;
             current_word_boundary = true;
+            token_boundary = true;
             index += 1;
             continue;
         }
         if ch == '$' && chars.get(index + 1) == Some(&'{') {
             parameter_depth += 1;
+            token_boundary = false;
             index += 2;
             continue;
         }
         if ch == '}' && parameter_depth > 0 {
             parameter_depth -= 1;
+            token_boundary = false;
             index += 1;
             continue;
         }
@@ -980,12 +1006,14 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
                 if chars.get(index + 1).is_some_and(|next| *next != '\n') {
                     word.push('\u{1}');
                 }
+                token_boundary = false;
                 index += 2;
                 continue;
             }
             '`' => {
                 if let Some(end) = skip_backtick_corrected(chars, index) {
                     index = end;
+                    token_boundary = false;
                     continue;
                 }
             }
@@ -1002,16 +1030,19 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
                     }
                     index += 1;
                 }
+                token_boundary = false;
                 continue;
             }
             '$' if chars.get(index + 1) == Some(&'(') => {
                 if chars.get(index + 2) == Some(&'(') {
                     if let Some(end) = skip_arith_substitution_corrected(chars, index + 3) {
                         index = end;
+                        token_boundary = false;
                         continue;
                     }
                 } else if let Some(end) = skip_parenthesized_unit_corrected(chars, index + 1) {
                     index = end;
+                    token_boundary = false;
                     continue;
                 }
             }
@@ -1024,6 +1055,8 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             }
             _ => {}
         }
+        token_boundary = ch.is_whitespace()
+            || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         index += 1;
     }
     None

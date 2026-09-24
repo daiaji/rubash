@@ -56,8 +56,12 @@ pub fn script_uses_history(contents: &str) -> bool {
 /// following lines (GNU reads and executes one complete command at a
 /// time), so scripts mentioning the option take the grouped driver where
 /// each group is lexed against the alias table live at that point.
+/// `set -o posix` likewise flips expand_aliases at runtime (general.c
+/// posix_initialize), so it must take the same driver — otherwise
+/// `$(...)` bodies are extracted before the alias table applies
+/// (comsub5.sub).
 pub fn script_uses_aliases(contents: &str) -> bool {
-    contents.contains("expand_aliases")
+    contents.contains("expand_aliases") || contents.contains("set -o posix")
 }
 
 /// GNU parse.y alias_expand_token + push_string, run over the text of one
@@ -337,6 +341,7 @@ fn run_history_group(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let pre_alias_text = exec_text.clone();
     let exec_text = expand_group_aliases(executor, &exec_text);
     if exec_text.trim().is_empty() {
         return executor.last_exit_code();
@@ -355,6 +360,11 @@ fn run_history_group(
         false,
         start_line.saturating_sub(1),
         redirect_cmd,
+        if exec_text == pre_alias_text {
+            None
+        } else {
+            Some(pre_alias_text.as_str())
+        },
     );
     executor
         .shell_state
@@ -782,7 +792,7 @@ fn unquoted_delimiter_depth(source: &str, open: char) -> usize {
 }
 
 pub fn run_source(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
-    run_source_with_line_offset(executor, input, interactive, 0, None)
+    run_source_with_line_offset(executor, input, interactive, 0, None, None)
 }
 
 pub fn run_source_with_line_offset(
@@ -791,6 +801,7 @@ pub fn run_source_with_line_offset(
     interactive: bool,
     line_offset: usize,
     redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
 ) -> i32 {
     // TODO(shell.c/eval.c/parse.y): GNU Bash parses complete command streams,
     // including pending here-documents, rather than executing script files one
@@ -828,6 +839,7 @@ pub fn run_source_with_line_offset(
                 interactive,
                 line_offset,
                 redirect_cmd,
+                diagnostic_text,
             );
         }
         executor.mark_parse_error();
@@ -869,7 +881,19 @@ pub fn run_source_with_line_offset(
             token.column += line_offset;
         }
     }
-    let mut ast = parse(&tokens);
+    // GNU parse.y: a `)` or case-clause terminator at command position is
+    // `syntax error near unexpected token` (yyerror aborts the input). The
+    // lexer folds multi-line `$(...)` bodies, so a top-level `)` token is
+    // genuinely stray (comsub6.sub `math1)` after alias expansion).
+    let mut ast = crate::parser::parse_with_options(
+        &tokens,
+        crate::parser::ParseLoopOptions {
+            stray_close_is_error: true,
+            source_text: Some(input.to_string()),
+            diagnostic_text: diagnostic_text.map(str::to_string),
+            source_line_offset: line_offset,
+        },
+    );
     if let Some(cmd) = redirect_cmd {
         if let Err(error) = executor.apply_inherited_command_output_redirects(cmd, &mut ast) {
             eprintln!("{error}");

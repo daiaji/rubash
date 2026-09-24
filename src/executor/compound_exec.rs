@@ -2408,6 +2408,39 @@ fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> Stri
             && chars[index] != '"'
             && !(chars[index] == '$' && matches!(chars.get(index + 1), Some('\'' | '"')))
         {
+            // GNU read_token_word: quoting inside a substitution belongs to
+            // the substitution's own input, not to the pattern — `$( echo
+            // "$bar")` must not split the segment at the inner `"`, or the
+            // `$(` looks unclosed and the expansion reports EOF
+            // (comsub-posix6.sub case-pattern substitution).
+            if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                // Returns the index just past the closing `)`.
+                if let Some(close) =
+                    crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+                {
+                    index = close.min(chars.len());
+                    continue;
+                }
+            }
+            if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                if let Some(close) = skip_braced_case_pattern_unit(&chars, index + 1) {
+                    index = close + 1;
+                    continue;
+                }
+            }
+            if chars[index] == '`' {
+                index += 1;
+                while index < chars.len() && chars[index] != '`' {
+                    if chars[index] == '\\' && index + 1 < chars.len() {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                if index < chars.len() {
+                    index += 1;
+                }
+                continue;
+            }
             if chars[index] == '\\' && index + 1 < chars.len() {
                 index += 2;
             } else {
@@ -2422,6 +2455,36 @@ fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> Stri
     }
 
     output
+}
+
+/// Balanced `${...}` skip for the case-pattern segment scanner — braces,
+/// quotes, and escapes inside the expansion are its own (GNU
+/// parse_matched_pair). Returns the index of the closing `}`.
+fn skip_braced_case_pattern_unit(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut single = false;
+    let mut double = false;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' if !single => {
+                index += 2;
+                continue;
+            }
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '{' if !single && !double => depth += 1,
+            '}' if !single && !double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 fn quoted_case_pattern_end(chars: &[char], start: usize, quote: char) -> Option<usize> {

@@ -99,7 +99,9 @@ pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
                 i += 1;
                 continue;
             }
-            comment_start = false;
+            // GNU read_token: shell separators also begin a fresh token,
+            // so `;#x` / `(#x` are comments while `$#` / `a#` are not.
+            comment_start = matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
             if ch == '\'' {
                 stack.push('\'');
                 i += 1;
@@ -117,12 +119,14 @@ pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
             }
             if ch == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
                 stack.push('(');
+                // A fresh substitution body starts at a token boundary:
+                // `$(#c` is a comment, not word text.
+                comment_start = true;
                 i += 2;
                 continue;
             }
             if ch == ')' {
                 stack.pop();
-                comment_start = false;
                 i += 1;
                 continue;
             }
@@ -156,7 +160,7 @@ pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
             i += 1;
             continue;
         }
-        comment_start = false;
+        comment_start = matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         if ch == '\'' {
             stack.push('\'');
             i += 1;
@@ -174,6 +178,9 @@ pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
         }
         if ch == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
             stack.push('(');
+            // A fresh substitution body starts at a token boundary:
+            // `$(#c` is a comment, not word text.
+            comment_start = true;
             i += 2;
             continue;
         }
@@ -253,6 +260,8 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
         }
         if let Some(d) = top {
             if d.escapes && ch == '\\' {
+                // An escaped character is word text everywhere.
+                comment_start = false;
                 i += 2;
                 continue;
             }
@@ -265,6 +274,9 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
                         parent.term_ready = true;
                     }
                 }
+                // `)` is a shell separator: a following `#` starts a
+                // comment (`x=$(a)#c`). Quote/`}` closes stay mid-word.
+                comment_start = d.close == ')';
                 i += 1;
                 continue;
             }
@@ -272,6 +284,21 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
                 // Literal context: nothing else is special inside '...'.
                 i += 1;
                 continue;
+            }
+            // Inside `$(...)` / `( ... )` / `${ cmds; }` (report_open false —
+            // the `$((` inner paren reports open and is arithmetic text
+            // where `#` is the base operator, never a comment) a `#` at a
+            // token boundary comments through end of line, so the `)` in
+            // `$(# c )` cannot close the substitution (comsub-posix).
+            if d.close == ')' || d.funsub {
+                if !(d.close == ')' && d.report_open) && ch == '#' && comment_start {
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                comment_start = ch.is_whitespace()
+                    || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
             }
             if d.funsub {
                 // Track command-terminator state: `${ cmd }' without a
@@ -292,7 +319,9 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
                 }
                 continue;
             }
-            if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '{' | '}') {
+            if ch.is_whitespace()
+                || matches!(ch, ';' | '&' | '|' | '(' | ')' | '{' | '}' | '<' | '>')
+            {
                 comment_start = true;
             } else {
                 comment_start = false;
@@ -353,6 +382,9 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
                             command: false,
                             term_ready: false,
                         });
+                        if funsub {
+                            comment_start = true;
+                        }
                         i += 1;
                     }
                     Some('(') => {
@@ -366,6 +398,9 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
                             command: false,
                             term_ready: false,
                         });
+                        // A fresh substitution body starts at a token
+                        // boundary: `$(#c` is a comment.
+                        comment_start = true;
                         if chars.get(i + 2) == Some(&'(') {
                             // $(( ... )) arithmetic nests a second ')' and is
                             // parsed by parse_matched_pair: start_lineno.
@@ -409,6 +444,7 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
                     command: true,
                     term_ready: false,
                 });
+                comment_start = true;
             }
             '{' if top.is_some_and(|d| d.close == '}' && d.funsub) => {
                 // `{ cmd; }' group inside a function substitution: `}' only
@@ -943,6 +979,12 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
     let mut word_boundary = true;
     let mut current_word_boundary = true;
     let mut parameter_depth = 0usize;
+    // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
+    // a token boundary — after whitespace, a separator (`;&|()<>`), or at
+    // the start. `word.is_empty()` alone is wrong: `$`, quotes and other
+    // non-alphanumeric word characters never reach `word`, so `$(echo $#)`
+    // and `$(echo 'a'#b)` would misread `#` as a comment.
+    let mut token_boundary = true;
     while index < chars.len() {
         let ch = chars[index];
         if single {
@@ -985,31 +1027,32 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
                 return Some(next);
             }
             index = next;
+            // A heredoc terminator ends on its own line, so the next
+            // character begins a fresh token.
+            token_boundary = true;
             continue;
         }
-        // GNU read_token (parse.y:3630-3643): a `#` at a word start begins
-        // a comment through end of line, so the `)` in `# )` cannot close
-        // the substitution (comsub-posix.tests:42). `word` empty means no
-        // word characters precede it — `word_boundary` is the narrower
-        // reserved-word flag and misses `#` after a completed word
-        // (`$(a # )`); `parameter_depth` keeps `${#x}` out of the rule.
-        if ch == '#' && word.is_empty() && parameter_depth == 0 {
+        // `parameter_depth` keeps `${#x}` out of the comment rule.
+        if ch == '#' && token_boundary && parameter_depth == 0 {
             while index + 1 < chars.len() && chars[index + 1] != '\n' {
                 index += 1;
             }
             word.clear();
             word_boundary = true;
             current_word_boundary = true;
+            token_boundary = true;
             index += 1;
             continue;
         }
         if ch == '$' && chars.get(index + 1) == Some(&'{') {
             parameter_depth += 1;
+            token_boundary = false;
             index += 2;
             continue;
         }
         if ch == '}' && parameter_depth > 0 {
             parameter_depth -= 1;
+            token_boundary = false;
             index += 1;
             continue;
         }
@@ -1035,6 +1078,7 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
                 if chars.get(index + 1).is_some_and(|next| *next != '\n') {
                     word.push('\u{1}');
                 }
+                token_boundary = false;
                 index += 2;
                 continue;
             }
@@ -1051,6 +1095,8 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
             }
             _ => {}
         }
+        token_boundary = ch.is_whitespace()
+            || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         index += 1;
     }
     None
@@ -1249,16 +1295,19 @@ fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
                 word_boundary = true;
                 current_word_boundary = true;
             }
-            comment_start = false;
+            // The fast skip failed, so the body is scanned char-by-char
+            // from here — and a substitution body begins at a token
+            // boundary: `$(#c` is a comment.
+            comment_start = true;
             index += 2;
             continue;
         }
-        // GNU read_token_word: `#` at the start of a word begins a comment
-        // through end of line. `word` holds the word characters seen since
-        // the last boundary, so `word.is_empty()` is "at a word start";
-        // `word_boundary` is the narrower reserved-word-position flag and
-        // misses `#` after a completed word (`$(a # )`). `parameter_depth`
-        // keeps `${#x}` parameter text out of the comment rule.
+        // GNU read_token_word (parse.y:3630-3643): `#` at a token boundary
+        // begins a comment through end of line. `comment_start` tracks that
+        // boundary; `word.is_empty()` alone is wrong because `$`, quotes and
+        // other non-alphanumeric word characters never reach `word`
+        // (`$(echo $#)`). `parameter_depth` keeps `${#x}` parameter text
+        // out of the comment rule.
         if depth > 0
             && ch == '#'
             && !single
@@ -1266,7 +1315,7 @@ fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
             && !ansi_single
             && !backtick
             && parameter_depth == 0
-            && word.is_empty()
+            && comment_start
         {
             while index + 1 < chars.len() && chars[index + 1] != '\n' {
                 index += 1;
@@ -1274,6 +1323,7 @@ fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
             word.clear();
             word_boundary = true;
             current_word_boundary = true;
+            comment_start = true;
             index += 1;
             continue;
         }
@@ -1332,8 +1382,12 @@ fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
         } else if depth > 0 && case_depth == 0 && !ansi_single && ch == ')' {
             depth -= 1;
         }
-        if !single && !double && !ansi_single && !backtick && depth == 0 {
-            comment_start = false;
+        if !single && !double && !ansi_single && !backtick {
+            // GNU read_token: a token boundary follows whitespace and the
+            // shell separators; every other live character continues or
+            // begins a word, so a following `#` is mid-word text.
+            comment_start = ch.is_whitespace()
+                || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         }
         index += 1;
     }

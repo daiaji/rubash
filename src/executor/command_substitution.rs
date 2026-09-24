@@ -533,6 +533,13 @@ impl Executor {
         let ast = crate::parser::parse(&tokens);
 
         if ast.commands.iter().any(command_has_parse_error) {
+            // GNU reports the body's syntax error (parse.y yyerror) even
+            // though the enclosing command is what dies — emit the stored
+            // diagnostic instead of silently swallowing it (case-pattern
+            // `$(esac;x)` in comsub-posix6.sub).
+            if let Some(command) = ast.commands.iter().find_map(command_parse_error_node) {
+                self.report_command_parse_error(command);
+            }
             self.last_command_substitution_parse_error.set(true);
             self.last_command_substitution_status.set(Some(2));
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
@@ -783,15 +790,23 @@ impl Executor {
 }
 
 fn command_has_parse_error(command: &CommandNode) -> bool {
-    command.has_assignment("__RUBASH_PARSE_ERROR__")
-        || command
-            .and_or_list
-            .as_ref()
-            .is_some_and(|list| list.commands.iter().any(command_has_parse_error))
-        || command
-            .pipeline_command
-            .as_ref()
-            .is_some_and(|pipeline| pipeline.stages.iter().any(command_has_parse_error))
+    command_parse_error_node(command).is_some()
+}
+
+fn command_parse_error_node(command: &CommandNode) -> Option<&CommandNode> {
+    if command.has_assignment("__RUBASH_PARSE_ERROR__") {
+        return Some(command);
+    }
+    command
+        .and_or_list
+        .as_ref()
+        .and_then(|list| list.commands.iter().find_map(command_parse_error_node))
+        .or_else(|| {
+            command
+                .pipeline_command
+                .as_ref()
+                .and_then(|pipeline| pipeline.stages.iter().find_map(command_parse_error_node))
+        })
 }
 
 /// rubash#117 whitelist admission for the word-level command-substitution
@@ -859,7 +874,10 @@ fn strip_command_substitution_comments(source: &str) -> String {
             comment = true;
             continue;
         }
-        boundary = ch.is_whitespace();
+        // GNU read_token: `#` starts a comment only at a token boundary —
+        // after whitespace or a separator, not mid-word (`$#`, `a#b`).
+        boundary = ch.is_whitespace()
+            || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         output.push(ch);
     }
 

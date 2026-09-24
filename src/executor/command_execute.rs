@@ -195,35 +195,7 @@ impl Executor {
                     }
                 }
             }
-            let message = cmd
-                .get_assignment("__RUBASH_PARSE_ERROR__")
-                .map(String::as_str)
-                .unwrap_or("unexpected token");
-            if message.starts_with("syntax error:")
-                || message.starts_with("arithmetic syntax error:")
-            {
-                eprintln!("{}{}", self.parser_diagnostic_prefix(), message);
-                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                    eprintln!(
-                        "{}syntax error: `{}'",
-                        self.parser_diagnostic_prefix(),
-                        parse_error_source_display(source)
-                    );
-                }
-            } else {
-                let message = bash_style_unexpected_token_message(message);
-                eprintln!(
-                    "{}syntax error near {message}",
-                    self.parser_diagnostic_prefix(),
-                );
-                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                    eprintln!(
-                        "{}`{}'",
-                        self.parser_diagnostic_prefix(),
-                        parse_error_source_display(source)
-                    );
-                }
-            }
+            self.report_command_parse_error(cmd);
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));
         }
@@ -770,7 +742,7 @@ impl Executor {
     }
 }
 
-fn bash_style_unexpected_token_message(message: &str) -> String {
+pub(in crate::executor) fn bash_style_unexpected_token_message(message: &str) -> String {
     if let Some(token) = message
         .strip_prefix("unexpected token `")
         .and_then(|rest| rest.strip_suffix('`'))
@@ -780,7 +752,7 @@ fn bash_style_unexpected_token_message(message: &str) -> String {
     message.to_string()
 }
 
-fn parse_error_source_display(source: &str) -> String {
+pub(in crate::executor) fn parse_error_source_display(source: &str) -> String {
     source
         .trim()
         .replace(";then", "; then")

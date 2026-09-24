@@ -81,10 +81,17 @@ fn dollar_command_substitution(
     let mut word = String::new();
     let mut word_boundary = true;
     let mut current_word_boundary = true;
+    // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
+    // a token boundary — after whitespace, a separator (`;&|()<>`), or at
+    // the start. `word_boundary`/`word.is_empty()` are wrong: `$`, quotes
+    // and other non-alphanumeric word characters never reach `word`, so
+    // `$(echo $#)` and `$(echo a # )` both misjudge `#`.
+    let mut token_boundary = true;
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
             escaped = false;
+            token_boundary = false;
             index += 1;
             continue;
         }
@@ -99,27 +106,31 @@ fn dollar_command_substitution(
         }
         if ch == '\\' && !single {
             escaped = true;
+            token_boundary = false;
             index += 1;
             continue;
         }
         if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
             ansi_single = true;
+            token_boundary = false;
             index += 2;
             continue;
         }
-        if ch == '#' && !single && !double && word_boundary {
+        if ch == '#' && !single && !double && token_boundary {
             while index + 1 < chars.len() && chars[index + 1] != '\n' {
                 index += 1;
             }
             word.clear();
             word_boundary = true;
             current_word_boundary = true;
+            token_boundary = true;
             index += 1;
             continue;
         }
         if ch == '`' && !single {
             if let Some((_, next_index)) = backtick_command_substitution(chars, index) {
                 index = next_index;
+                token_boundary = false;
                 continue;
             }
         }
@@ -137,6 +148,7 @@ fn dollar_command_substitution(
         {
             if let Some((_, next_index)) = dollar_command_substitution(chars, index) {
                 index = next_index;
+                token_boundary = false;
                 continue;
             }
         }
@@ -165,6 +177,9 @@ fn dollar_command_substitution(
                     ));
                 }
                 index = next_index;
+                // A heredoc terminator ends on its own line, so the next
+                // character begins a fresh token.
+                token_boundary = true;
                 continue;
             }
         }
@@ -195,6 +210,13 @@ fn dollar_command_substitution(
                 }
             }
             _ => {}
+        }
+        // Quoted characters are word text handled by the quote state
+        // arms; the boundary only tracks characters the live tokenizer
+        // sees.
+        if !single && !double {
+            token_boundary = ch.is_whitespace()
+                || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         }
         index += 1;
     }

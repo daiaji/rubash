@@ -757,7 +757,7 @@ fn run_command_string_with_init(
     let status = if script_uses_history(command) || script_uses_aliases(command) {
         run_script_with_history(executor, command, None)
     } else {
-        run_source_with_line_offset(executor, command, interactive, line_offset, None)
+        run_source_with_line_offset(executor, command, interactive, line_offset, None, None)
     };
     finish_shell(executor, status, interactive)
 }
@@ -978,6 +978,7 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             false,
             pending_start_line.saturating_sub(1),
             None,
+            None,
         );
         let parse_error = executor.take_parse_error();
         pending.clear();
@@ -992,6 +993,7 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             &pending,
             false,
             pending_start_line.saturating_sub(1),
+            None,
             None,
         );
         let parse_error = executor.take_parse_error();
@@ -1113,6 +1115,7 @@ fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     &pending,
                     true,
                     pending_start_line.saturating_sub(1),
+                    None,
                     None,
                 );
                 let parse_error = executor.take_parse_error();
@@ -1476,6 +1479,7 @@ fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             &pending,
             true,
             pending_start_line.saturating_sub(1),
+            None,
             None,
         );
         let _ = status;

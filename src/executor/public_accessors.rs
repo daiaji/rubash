@@ -22,6 +22,45 @@ impl Executor {
         self.parse_error_occurred = true;
     }
 
+    /// Emit the stored `__RUBASH_PARSE_ERROR__`/`__RUBASH_PARSE_SOURCE__`
+    /// diagnostic for a command node — the same text the parse-error arm in
+    /// execute_command prints. Shared so a command-substitution body that
+    /// parsed to an error node can report GNU's `syntax error near ...`
+    /// lines without executing the broken ast.
+    pub(in crate::executor) fn report_command_parse_error(
+        &self,
+        cmd: &crate::parser::CommandNode,
+    ) {
+        let message = cmd
+            .get_assignment("__RUBASH_PARSE_ERROR__")
+            .map(String::as_str)
+            .unwrap_or("unexpected token");
+        if message.starts_with("syntax error:") || message.starts_with("arithmetic syntax error:")
+        {
+            eprintln!("{}{}", self.parser_diagnostic_prefix(), message);
+            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                eprintln!(
+                    "{}syntax error: `{}'",
+                    self.parser_diagnostic_prefix(),
+                    super::command_execute::parse_error_source_display(source)
+                );
+            }
+        } else {
+            let message = super::command_execute::bash_style_unexpected_token_message(message);
+            eprintln!(
+                "{}syntax error near {message}",
+                self.parser_diagnostic_prefix(),
+            );
+            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                eprintln!(
+                    "{}`{}'",
+                    self.parser_diagnostic_prefix(),
+                    super::command_execute::parse_error_source_display(source)
+                );
+            }
+        }
+    }
+
     pub fn take_parse_error(&mut self) -> bool {
         std::mem::take(&mut self.parse_error_occurred)
     }
