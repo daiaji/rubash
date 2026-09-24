@@ -10,6 +10,43 @@ impl Executor {
         if !self.external_file_builtins_enabled {
             return Ok(false);
         }
+        let name = cmd.words[0].as_str();
+        let emulated = matches!(
+            name,
+            "/bin/pwd" | "/usr/bin/pwd" | "/bin/printf" | "/usr/bin/printf" | "mkdir" | "touch"
+                | "chmod" | "cp" | "rm" | "rmdir" | "cat" | "/bin/cat" | "/usr/bin/cat" | "sed"
+                | "mkfifo" | "tty" | "/bin/tty" | "/usr/bin/tty"
+        );
+        // GNU findcmd.c:365/416 (search_for_command): a plain name resolved
+        // through PATH for execution enters the hash table with
+        // times_found=1. The emulated commands below stand in for that PATH
+        // binary, so record the same resolution — `hash -t`/`hash -l`/
+        // `BASH_CMDS` must see it (builtins9.sub: a stale `hash -p` entry
+        // forgotten under checkhash is re-recorded by the next run).
+        if emulated
+            && !name.contains('/')
+            && !name.contains('\\')
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "hashall")
+            && self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_TEMP_PATH")
+                .map(String::as_str)
+                != Some("1")
+        {
+            if let Some(program) =
+                crate::executor::path::find_user_command(name, &self.shell_state.env_vars)
+            {
+                let display = super::execution_misc::shell_display_path(
+                    &program.to_string_lossy().replace('\\', "/"),
+                );
+                crate::builtins::hash::record_command_resolution(
+                    &mut self.shell_state.env_vars,
+                    name,
+                    &display,
+                );
+            }
+        }
         match cmd.words[0].as_str() {
             "/bin/pwd" | "/usr/bin/pwd" => {
                 let mut pwd_cmd = cmd.clone();
@@ -623,6 +660,12 @@ impl Executor {
             let mut output = Vec::new();
             for word in cat_file_operands(cmd) {
                 let target = self.expand_word(word);
+                // Q11 /proc P1 (docs/proc-vfs-plan.md hook B2): synthetic
+                // files are served before the filesystem.
+                if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
+                    output.extend(bytes);
+                    continue;
+                }
                 match fs::read(shell_path_to_windows(&target, &self.shell_state.env_vars)) {
                     Ok(bytes) => output.extend(bytes),
                     Err(_) => {
@@ -689,6 +732,12 @@ impl Executor {
         let mut output = Vec::new();
         for word in cat_file_operands(cmd) {
             let target = self.expand_word(word);
+            // Q11 /proc P1 (docs/proc-vfs-plan.md hook B2): synthetic files
+            // are served before the filesystem, matching procfs semantics.
+            if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
+                output.extend(bytes);
+                continue;
+            }
             match fs::read(shell_path_to_windows(&target, &self.shell_state.env_vars)) {
                 Ok(bytes) => output.extend(bytes),
                 Err(_) => {

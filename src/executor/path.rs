@@ -311,14 +311,34 @@ pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
         if configured_shell_root(_env_vars).is_some() {
             return "/usr/local/bin:/usr/bin:/bin".to_string();
         }
-        return [
+        let mut dirs = vec![
             PathBuf::from(r"C:\Windows\System32"),
             PathBuf::from(r"C:\Windows"),
-        ]
-        .into_iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join(";");
+        ];
+        // command.def: `command -p` must guarantee a PATH that finds the
+        // standard utilities (confstr _CS_PATH). Windows has no system
+        // POSIX bin directory — the standard utilities live wherever the
+        // host keeps its toolset (Git usr/bin, WinuxCmd links), discovered
+        // from the real PATH as the first directory holding a full set.
+        let path_value = _env_vars
+            .get("PATH")
+            .cloned()
+            .or_else(|| std::env::var("PATH").ok())
+            .unwrap_or_default();
+        for dir in std::env::split_paths(&path_value) {
+            if ["sh.exe", "cat.exe", "rm.exe"]
+                .iter()
+                .all(|name| dir.join(name).is_file())
+            {
+                dirs.push(dir);
+                break;
+            }
+        }
+        return dirs
+            .into_iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(";");
     }
 
     "/usr/local/bin:/usr/bin:/bin".to_string()
