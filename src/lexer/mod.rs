@@ -27,6 +27,7 @@ use continuation::{
 
 pub(crate) use alias_stream::{expand_aliases_in_source, AliasLookup};
 pub(crate) use continuation::has_unclosed_command_substitution;
+pub(crate) use continuation::unclosed_command_substitution_depth;
 pub(crate) use continuation::unclosed_input_close_char;
 use heredoc::heredoc_delimiters;
 use scanner::Lexer;
@@ -597,14 +598,32 @@ pub(crate) fn scan_line_for_comsub_heredoc_headers(line: &str) -> (Vec<ComsubHer
                     index += 1;
                 }
                 let start = index;
+                // GNU read_token_word: quoting inside the delimiter word
+                // makes metacharacters literal — `<< ')'` names `)` as the
+                // delimiter, so a quoted `)` (or `;`, `|`, `&`) is delimiter
+                // text, not the substitution closer (comsub-posix.tests).
+                let mut delimiter_single = false;
+                let mut delimiter_double = false;
                 while index < bytes.len() {
                     let current = line[index..].chars().next().expect("index is a boundary");
-                    if current.is_whitespace() || matches!(current, ';' | '|' | '&' | ')') {
-                        break;
-                    }
-                    if current == '\\' && index + 1 < bytes.len() {
-                        index += 1 + char_len_at(line, index + 1);
-                        continue;
+                    match current {
+                        '\'' if !delimiter_double => delimiter_single = !delimiter_single,
+                        '"' if !delimiter_single => delimiter_double = !delimiter_double,
+                        _ if !delimiter_single
+                            && !delimiter_double
+                            && (current.is_whitespace()
+                                || matches!(current, ';' | '|' | '&' | ')')) =>
+                        {
+                            break;
+                        }
+                        '\\' if !delimiter_single
+                            && !delimiter_double
+                            && index + 1 < bytes.len() =>
+                        {
+                            index += 1 + char_len_at(line, index + 1);
+                            continue;
+                        }
+                        _ => {}
                     }
                     index += current.len_utf8();
                 }

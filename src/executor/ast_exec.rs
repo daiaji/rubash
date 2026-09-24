@@ -167,6 +167,20 @@ impl Executor {
 
         while index < ast.commands.len() {
             let command = &ast.commands[index];
+            // GNU parse.y/eval.c: a syntax error inside a command
+            // substitution is a read-time failure of the enclosing command —
+            // the parser recovered at the `)`, so the command itself still
+            // ran (comsub-posix6.sub `$( esac ...)` prints the `*)` branch's
+            // `ok 2`), but no further commands execute (`echo we should not
+            // see this` is skipped and the shell exits 2). The substitution
+            // already emitted its diagnostic at expansion time; the list
+            // just stops here, including paths the simple-command check in
+            // execute_command never reached (case patterns, compound
+            // commands).
+            if self.last_command_substitution_parse_error.get() {
+                self.mark_parse_error();
+                return Err(ExecuteError::ExitCode(2));
+            }
             // GNU expr.c evalerror -> jump_to_top_level (DISCARD): while an
             // evalerror abort is pending, a nested command list unwinds
             // silently and the reader-level loop discards the rest of the
@@ -1067,6 +1081,12 @@ impl Executor {
             } else {
                 index += 1;
             }
+        }
+        // Same abort as the loop-top check, for a substitution parse error
+        // raised by the final command in the list.
+        if self.last_command_substitution_parse_error.get() {
+            self.mark_parse_error();
+            return Err(ExecuteError::ExitCode(2));
         }
         self.run_pending_signal_traps()?;
         Ok(())

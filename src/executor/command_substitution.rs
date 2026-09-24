@@ -220,7 +220,7 @@ impl Executor {
         // words the real parser would see — an alias body can inject
         // operators or quotes the raw source did not carry.
         let word_source = strip_command_substitution_comments(source);
-        let word_source = self.comsub_body_alias_splice(&word_source);
+        let word_source = self.comsub_body_alias_splice_extracted(&word_source);
 
         // rubash#117 whitelist admission: GNU subst.c:7143
         // command_substitute routes every body through parse_and_execute —
@@ -523,7 +523,7 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let source = &self.comsub_body_alias_splice(source);
+        let source = &self.comsub_body_alias_splice_extracted(source);
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
@@ -596,6 +596,16 @@ impl Executor {
                 );
                 subshell.execute_ast(&ast)
             };
+            // GNU parse.y: a syntax error inside the substitution body is a
+            // read-time failure of the ENCLOSING command — after this command
+            // finishes the reader stops (`$( esac ; ...)` in a case pattern:
+            // the `*)` arm prints, `echo we should not see this` is skipped).
+            // The body ast carried a __RUBASH_PARSE_ERROR__ node past the
+            // early command_has_parse_error screen, so propagate the child's
+            // parse_error latch onto the parent's abort flag here.
+            if subshell.parse_error_occurred {
+                self.last_command_substitution_parse_error.set(true);
+            }
             let mut status = command_substitution_result_status(result, subshell.exit_code);
             // Bash runs EXIT in the command-substitution child, so an
             // EXIT trap installed by the body contributes its output to

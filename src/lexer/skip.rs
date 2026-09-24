@@ -18,12 +18,27 @@ impl<'a> Lexer<'a> {
         let mut word = String::new();
         let mut word_boundary = true;
         let mut current_word_boundary = true;
+        let mut parameter_depth = 0usize;
         while let Some(c) = self.advance() {
             if c == '\\' {
-                self.advance();
+                // GNU read_token_word: a backslash-quoted character is word
+                // text (`\;#` keeps `#` mid-word — comsub1.sub). Only a
+                // quoted newline is a line continuation, not word content.
+                // Push a placeholder rather than the literal char: `c\ase`
+                // is not the `case` reserved word.
+                if let Some(next) = self.advance() {
+                    if next != '\n' {
+                        word.push('\u{1}');
+                    }
+                }
                 continue;
             }
-            if c == '#' && word_boundary {
+            // GNU read_token: `#` at a word start begins a comment through
+            // end of line — `word` empty means no word characters precede
+            // it. `word_boundary` is the narrower reserved-word flag and
+            // misses `#` after a completed word (`$(a # )`);
+            // `parameter_depth` keeps `${#x}` out of the comment rule.
+            if c == '#' && word.is_empty() && parameter_depth == 0 {
                 while self.peek().is_some_and(|ch| ch != '\n') {
                     self.advance();
                 }
@@ -31,6 +46,11 @@ impl<'a> Lexer<'a> {
                 word_boundary = true;
                 current_word_boundary = true;
                 continue;
+            }
+            if c == '$' && self.peek() == Some('{') {
+                parameter_depth += 1;
+            } else if c == '}' && parameter_depth > 0 {
+                parameter_depth -= 1;
             }
             let rest = &self.input[self.position..];
             update_command_substitution_case_depth(
@@ -141,15 +161,29 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
         let delimiter_start = self.position;
-        while self
-            .peek()
-            .is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | ')'))
-        {
-            // A backslash quotes the next delimiter byte (`<<\)` uses a
-            // literal `)` delimiter); consume the escape pair as one unit so
-            // the quoted `)` is not mistaken for the substitution closer.
-            if self.peek() == Some('\\') && self.peek_after(1).is_some() {
-                self.advance();
+        // GNU read_token_word: quoting inside the delimiter word makes
+        // metacharacters literal — `<< ')'` names `)` as the delimiter, so a
+        // quoted `)` (or `;`, `|`, `&`) is delimiter text, not the
+        // substitution closer (comsub-posix.tests).
+        let mut delimiter_single = false;
+        let mut delimiter_double = false;
+        while let Some(next) = self.peek() {
+            match next {
+                '\'' if !delimiter_double => delimiter_single = !delimiter_single,
+                '"' if !delimiter_single => delimiter_double = !delimiter_double,
+                _ if !delimiter_single
+                    && !delimiter_double
+                    && (next.is_whitespace() || matches!(next, ';' | '|' | '&' | ')')) =>
+                {
+                    break;
+                }
+                // A backslash quotes the next delimiter byte (`<<\)` uses a
+                // literal `)` delimiter); consume the escape pair as one
+                // unit so the quoted `)` is not mistaken for the closer.
+                '\\' if !delimiter_single && !delimiter_double && self.peek_after(1).is_some() => {
+                    self.advance();
+                }
+                _ => {}
             }
             self.advance();
         }
@@ -868,6 +902,7 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     let mut word = String::new();
     let mut word_boundary = true;
     let mut current_word_boundary = true;
+    let mut parameter_depth = 0usize;
     while index < chars.len() {
         let ch = chars[index];
         if single {
@@ -895,14 +930,28 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             index = next;
             continue;
         }
-        // Comment inside command substitution.
-        if ch == '#' && word_boundary {
+        // Comment inside command substitution: `#` at a word start (GNU
+        // read_token_word) — `word` empty means no word characters precede
+        // it. `word_boundary` is the narrower reserved-word flag and misses
+        // `#` after a completed word (`$(a # )`); `parameter_depth` keeps
+        // `${#x}` text out of the comment rule.
+        if ch == '#' && word.is_empty() && parameter_depth == 0 {
             while index + 1 < chars.len() && chars[index + 1] != '\n' {
                 index += 1;
             }
             word.clear();
             word_boundary = true;
             current_word_boundary = true;
+            index += 1;
+            continue;
+        }
+        if ch == '$' && chars.get(index + 1) == Some(&'{') {
+            parameter_depth += 1;
+            index += 2;
+            continue;
+        }
+        if ch == '}' && parameter_depth > 0 {
+            parameter_depth -= 1;
             index += 1;
             continue;
         }
@@ -923,8 +972,14 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             // GNU read_token_word (parse.y:5377-5397): outside quotes a
             // backslash quotes the next character — it can never act as a
             // paren delimiter, so `$(echo \)` does not close the
-            // substitution (comsub-posix.tests:42).
+            // substitution (comsub-posix.tests:42). The quoted character is
+            // word text (a placeholder, since `c\ase` is not `case`), so a
+            // following `#` stays mid-word (`\;#` in comsub1.sub); a quoted
+            // newline is a line continuation, not word content.
             '\\' => {
+                if chars.get(index + 1).is_some_and(|next| *next != '\n') {
+                    word.push('\u{1}');
+                }
                 index += 2;
                 continue;
             }

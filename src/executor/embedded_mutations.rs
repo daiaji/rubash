@@ -1187,7 +1187,7 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let source = &self.comsub_body_alias_splice(source);
+        let source = &self.comsub_body_alias_splice_extracted(source);
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
@@ -1362,7 +1362,7 @@ impl Executor {
         // level for this body's own word scan; downstream real-parser paths
         // receive the raw source and splice for themselves at their own
         // parse boundary.
-        let words = split_shell_words(&self.comsub_body_alias_splice(source));
+        let words = split_shell_words(&self.comsub_body_alias_splice_extracted(source));
         // Store leading newlines for the heredoc path to adjust warning
         // line numbers: when `$(` is at end of line, the comsub body starts
         // on the next line, and the `cat` command line is
@@ -1485,7 +1485,7 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let source = &self.comsub_body_alias_splice(source);
+        let source = &self.comsub_body_alias_splice_extracted(source);
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
@@ -1557,6 +1557,16 @@ impl Executor {
             }
             Err(_) => 1,
         };
+
+        // GNU parse.y: a syntax error inside the substitution body is a
+        // read-time failure of the ENCLOSING command — after this command
+        // finishes, the reader stops (`$( esac ; ...)` in a case pattern:
+        // the `*)` arm still prints `ok 2`, `echo we should not see this`
+        // never runs). The body ran in place, so its parse_error latch is
+        // already ours — propagate it to the abort flag the ast loop checks.
+        if self.parse_error_occurred {
+            self.last_command_substitution_parse_error.set(true);
+        }
 
         self.restore_flat_subshell(saved_state, saved_dir);
         self.exit_code = saved_exit_code;
@@ -1724,11 +1734,16 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
     let mut word = String::new();
     let mut word_boundary = true;
     let mut current_word_boundary = true;
+    let mut parameter_depth = 0usize;
 
     while let Some(source_ch) = chars.next() {
         if escaped {
             source.push(source_ch);
             escaped = false;
+            // A backslash-quoted character is word text (placeholder:
+            // `c\ase` is not `case`), so a following `#` stays mid-word
+            // (`\;#` in comsub1.sub).
+            word.push('\u{1}');
             continue;
         }
         if source_ch == '\\' && !single {
@@ -1736,7 +1751,25 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
             escaped = true;
             continue;
         }
-        if source_ch == '#' && !single && !double && word_boundary {
+        // `${` opens parameter text: inside it `#` is a parameter operator
+        // (e.g. `${#x}`), never a comment introducer.
+        if source_ch == '$' && !single && chars.peek().copied() == Some('{') {
+            source.push(source_ch);
+            source.push(chars.next().expect("parameter brace"));
+            parameter_depth += 1;
+            continue;
+        }
+        if source_ch == '}' && parameter_depth > 0 {
+            source.push(source_ch);
+            parameter_depth -= 1;
+            continue;
+        }
+        // GNU read_token (parse.y:3630): `#` at a word start begins a
+        // comment through end of line. `word` empty means no word
+        // characters precede it; `word_boundary` is the narrower
+        // reserved-word flag and misses `#` after a completed word
+        // (`$(a # )` — comsub-posix.tests).
+        if source_ch == '#' && !single && !double && word.is_empty() && parameter_depth == 0 {
             source.push(source_ch);
             while let Some(comment_ch) = chars.peek().copied() {
                 if comment_ch == '\n' {
@@ -1844,7 +1877,14 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
                         }
                         source.push(body_ch);
                         if body_ch == '\n' {
-                            if body_line.trim_end() == delimiter {
+                            // `<<-` strips leading tabs on the terminator
+                            // line the same way the `)` check above does.
+                            let terminator = if strip_tabs {
+                                body_line.trim_start_matches('\t')
+                            } else {
+                                body_line.as_str()
+                            };
+                            if terminator.trim_end() == delimiter {
                                 break;
                             }
                             body_line.clear();

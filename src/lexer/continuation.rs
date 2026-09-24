@@ -82,6 +82,24 @@ pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
         if top == Some('(') {
             // Inside command substitution quoting resets: ' " ` and nested $(
             // are delimiters again (parse.y read_token_word / parse_matched_pair).
+            // A `#` at a word boundary starts a comment here too — a `\`
+            // inside the comment is literal text, not a line continuation
+            // (`$(echo x # \` + `)` in comsub-posix.tests).
+            if ch == '#' && comment_start {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    return false;
+                }
+                continue;
+            }
+            if ch.is_whitespace() {
+                comment_start = true;
+                i += 1;
+                continue;
+            }
+            comment_start = false;
             if ch == '\'' {
                 stack.push('\'');
                 i += 1;
@@ -121,9 +139,17 @@ pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
         }
         // Top-level (no quote or other)
         // A `#` at a word boundary starts a comment — the rest of the
-        // line is not scanned for backslash-newline continuation.
+        // line is not scanned for backslash-newline continuation. Only
+        // return early when the comment runs to EOF; a later line can
+        // still end in a real continuation.
         if ch == '#' && comment_start {
-            return false;
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            if i >= chars.len() {
+                return false;
+            }
+            continue;
         }
         if ch.is_whitespace() {
             comment_start = true;
@@ -916,6 +942,7 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
     let mut word = String::new();
     let mut word_boundary = true;
     let mut current_word_boundary = true;
+    let mut parameter_depth = 0usize;
     while index < chars.len() {
         let ch = chars[index];
         if single {
@@ -960,16 +987,29 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
             index = next;
             continue;
         }
-        // GNU read_token (parse.y:3630-3643): a `#` at a token boundary
-        // begins a comment through end of line, so the `)` in `# )` cannot
-        // close the substitution (comsub-posix.tests:42).
-        if ch == '#' && word_boundary {
+        // GNU read_token (parse.y:3630-3643): a `#` at a word start begins
+        // a comment through end of line, so the `)` in `# )` cannot close
+        // the substitution (comsub-posix.tests:42). `word` empty means no
+        // word characters precede it — `word_boundary` is the narrower
+        // reserved-word flag and misses `#` after a completed word
+        // (`$(a # )`); `parameter_depth` keeps `${#x}` out of the rule.
+        if ch == '#' && word.is_empty() && parameter_depth == 0 {
             while index + 1 < chars.len() && chars[index + 1] != '\n' {
                 index += 1;
             }
             word.clear();
             word_boundary = true;
             current_word_boundary = true;
+            index += 1;
+            continue;
+        }
+        if ch == '$' && chars.get(index + 1) == Some(&'{') {
+            parameter_depth += 1;
+            index += 2;
+            continue;
+        }
+        if ch == '}' && parameter_depth > 0 {
+            parameter_depth -= 1;
             index += 1;
             continue;
         }
@@ -987,8 +1027,14 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
             // GNU read_token_word (parse.y:5377-5397): outside quotes a
             // backslash quotes the next character — it can never act as a
             // paren delimiter, so `$(echo \)` does not close the
-            // substitution (comsub-posix.tests:42).
+            // substitution (comsub-posix.tests:42). The quoted character is
+            // word text (a placeholder, since `c\ase` is not `case`), so a
+            // following `#` stays mid-word (`\;#` in comsub1.sub); a quoted
+            // newline is a line continuation, not word content.
             if ch == '\\' {
+                if chars.get(index + 1).is_some_and(|next| *next != '\n') {
+                    word.push('\u{1}');
+                }
                 index += 2;
                 continue;
             }
@@ -1028,7 +1074,19 @@ fn skip_backtick_unit(chars: &[char], open: usize) -> Option<usize> {
     None
 }
 
+/// Residual unclosed `$(` depth after scanning `input` — how many top-level
+/// `)` tokens a multi-line substitution still needs. Used by the parser's
+/// stray-`)` guard: a `)` token is a legitimate closer while this is > 0.
+pub(crate) fn unclosed_command_substitution_depth(input: &str) -> usize {
+    comsub_residuals(input).0
+}
+
 pub(crate) fn has_unclosed_command_substitution(input: &str) -> bool {
+    let (depth, backtick, ansi_single, parameter_depth) = comsub_residuals(input);
+    depth > 0 || backtick || ansi_single || parameter_depth > 0
+}
+
+fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
     let chars = input.chars().collect::<Vec<_>>();
     let mut index = 0usize;
     let mut depth = 0usize;
@@ -1059,6 +1117,10 @@ pub(crate) fn has_unclosed_command_substitution(input: &str) -> bool {
         if escaped {
             escaped = false;
             comment_start = false;
+            // A backslash-quoted character is word text (placeholder: `c\ase`
+            // is not `case`), so a following `#` stays mid-word (`\;#` in
+            // comsub1.sub). A quoted newline is handled by the `\` arm.
+            word.push('\u{1}');
             index += 1;
             continue;
         }
@@ -1191,13 +1253,20 @@ pub(crate) fn has_unclosed_command_substitution(input: &str) -> bool {
             index += 2;
             continue;
         }
+        // GNU read_token_word: `#` at the start of a word begins a comment
+        // through end of line. `word` holds the word characters seen since
+        // the last boundary, so `word.is_empty()` is "at a word start";
+        // `word_boundary` is the narrower reserved-word-position flag and
+        // misses `#` after a completed word (`$(a # )`). `parameter_depth`
+        // keeps `${#x}` parameter text out of the comment rule.
         if depth > 0
             && ch == '#'
             && !single
             && !double
             && !ansi_single
             && !backtick
-            && word_boundary
+            && parameter_depth == 0
+            && word.is_empty()
         {
             while index + 1 < chars.len() && chars[index + 1] != '\n' {
                 index += 1;
@@ -1232,7 +1301,7 @@ pub(crate) fn has_unclosed_command_substitution(input: &str) -> bool {
             if closes.is_some() {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    return false;
+                    return (depth, backtick, ansi_single, parameter_depth);
                 }
             }
             index = next;
@@ -1274,7 +1343,7 @@ pub(crate) fn has_unclosed_command_substitution(input: &str) -> bool {
     // command substitution `${ command; }` (parser.h:83 FUNSUB_CHAR,
     // parse.y:5407 PST_FUNSUBST close) — comsub2.tests splits
     // `echo ${ printf ...` + `}` across lines and must keep reading.
-    depth > 0 || backtick || ansi_single || parameter_depth > 0
+    (depth, backtick, ansi_single, parameter_depth)
 }
 
 fn skip_backtick_substitution(chars: &[char], mut index: usize) -> usize {
