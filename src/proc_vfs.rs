@@ -379,6 +379,7 @@ fn cpuinfo() -> String {
 /// Real CPUID identity via __cpuid. Falls back to placeholders if the
 /// intrinsic is unavailable.
 #[cfg(windows)]
+#[allow(unused_unsafe)] // __cpuid became a safe intrinsic on newer toolchains
 fn cpuid_identity() -> (&'static str, u32, u32, u32, String, u64) {
     #[cfg(target_arch = "x86_64")]
     {

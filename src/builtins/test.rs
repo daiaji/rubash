@@ -13,6 +13,7 @@ mod variable;
 pub(crate) use variable::variable_is_set;
 
 use std::collections::HashMap;
+#[cfg(windows)]
 use std::fs::File;
 use std::fs;
 use std::io::{self, IsTerminal, Write};

@@ -14,7 +14,7 @@
 //!     close-on-exec: every fd the child must keep is dup'd past the exec
 //!     barrier; everything else is CLOEXEC and disappears.
 
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::fd::{FromRawFd, RawFd};
 
 pub type HANDLE = RawFd; // isize-compatible integer fd
 
@@ -37,18 +37,18 @@ pub enum ReadWait {
 /// a regular-file input disables `read -t` entirely.
 pub fn is_disk_file(h: HANDLE) -> bool {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    unsafe { libc::fstat(h, &mut st) } == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+    unsafe { libc::fstat(h, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFREG }
 }
 
 /// isatty(fd) — `test -t`'s terminal probe (GNU test.c).
 pub fn is_console_handle(h: HANDLE) -> bool {
-    unsafe { libc::isatty(h) } == 1
+    unsafe { libc::isatty(h) == 1 }
 }
 
 /// S_ISCHR — `test -c` (GNU test.c filetest).
 pub fn is_char_device_handle(h: HANDLE) -> bool {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    unsafe { libc::fstat(h, &mut st) } == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFCHR
+    unsafe { libc::fstat(h, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFCHR }
 }
 
 /// Bounded readability wait — the direct POSIX form of GNU
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn read_some_on_closed_pipe_returns_eof_shape() {
-        use std::io::Write as _;
+        use std::os::fd::AsRawFd;
         let (r, w) = std::io::pipe().unwrap();
         let rfd = r.as_raw_fd();
         drop(w);

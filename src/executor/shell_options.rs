@@ -217,10 +217,21 @@ impl Executor {
             });
         }
         let path = shell_path_to_windows(target, &self.shell_state.env_vars);
-        use std::os::windows::io::AsRawHandle;
         File::open(&path)
             .ok()
-            .map(|file| crate::fd::is_console_handle(file.as_raw_handle() as crate::fd::HANDLE))
+            .map(|file| {
+                #[cfg(windows)]
+                let raw = {
+                    use std::os::windows::io::AsRawHandle;
+                    file.as_raw_handle() as crate::fd::HANDLE
+                };
+                #[cfg(unix)]
+                let raw = {
+                    use std::os::unix::io::AsRawFd;
+                    file.as_raw_fd() as crate::fd::HANDLE
+                };
+                crate::fd::is_console_handle(raw)
+            })
     }
 
     pub(in crate::executor) fn create_redirect_output(

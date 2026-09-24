@@ -320,6 +320,7 @@ pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
         // POSIX bin directory — the standard utilities live wherever the
         // host keeps its toolset (Git usr/bin, WinuxCmd links), discovered
         // from the real PATH as the first directory holding a full set.
+        #[cfg(windows)]
         if let Some(dir) = windows_posix_tools_dir(_env_vars) {
             dirs.push(dir);
         }
@@ -1158,6 +1159,7 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
     // the toolset directory discovered from the real PATH, the same
     // provider standard_path uses for `command -p`.
     if cfg!(windows) && shell_root.is_none() {
+        #[cfg(windows)]
         if let Some(dir) = windows_posix_tools_dir(env_vars) {
             const POSIX_BIN_DIRS: &[&str] =
                 &["/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin", "/usr/local/sbin"];
