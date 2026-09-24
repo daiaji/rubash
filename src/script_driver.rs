@@ -15,7 +15,7 @@ use crate::executor::{ExecuteError, Executor};
 use crate::history::SessionHistory;
 use crate::history_expand::{HistChars, HistCtx};
 use crate::lexer::{
-    expand_aliases_in_source, has_unclosed_input_syntax, tokenize, tokenize_with_initial_posix,
+    expand_aliases_in_source, tokenize, tokenize_with_initial_posix,
     AliasLookup, TokenKind,
 };
 use crate::parser::{parse, CommandNode};
@@ -173,9 +173,10 @@ pub fn run_script_with_history_in(
             // is ONE complete command, while `foo x` keeps the quote open
             // through the following lines.
             let expanded_pending = expand_group_aliases(executor, &pending);
+            let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
             if pending_heredocs.is_empty()
                 && (!saw_heredoc || paren_depth <= 0)
-                && !stdin_source_needs_more(&expanded_pending)
+                && !stdin_source_needs_more_posix(&expanded_pending, posix)
             {
                 break;
             }
@@ -496,7 +497,13 @@ pub fn stdin_script_errexit_enabled(executor: &Executor) -> bool {
 }
 
 pub fn stdin_source_needs_more(source: &str) -> bool {
-    if has_unclosed_input_syntax(source) {
+    stdin_source_needs_more_posix(source, false)
+}
+
+/// POSIX-aware variant: `set -o posix` changes `'` scanning inside
+/// `"${...}"` (Interp 221), which decides whether the input is complete.
+pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
+    if crate::lexer::has_unclosed_input_syntax_posix(source, posix) {
         return true;
     }
     // parse.y:5379-5384: trailing unquoted backslash keeps the physical line
@@ -667,14 +674,19 @@ fn scan_heredoc_operators(line: &str) -> Vec<(String, bool)> {
 
 fn stdin_source_is_function_signature(source: &str) -> bool {
     let trimmed = source.trim();
-    if let Some(name) = trimmed.strip_suffix("()") {
-        return is_stdin_function_name(name.trim());
+    // `name ()` / `name()` signature: peel the trailing parens with
+    // optional whitespace (`'a b c' ( )' is still a signature — GNU's
+    // grammar accepts any WORD; validity is judged at exec time).
+    if let Some(before_close) = trimmed.strip_suffix(')') {
+        if let Some(name) = before_close.trim_end().strip_suffix('(') {
+            return is_stdin_function_name(name.trim_end());
+        }
     }
 
     trimmed
         .strip_prefix("function ")
         .map(str::trim)
-        .is_some_and(is_stdin_function_name)
+        .is_some_and(is_stdin_function_keyword_name)
 }
 
 fn stdin_source_has_unclosed_function_body(source: &str) -> bool {
@@ -691,24 +703,51 @@ fn stdin_source_has_unclosed_function_delimited_body(source: &str, delimiter: ch
     }
 
     let signature = source[..open_delimiter].trim_end();
-    if let Some(name) = signature.strip_suffix("()") {
-        return is_stdin_function_name(name.trim_end());
+    if let Some(before_close) = signature.strip_suffix(')') {
+        if let Some(name) = before_close.trim_end().strip_suffix('(') {
+            return is_stdin_function_name(name.trim_end());
+        }
     }
 
     signature
         .strip_prefix("function ")
         .and_then(|rest| rest.split_whitespace().next())
-        .is_some_and(is_stdin_function_name)
+        .is_some_and(is_stdin_function_keyword_name)
 }
 
+/// `name ()` signature form: GNU accepts non-identifier words
+/// (`11111 () { ...; }' is legal non-posix), but an `=`-bearing word is an
+/// assignment-shaped token, not a name (`a=2 ()` is a syntax error).
+/// `<( ... )` is lexed as one WORD in GNU (parse.y scans the
+/// process-substitution shape inside a word), so `<( : ) () { }' is a
+/// function named `<(:)' — allow the spaced form as a signature too;
+/// validity is judged later by the executor.
 fn is_stdin_function_name(name: &str) -> bool {
-    let Some(first) = name.chars().next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && name
+    if name == "!!" || (name.starts_with("<(") && name.ends_with(')')) {
+        return true;
+    }
+    // A fully quoted name is one WORD in GNU's grammar (`'a b c' () { }'
+    // parses as a definition and is rejected by the executor).
+    if name.len() > 1
+        && (name.starts_with('\'') && name.ends_with('\'')
+            || name.starts_with('"') && name.ends_with('"'))
+    {
+        return true;
+    }
+    !name.is_empty()
+        && !name.chars().any(|ch| {
+            ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|' | '=')
+        })
+}
+
+/// `function WORD` signature form: GNU function_def takes a single WORD
+/// verbatim, so `=` and digit-leading names are legal (`function a=2`,
+/// `function 11111`); only shell metacharacters end the word.
+fn is_stdin_function_keyword_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name
             .chars()
-            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
 }
 
 fn first_unquoted_char(source: &str, target: char) -> Option<usize> {
@@ -821,11 +860,15 @@ pub fn run_source_with_line_offset(
         return executor.last_exit_code();
     }
 
-    if !interactive && has_unclosed_input_syntax(input) && !input.contains("<<") {
+    let parse_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+    if !interactive
+        && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
+        && !input.contains("<<")
+    {
         // GNU's incremental reader executes complete input lines before the
         // line where the unclosed construct opened; that line itself is part
         // of the failed parse and runs nothing.
-        let unclosed = crate::lexer::unclosed_input_close_char(input);
+        let unclosed = crate::lexer::unclosed_input_close_char_posix(input, parse_posix);
         let cut_line = unclosed.map(|(_, open, _, _)| open);
         let source = input.trim_end_matches('\n');
         let prefix = match cut_line {
@@ -864,7 +907,6 @@ pub fn run_source_with_line_offset(
         return 2;
     }
 
-    let parse_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let mut tokens = tokenize_with_initial_posix(input, parse_posix);
     // A command with more than HEREDOC_MAX (16) here-documents is fatal in
     // GNU (parse.y push_heredoc -> report_syntax_error + exit_shell with

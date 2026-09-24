@@ -246,11 +246,41 @@ struct UnclosedDelim {
 /// Returns (close char, open line, EOF line, report_open_line) for the
 /// innermost pending construct: callers print `open_line' when
 /// report_open_line is set, otherwise the line at EOF.
-pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usize, bool)> {
+/// POSIX mode honors the Austin Group Interp 221 rule already implemented in
+/// `dolbrace::scan_braced_parameter`: inside `"${...}"` a `'` is literal text,
+/// not a quote opener, so `"${IFS+'bar}` is complete input. Outside POSIX
+/// mode (or outside double quotes) the `'` still opens a quote that can keep
+/// the input unclosed.
+fn squote_is_literal_in_posix_braced_dquote(stack: &[UnclosedDelim]) -> bool {
+    let mut in_brace = false;
+    for d in stack.iter().rev() {
+        match d.close {
+            '}' if !d.funsub => in_brace = true,
+            '"' => return in_brace,
+            // `'`, '`', `)` (`$(`/subshell/arithmetic) and funsub `}` reset the
+            // parse context: quotes inside them behave normally.
+            _ => return false,
+        }
+    }
+    false
+}
+
+pub(crate) fn unclosed_input_close_char_posix(
+    input: &str,
+    posix: bool,
+) -> Option<(char, usize, usize, bool)> {
     let chars: Vec<char> = input.chars().collect();
     let mut stack: Vec<UnclosedDelim> = Vec::new();
     let mut line = 1usize;
     let mut comment_start = true;
+    // GNU parse.y: a bare `(` only opens a subshell/array-list when the
+    // parser expects a command (start, after a separator, after a command
+    // keyword like `if`/`in`) or directly follows `=` in an assignment
+    // word (`ddd=(aaa` spans lines). A `(` mid-command is an immediate
+    // syntax error, not a continuation — tracking this keeps `echo (`
+    // from swallowing the following lines into a dead group.
+    let mut at_command = true;
+    let mut cur_word = String::new();
     let mut i = 0usize;
     while i < chars.len() {
         let ch = chars[i];
@@ -311,6 +341,20 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
                 }
             }
         } else {
+            // Top-level `\` quotes the next character as literal word text
+            // (parse.y read_token_word): an escaped `(` in `\<...` must not
+            // open a paren delimiter. `\<newline>` is a continuation that
+            // joins the word across lines.
+            if ch == '\\' && i + 1 < chars.len() {
+                if chars[i + 1] == '\n' {
+                    line += 1;
+                } else if chars[i + 1] != '=' {
+                    cur_word.push(chars[i + 1]);
+                }
+                comment_start = false;
+                i += 2;
+                continue;
+            }
             // Top-level comment: a word-initial '#' consumes to EOL
             // (parse.y read_token -> parse_comment).
             if ch == '#' && comment_start {
@@ -326,10 +370,45 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
             } else {
                 comment_start = false;
             }
+            match ch {
+                // `(` is excluded: the push arm below gates on the state
+                // BEFORE it — a mid-command `(` must not mark itself as
+                // command position. `)` likewise: a stray `)` is a parse
+                // error left to the parser, but after it a command follows.
+                '\n' | ';' | '&' | '|' | ')' | '{' | '}' => {
+                    at_command = true;
+                    cur_word.clear();
+                }
+                '<' | '>' => {
+                    // Redirect operator: a filename word follows, so `>(` is
+                    // not command position.
+                    cur_word.clear();
+                }
+                c if c.is_whitespace() => {
+                    if !cur_word.is_empty() {
+                        at_command = matches!(
+                            cur_word.as_str(),
+                            "if" | "then" | "else" | "elif" | "while" | "until" | "do"
+                                | "in" | "!" | "time" | "coproc" | "case"
+                        );
+                        cur_word.clear();
+                    }
+                }
+                c if c.is_alphanumeric() || c == '_' || (c == '=' && !cur_word.is_empty()) => {
+                    cur_word.push(c)
+                }
+                _ => {}
+            }
         }
         let in_double = top.is_some_and(|d| d.close == '"');
         match ch {
             '\'' if !in_double => {
+                // POSIX + Interp 221: `'` inside `"${...}"` is literal.
+                if posix && squote_is_literal_in_posix_braced_dquote(&stack) {
+                    comment_start = false;
+                    i += 1;
+                    continue;
+                }
                 // parse_matched_pair reports start_lineno for quotes.
                 stack.push(UnclosedDelim {
                     close: '\'',
@@ -433,8 +512,29 @@ pub(crate) fn unclosed_input_close_char(input: &str) -> Option<(char, usize, usi
                     _ => {}
                 }
             }
-            '(' if top.is_none_or(|d| d.close == ')' || (d.close == '}' && d.funsub)) => {
-                // Subshell: a complete command for funsub purposes.
+            '(' if top.is_none() => {
+                // Command-position `(` opens a subshell; `name=(` in an
+                // assignment word opens an array list (`declare -a ddd=(aaa`
+                // continues on the next line). A `(` elsewhere is a parse
+                // error for the parser, not a pending delimiter.
+                if at_command || (cur_word.len() > 1 && cur_word.ends_with('=')) {
+                    stack.push(UnclosedDelim {
+                        close: ')',
+                        open_line: line,
+                        escapes: true,
+                        report_open: false,
+                        funsub: false,
+                        command: true,
+                        term_ready: false,
+                    });
+                }
+                comment_start = true;
+                at_command = true;
+                cur_word.clear();
+            }
+            '(' if top.is_some_and(|d| d.close == ')' || (d.close == '}' && d.funsub)) => {
+                // Subshell nested inside `$(...)`/`( ... )`/`${ ...; }`:
+                // the body is command context where `(` is legal.
                 stack.push(UnclosedDelim {
                     close: ')',
                     open_line: line,

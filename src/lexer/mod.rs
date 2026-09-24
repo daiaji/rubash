@@ -28,7 +28,7 @@ use continuation::{
 pub(crate) use alias_stream::{expand_aliases_in_source, AliasLookup};
 pub(crate) use continuation::has_unclosed_command_substitution;
 pub(crate) use continuation::unclosed_command_substitution_depth;
-pub(crate) use continuation::unclosed_input_close_char;
+pub(crate) use continuation::unclosed_input_close_char_posix;
 use heredoc::heredoc_delimiters;
 use scanner::Lexer;
 pub(crate) use skip::skip_parenthesized_unit_corrected;
@@ -668,9 +668,19 @@ fn char_len_at(line: &str, index: usize) -> usize {
 }
 
 pub fn has_unclosed_input_syntax(input: &str) -> bool {
+    has_unclosed_input_syntax_posix(input, false)
+}
+
+/// POSIX-aware variant: `set -o posix` changes how `'` inside `"${...}"`
+/// scans (Interp 221), so the unclosed-delimiter probe must know the mode.
+pub fn has_unclosed_input_syntax_posix(input: &str, posix: bool) -> bool {
     has_unclosed_quotes(input)
         || (has_unclosed_command_substitution(input)
             && !skip::command_substitutions_balanced(input))
+        // A bare `(`/`{`-class delimiter can also keep a command open:
+        // `ddd=(aaa` array lists and `( cmd` subshells continue on the
+        // next line (GNU parse.y reads until the matching close).
+        || unclosed_input_close_char_posix(input, posix).is_some()
 }
 
 /// parse.y:5379-5384 read_token_word: a backslash before the newline is

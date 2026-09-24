@@ -545,8 +545,17 @@ impl Executor {
                     // can consult the raw form and avoid mis-materializing
                     // the expanded word as a process substitution (func5.sub
                     // line 45 `\<\(:\)` must report "command not found").
-                    || metadata.value.contains("<(")
-                    || metadata.value.contains(">(")
+                    // The expanded value carries CTLESC markers between the
+                    // metacharacters (`<` CTLESC `(`), so compare against the
+                    // dequoted form.
+                    || metadata
+                        .value
+                        .replace(crate::executor::markers::CTLESC, "")
+                        .contains("<(")
+                    || metadata
+                        .value
+                        .replace(crate::executor::markers::CTLESC, "")
+                        .contains(">(")
             });
         let mut variable_expanded = CommandNode {
             words: Vec::new(),

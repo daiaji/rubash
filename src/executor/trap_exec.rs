@@ -165,8 +165,10 @@ impl Executor {
                 // Heredoc bodies are raw text, so inputs carrying `<<` skip
                 // this probe like the script driver does.
                 if !source.contains("<<") {
+                    let eval_posix =
+                        self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
                     if let Some((close, open_line, eof_line, report_open)) =
-                        crate::lexer::unclosed_input_close_char(&source)
+                        crate::lexer::unclosed_input_close_char_posix(&source, eval_posix)
                     {
                         // GNU eval continues the caller's line numbering:
                         // eval-input line i sits at caller_line+i-1;
