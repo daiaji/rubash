@@ -196,6 +196,10 @@ impl Executor {
                 crate::proc_vfs::proc_file_content(&expanded_target)
             {
                 crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
+            } else if let Some(bytes) = self.procsub_stream_take(&path) {
+                // `<(cmd)` carrier path: the word names a draining
+                // stream — serve the shared remainder (subst.c:7143).
+                crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
             } else {
                 match crate::executor::substitution_metadata::read_shell_input_file(path) {
                     Ok(text) => text,

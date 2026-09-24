@@ -4,6 +4,17 @@ use crate::executor::glob::{pathname_expand_word, PathnameExpansion};
 
 impl Executor {
     pub(in crate::executor) fn open_input_redirect(&self, target: &str) -> io::Result<File> {
+        self.open_input_redirect_impl(target, true)
+    }
+
+    /// Redirect-open validity probe (GNU redir.c open_redir_file: the open
+    /// itself never reads). A registered `<(cmd)` path must not be drained
+    /// by a probe — the consumer (read/cat/child stdin) does that.
+    pub(in crate::executor) fn probe_input_redirect(&self, target: &str) -> io::Result<File> {
+        self.open_input_redirect_impl(target, false)
+    }
+
+    fn open_input_redirect_impl(&self, target: &str, consume: bool) -> io::Result<File> {
         if is_null_device(target) {
             return File::open(shell_path_to_windows("/dev/null", &self.shell_state.env_vars));
         }
@@ -15,7 +26,24 @@ impl Executor {
         if let Some(fd) = dev_stdio_redirect_fd(target) {
             return self.open_fd_read_endpoint(fd, target);
         }
-        File::open(shell_path_to_windows(target, &self.shell_state.env_vars))
+        let win_path = shell_path_to_windows(target, &self.shell_state.env_vars);
+        // A spawned child reading a `<(cmd)` carrier must get the stream's
+        // REMAINING bytes — GNU hands it a dup of the shared pipe offset,
+        // so the parent's next open sees what the child left
+        // (subst.c:7143). Serve the remainder through a fresh temp and
+        // advance the shared offset.
+        if consume {
+            if let Some(bytes) = self.procsub_stream_take(&win_path) {
+                let path = self
+                    .write_process_substitution_temp_bytes(&bytes)
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::Other, "failed to materialize input")
+                    })?;
+                return File::open(&path)
+                    .map_err(|e| crate::posix_errors::path_error(target, e));
+            }
+        }
+        File::open(win_path)
             .map_err(|e| crate::posix_errors::path_error(target, e))
     }
 
@@ -36,6 +64,12 @@ impl Executor {
                 let bytes = self
                     .virtual_fd_stdin_remaining_bytes(fd)
                     .unwrap_or_default();
+                // GNU hands the child a dup of the same open file
+                // description: bytes the child reads move the shared
+                // offset — drain the source so the next consumer sees
+                // the remainder, not a replay (procsub.tests
+                // count_lines → 1,0,0,0,0).
+                self.fd_table.drain_input_to_eof(fd);
                 let path = self
                     .write_process_substitution_temp_bytes(&bytes)
                     .map_err(|_| {
@@ -1046,6 +1080,10 @@ impl Executor {
             // pipe input, not block opening CONIN$).
             if let Some(source_fd) = redirect_target_fd(&target) {
                 if let Some(input) = self.virtual_fd_stdin_remaining(source_fd) {
+                    // GNU dup2 hands the consumer the live stream: bytes
+                    // it took are gone for the next reader (procsub.tests
+                    // count_lines `wc -l < $1` five times → 1,0,0,0,0).
+                    self.fd_table.drain_input_to_eof(source_fd);
                     return Some(input);
                 }
                 if source_fd == 0 {
@@ -1091,6 +1129,14 @@ impl Executor {
                         return None;
                     }
                 }
+            }
+            // A `<(cmd)` temp path is a pipe carrier, not a file: reopening
+            // it must resume at the shared offset, not replay the contents
+            // (subst.c:7143 command_substitute / redir.c dup semantics).
+            if let Some(bytes) = self.procsub_stream_take(&path) {
+                return Some(
+                    crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+                );
             }
             return fs::read_to_string(path).ok();
         }

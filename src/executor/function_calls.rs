@@ -621,7 +621,13 @@ impl Executor {
             self.fd_table.open_input(0, FdReadEndpoint::File(file), false);
             return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
         }
-        Ok((Some(fs::read_to_string(path)?), false, None))
+        // A `<(cmd)` temp path is a draining stream, not a replayable
+        // file — serve the shared remainder (subst.c:7143).
+        let input = match self.procsub_stream_take(&path) {
+            Some(bytes) => crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+            None => fs::read_to_string(&path)?,
+        };
+        Ok((Some(input), false, None))
     }
 
     fn restore_function_call_fd0(&mut self, binding: FunctionCallStdinBinding) {

@@ -476,6 +476,24 @@ impl FdTable {
         Some(result)
     }
 
+    /// GNU redir.c: a consumer handed this fd's stream through a dup owns
+    /// the shared offset — bytes it took are gone for the next reader
+    /// (procsub.tests count_lines: five `wc -l < $1` calls see 1,0,0,0,0).
+    /// `&self` variant of consume_all_text for the pure-read serving
+    /// paths (Text/ProcessSubstitution carry their offset in a RefCell).
+    pub(crate) fn drain_input_to_eof(&self, fd: u32) {
+        let endpoint = self
+            .entries
+            .get(&fd)
+            .and_then(|entry| entry.read.clone());
+        if let Some(FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input)) =
+            endpoint
+        {
+            let mut input = input.borrow_mut();
+            input.offset = input.data.len();
+        }
+    }
+
     pub(crate) fn consume_all_text(&mut self, fd: u32) -> Option<usize> {
         let endpoint = self.entries.get(&fd)?.read.clone()?;
         if let FdReadEndpoint::File(file) = endpoint {

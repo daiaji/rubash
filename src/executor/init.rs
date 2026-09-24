@@ -208,6 +208,7 @@ impl Executor {
                 debug_trap_command: std::cell::RefCell::new(None),
                 xtrace_fd: Cell::new(-1),
                 xtrace_fd_source: std::cell::RefCell::new(String::new()),
+                procsub_streams: std::cell::RefCell::new(HashMap::new()),
             },
             fd_table: FdTable::new(),
             exit_code: 0,

@@ -666,7 +666,14 @@ impl Executor {
                     output.extend(bytes);
                     continue;
                 }
-                match fs::read(shell_path_to_windows(&target, &self.shell_state.env_vars)) {
+                let win = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                // `<(cmd)` carrier path: the word names a draining stream —
+                // serve the shared remainder (subst.c:7143).
+                let read = match self.procsub_stream_take(&win) {
+                    Some(bytes) => Ok(bytes),
+                    None => fs::read(&win),
+                };
+                match read {
                     Ok(bytes) => output.extend(bytes),
                     Err(_) => {
                         let mut stderr = Vec::new();
@@ -738,7 +745,14 @@ impl Executor {
                 output.extend(bytes);
                 continue;
             }
-            match fs::read(shell_path_to_windows(&target, &self.shell_state.env_vars)) {
+            let win = shell_path_to_windows(&target, &self.shell_state.env_vars);
+            // `<(cmd)` carrier path: the word names a draining stream —
+            // serve the shared remainder (subst.c:7143).
+            let read = match self.procsub_stream_take(&win) {
+                Some(bytes) => Ok(bytes),
+                None => fs::read(&win),
+            };
+            match read {
                 Ok(bytes) => output.extend(bytes),
                 Err(_) => {
                     let mut stderr = Vec::new();

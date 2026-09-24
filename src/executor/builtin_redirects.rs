@@ -51,7 +51,7 @@ impl Executor {
                     .write(true)
                     .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             } else {
-                self.open_input_redirect(&target)?;
+                self.probe_input_redirect(&target)?;
             }
         }
 

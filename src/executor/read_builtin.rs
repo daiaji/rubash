@@ -53,7 +53,7 @@ impl Executor {
                     && redirect_target_fd(&target).is_none()
                     && !target.starts_with("<(")
                 {
-                    if let Err(error) = self.open_input_redirect(&target) {
+                    if let Err(error) = self.probe_input_redirect(&target) {
                         let mut line = Vec::new();
                         let _ = writeln!(
                             &mut line,
