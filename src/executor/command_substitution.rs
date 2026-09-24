@@ -578,11 +578,22 @@ impl Executor {
         // (niubash shell-quirks Q16: inside
         // `for …; do out=$(cargo test 2>&1); …; done > summary.txt` the
         // failing round's output reached summary.txt and $out stayed
-        // empty). Drop the inherited fd-1 binding so external children hit
+        // empty). Rebind fd 1 to the default Stdout endpoint — it resolves
+        // to the active stdout_capture in write_fd_endpoint — rather than
+        // removing the entry: in-shell writes consult fd_table[1] first and
+        // a missing entry silently drops output. External children then hit
         // the stdout_capture pipe branch; body-level redirects rebind fd 1
         // on the child's own table. fd 2 stays inherited — $( ) does not
         // capture stderr (GNU subst.c:7149).
-        subshell.fd_table.entries.remove(&1);
+        subshell.fd_table.entries.insert(
+            1,
+            crate::executor::fd_table::FdEntry {
+                read: None,
+                write: Some(FdWriteEndpoint::Stdout),
+                closed: false,
+                dynamic: false,
+            },
+        );
 
         // GNU subst.c:7356-7359 command_substitute: without inherit_errexit
         // the substitution child runs `builtin_ignoring_errexit = 0` and
