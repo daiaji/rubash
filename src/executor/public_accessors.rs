@@ -65,6 +65,13 @@ impl Executor {
         std::mem::take(&mut self.parse_error_occurred)
     }
 
+    /// GNU execute_cmd.c:652-656: `!` gives the command CMD_IGNORE_RETURN
+    /// under errexit — the grouped drivers' post-group `status != 0 &&
+    /// errexit` check reads this to honor the exemption.
+    pub fn last_command_inverted(&self) -> bool {
+        self.last_command_inverted.get()
+    }
+
     pub fn shell_state(&self) -> &crate::shell::ShellState {
         &self.shell_state
     }

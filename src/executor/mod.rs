@@ -657,6 +657,16 @@ pub struct Executor {
     /// after word expansion so the enclosing context unwinds.
     current_shell_substitution_exit: Cell<Option<i32>>,
     last_command_substitution_parse_error: Cell<bool>,
+    /// GNU execute_cmd.c:626-652: `! CMD` sets CMD_INVERT_RETURN on the
+    /// inner command, and with exit_immediately_on_error on it additionally
+    /// gains CMD_IGNORE_RETURN (execute_cmd.c:652-656) — an inverted
+    /// command's status never satisfies errexit. The grouped script drivers
+    /// (run_script_with_history / the stdin loop) re-check
+    /// `status != 0 && errexit` after each complete command and cannot see
+    /// the node's flags, so the flat-command loop records here whether the
+    /// last executed top-level command carried `!`; the drivers consult it
+    /// before breaking (set-e1.sub `! true` under `set -o posix`).
+    pub(crate) last_command_inverted: Cell<bool>,
     /// GNU execute_cmd.c:4887-4888 sets `special_builtin_failed = 1` when a
     /// POSIX special builtin returns an error status (> EX_SHERRBASE = 256).
     /// After the command (execute_cmd.c:1004-1017), if `posixly_correct &&

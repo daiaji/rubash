@@ -183,7 +183,13 @@ pub fn run_script_with_history_in(
         }
         let status = run_history_group(executor, &session, &group, start_line, redirect_cmd);
         let parse_error = executor.take_parse_error();
-        if parse_error || (status != 0 && stdin_script_errexit_enabled(executor)) {
+        if parse_error
+            || (status != 0
+                && stdin_script_errexit_enabled(executor)
+                // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN
+                // under errexit — the inverted command's status is exempt.
+                && !executor.last_command_inverted())
+        {
             break;
         }
     }

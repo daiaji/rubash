@@ -167,6 +167,20 @@ impl Executor {
 
         while index < ast.commands.len() {
             let command = &ast.commands[index];
+            // GNU execute_cmd.c:652-656: `!` adds CMD_IGNORE_RETURN to the
+            // command under exit_immediately_on_error, so its status never
+            // satisfies errexit. The grouped drivers re-check
+            // `status != 0 && errexit` per complete command without seeing
+            // node flags, so record here whether the last top-level command
+            // was inverted. Only depth-1 nodes outside a flat `( )` region
+            // count — a `!` inside `(...)` or a nested list inverts its own
+            // command, not the group's (GNU: `( ! true )` still exits).
+            if self.evalerror_exec_depth.get() == 1 && subshell_state.is_none() {
+                self.last_command_inverted.set(
+                    (command.inverted || command.inverted_command.is_some())
+                        && command.and_or().is_none(),
+                );
+            }
             // GNU parse.y/eval.c: a syntax error inside a command
             // substitution is a read-time failure of the enclosing command —
             // the parser recovered at the `)`, so the command itself still
