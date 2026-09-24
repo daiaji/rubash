@@ -522,7 +522,11 @@ pub fn stdin_source_needs_more(source: &str) -> bool {
             "case" => stack.push("esac"),
             "if" => stack.push("fi"),
             "for" | "select" | "while" | "until" => stack.push("done"),
-            "esac" | "fi" | "done" if stack.last() == Some(&token.value.as_str()) => {
+            // `{` at command position opens a brace group that must see
+            // its `}` — GNU reads until the closing brace (parse.y
+            // brace_group), so a multi-line `{ ... }` keeps the group open.
+            "{" => stack.push("}"),
+            "esac" | "fi" | "done" | "}" if stack.last() == Some(&token.value.as_str()) => {
                 stack.pop();
             }
             _ => {}
