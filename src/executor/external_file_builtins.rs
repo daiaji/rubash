@@ -756,11 +756,40 @@ impl Executor {
     }
 
     fn external_mkfifo(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        for path in &cmd.words[1..] {
-            let target = shell_path_to_windows(&self.expand_word(path), &self.shell_state.env_vars);
-            let _ = File::create(target)?;
+        // Windows has no POSIX fifo object; creating a regular file would
+        // silently change semantics (a fifo's blocking open/read behavior
+        // would become an instant regular-file EOF). GNU coreutils mkfifo
+        // reports per-operand failures and exits 1 — match that honestly:
+        // `mkfifo: cannot create fifo 'NAME': Operation not supported`.
+        // -m MODE consumes a value; other options are accepted and ignored.
+        let mut mode_value_pending = false;
+        let mut no_more_flags = false;
+        let mut failed = false;
+        for word in &cmd.words[1..] {
+            let expanded = self.expand_word(word);
+            if mode_value_pending {
+                mode_value_pending = false;
+                continue;
+            }
+            if !no_more_flags && expanded == "--" {
+                no_more_flags = true;
+                continue;
+            }
+            if !no_more_flags && expanded.starts_with('-') && expanded != "-" {
+                if expanded == "-m" {
+                    mode_value_pending = true;
+                }
+                continue;
+            }
+            let mut stderr = Vec::new();
+            let _ = writeln!(
+                &mut stderr,
+                "mkfifo: cannot create fifo '{expanded}': Operation not supported"
+            );
+            self.write_default_stderr(&stderr)?;
+            failed = true;
         }
-        self.exit_code = 0;
+        self.exit_code = if failed { 1 } else { 0 };
         Ok(true)
     }
 }

@@ -91,6 +91,16 @@ extern "system" {
     fn SetFilePointer(h: HANDLE, dist: i32, dist_high: *mut i32, method: DWORD) -> DWORD;
     fn SetHandleInformation(h: HANDLE, mask: DWORD, flags: DWORD) -> BOOL;
     fn GetHandleInformation(h: HANDLE, flags: *mut DWORD) -> BOOL;
+    fn GetFileType(h: HANDLE) -> DWORD;
+    fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD;
+    fn PeekNamedPipe(
+        h: HANDLE,
+        buf: *mut u8,
+        buflen: DWORD,
+        bytes_read: *mut DWORD,
+        avail: *mut DWORD,
+        left: *mut DWORD,
+    ) -> BOOL;
 }
 
 #[repr(C)]
@@ -436,6 +446,73 @@ pub fn duplicate_handle(h: HANDLE) -> std::io::Result<HANDLE> {
 pub fn close_handle(h: HANDLE) {
     unsafe {
         CloseHandle(h);
+    }
+}
+
+/// Result of a bounded readability wait on an OS handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadWait {
+    Ready,
+    Timeout,
+}
+
+const FILE_TYPE_DISK: DWORD = 0x0001;
+const FILE_TYPE_CHAR: DWORD = 0x0002;
+const FILE_TYPE_PIPE: DWORD = 0x0003;
+const WAIT_OBJECT_0: DWORD = 0;
+const WAIT_TIMEOUT: DWORD = 0x102;
+
+/// GNU builtins/read.def fstat gate (`tmsec = tmusec = 0` on S_ISREG):
+/// a regular-file input disables `read -t` entirely.
+pub fn is_disk_file(h: HANDLE) -> bool {
+    (unsafe { GetFileType(h) }) == FILE_TYPE_DISK
+}
+
+/// Bounded wait until `h` has readable input — the Windows port of GNU
+/// builtins/read.def's select()-backed read_timeout (`shtimer_select`).
+/// Regular files are always readable (select reports them ready). Pipes
+/// are not waitable objects, so poll PeekNamedPipe — a failed peek means
+/// the pipe broke, which select would also report as readable (EOF).
+/// Console input handles (CONIN$, `read < /dev/tty`) are waitable.
+pub fn wait_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
+    match unsafe { GetFileType(h) } {
+        FILE_TYPE_CHAR => {
+            let ms = timeout.as_millis().min(DWORD::MAX as u128 - 1) as DWORD;
+            match unsafe { WaitForSingleObject(h, ms) } {
+                WAIT_OBJECT_0 => ReadWait::Ready,
+                WAIT_TIMEOUT => ReadWait::Timeout,
+                _ => ReadWait::Ready,
+            }
+        }
+        FILE_TYPE_PIPE => {
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                let mut avail: DWORD = 0;
+                let ok = unsafe {
+                    PeekNamedPipe(
+                        h,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut avail,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 || avail > 0 {
+                    return ReadWait::Ready;
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return ReadWait::Timeout;
+                }
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(now)
+                        .min(std::time::Duration::from_millis(2)),
+                );
+            }
+        }
+        _ => ReadWait::Ready,
     }
 }
 

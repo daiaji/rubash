@@ -116,6 +116,14 @@ pub(crate) enum FdError {
 pub(crate) struct FdTable {
     pub(crate) entries: BTreeMap<u32, FdEntry>,
     pub(crate) next_dynamic_fd: u32,
+    /// builtins/read.def read_timeout: while `read -t N` runs, handle-backed
+    /// reads wait at most until this deadline for input. `None` means an
+    /// unbounded read. Only the blocking endpoints (File/CoprocStdout)
+    /// consult it; buffered text endpoints answer instantly.
+    pub(crate) read_deadline: Option<std::time::Instant>,
+    /// Set when a bounded read expired mid-record — GNU still assigns the
+    /// partial input and returns 128+SIGALRM (read.def:539-562).
+    pub(crate) read_timed_out: bool,
 }
 
 impl FdTable {
@@ -123,6 +131,8 @@ impl FdTable {
         let mut table = Self {
             entries: BTreeMap::new(),
             next_dynamic_fd: 10,
+            read_deadline: None,
+            read_timed_out: false,
         };
         table.entries.insert(
             0,
@@ -390,7 +400,7 @@ impl FdTable {
     /// prefetching would steal bytes from sibling slots (GNU zread reads
     /// one byte at a time off unbuffered fds for the same reason).
     fn read_file_bytes(
-        &self,
+        &mut self,
         file: Rc<FileFd>,
         delimiter: u8,
         char_limit: Option<usize>,
@@ -403,6 +413,18 @@ impl FdTable {
         let mut chars = 0usize;
         let mut consumed = false;
         loop {
+            // read.def check_read_timeout + shtimer_select: each byte read
+            // is bounded by the remaining deadline.
+            if let Some(deadline) = self.read_deadline {
+                let now = std::time::Instant::now();
+                let timed_out = now >= deadline
+                    || crate::fd::wait_readable(file.handle, deadline - now)
+                        == crate::fd::ReadWait::Timeout;
+                if timed_out {
+                    self.read_timed_out = true;
+                    break;
+                }
+            }
             let byte = match crate::fd::read_some(file.handle, 1) {
                 Ok(buf) if buf.is_empty() => break,          // EOF
                 Ok(buf) => buf[0],

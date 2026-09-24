@@ -244,6 +244,8 @@ impl Executor {
             last_builtin_write_failed: Cell::new(false),
             redirect_target_memo: RefCell::new(HashMap::new()),
             fd_var_external_undo: Vec::new(),
+            read_deadline: None,
+            read_timed_out: false,
             stdout_capture: None,
             stderr_capture: None,
             host_external_command_handler: None,

@@ -695,6 +695,14 @@ pub struct Executor {
         Option<String>,
         Option<crate::shell::variables::Variable>,
     )>,
+    /// builtins/read.def read_timeout: absolute deadline for `read -t N`
+    /// (and the TMOUT default). Set only while a `read` builtin call is
+    /// active; consulted by the genuinely blocking endpoints (inherited
+    /// process stdin, coproc pipes) — buffered endpoints never wait.
+    pub(crate) read_deadline: Option<std::time::Instant>,
+    /// A bounded read expired mid-line: GNU assigns the partial input and
+    /// returns 128+SIGALRM=142 (read.def:539-562 `goto assign_vars`).
+    pub(crate) read_timed_out: bool,
     stdout_capture: Option<Vec<u8>>,
     stderr_capture: Option<Vec<u8>>,
     host_external_command_handler: Option<HostExternalCommandHandler>,

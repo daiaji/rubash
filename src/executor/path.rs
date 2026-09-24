@@ -1047,6 +1047,11 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
         match normalized.as_str() {
             "/dev/stdin" => return PathBuf::from("CONIN$"),
             "/dev/stdout" | "/dev/stderr" => return PathBuf::from("CONOUT$"),
+            // GNU open("/dev/tty") binds the controlling terminal; the
+            // Windows console device CON resolves to the input buffer under
+            // GENERIC_READ and the screen buffer under GENERIC_WRITE, so a
+            // single name covers `< /dev/tty` and `> /dev/tty` alike.
+            "/dev/tty" => return PathBuf::from("CON"),
             _ => {}
         }
     }
