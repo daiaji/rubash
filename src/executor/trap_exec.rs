@@ -1464,6 +1464,33 @@ impl Executor {
             handled = true;
         }
 
+        // `{var}<<EOF` heredocs live in heredoc_redirects, not redirects.
+        // GNU redir.c make_here_document writes the body to a temp file and
+        // redir_varassign binds the fresh fd to var persistently under exec
+        // (vredir1.sub: `exec {v}<<-EOF` leaves v holding a readable fd).
+        for redirect in &cmd.heredoc_redirects {
+            if redirect.fd_var.is_none() {
+                continue;
+            }
+            handled = true;
+            match self.execute_dynamic_fd_var_heredoc(redirect, false) {
+                Ok(_) => {}
+                Err(ExecuteError::IoError(error)) => {
+                    let mut stderr = Vec::new();
+                    writeln!(
+                        &mut stderr,
+                        "{}{}",
+                        self.diagnostic_prefix(),
+                        crate::posix_errors::message(&error)
+                    )?;
+                    self.write_default_stderr(&stderr)?;
+                    self.exit_code = 1;
+                    return Ok(Some(1));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
         if let Some((fd, input)) = self.exec_heredoc_fd_input(cmd) {
             self.set_fd_input_text(fd, input, fd != 0);
             return Ok(Some(0));
@@ -1934,7 +1961,92 @@ impl Executor {
                 Err(error) => return Err(error),
             }
         }
+        // `{var}<<EOF` heredocs live in heredoc_redirects, not redirects.
+        // GNU redir.c make_here_document writes the body to a temp file and
+        // redir_varassign binds the fresh fd to var, so `exec {v}<<-EOF`
+        // leaves v holding a readable descriptor (vredir1.sub).
+        for redirect in &cmd.heredoc_redirects {
+            let Some(name) = redirect.fd_var.as_deref() else {
+                continue;
+            };
+            let resolved = self
+                .resolved_variable_name(name)
+                .unwrap_or_else(|| name.to_string());
+            let prior = self.shell_state.env_vars.get(&resolved).cloned();
+            let prior_typed = self.shell_state.variables.get(&resolved).cloned();
+            self.fd_var_external_undo.push((resolved, prior, prior_typed));
+            match self.execute_dynamic_fd_var_heredoc(redirect, auto_close) {
+                Ok(_) => {}
+                Err(ExecuteError::IoError(error)) => {
+                    let mut stderr = Vec::new();
+                    writeln!(
+                        &mut stderr,
+                        "{}{}",
+                        self.diagnostic_prefix(),
+                        crate::posix_errors::message(&error)
+                    )?;
+                    self.write_default_stderr(&stderr)?;
+                    self.exit_code = 1;
+                    redirect_failed = true;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(redirect_failed)
+    }
+
+    /// `{var}<<[-]EOF` / `{var}<<<word` — allocate a dynamic fd holding the
+    /// heredoc/herestring body and bind it to var (redir.c make_here_document
+    /// + redir_varassign).
+    fn execute_dynamic_fd_var_heredoc(
+        &mut self,
+        redirect: &crate::parser::HereDocRedirect,
+        auto_close: bool,
+    ) -> Result<bool, ExecuteError> {
+        let Some(name) = redirect.fd_var.as_deref() else {
+            return Ok(false);
+        };
+        if self.dynamic_fd_assignment_readonly(name) {
+            let prefix = self.diagnostic_prefix();
+            let payload =
+                format!("{name}: readonly variable\n{prefix}{name}: cannot assign fd to variable");
+            return Err(ExecuteError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                payload,
+            )));
+        }
+        let close_after_command = auto_close
+            && crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "varredir_close");
+        let body = if redirect.body_carrier.is_some() {
+            if redirect.here_string {
+                self.expand_here_string_mut_from_carrier(&redirect.body_carrier)
+            } else {
+                self.expand_heredoc_body_mut_from_carrier(&redirect.body_carrier)
+            }
+        } else if let Some(body) = &redirect.body {
+            self.expand_heredoc_body_mut(body)
+        } else {
+            String::new()
+        };
+        let Some(fd) = self.allocate_dynamic_fd() else {
+            return Err(ExecuteError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("{name}: cannot allocate fd"),
+            )));
+        };
+        self.fd_table
+            .open_input(fd, FdReadEndpoint::text(&body), true);
+        if !self.set_dynamic_fd_variable(name, fd) {
+            self.close_persistent_fd(fd)?;
+            return Err(ExecuteError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("{name}: cannot assign fd to variable"),
+            )));
+        }
+        if close_after_command {
+            self.close_persistent_fd(fd)?;
+        }
+        Ok(true)
     }
 
     /// GNU execute_cmd.c: an external command forks before do_redirections,
