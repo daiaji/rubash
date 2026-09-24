@@ -326,6 +326,16 @@ impl Executor {
                 .unwrap_or_else(|| "/".to_string()),
         };
         env_vars.insert("PWD".to_string(), pwd);
+        // Suites write $TMPDIR into generated scripts unquoted
+        // (posix2.tests conftest2: `$TMPDIR/conftest2 "$@"`); an inherited
+        // Windows backslash path is escape syntax to the shell reader and
+        // corrupts to `D:repo...`. Windows filesystem APIs accept forward
+        // slashes, so normalize the inherited value to the shell-safe form.
+        if let Some(tmpdir) = env_vars.get_mut("TMPDIR") {
+            if tmpdir.contains('\\') {
+                *tmpdir = tmpdir.replace('\\', "/");
+            }
+        }
         env_vars
             .entry("TMPDIR".to_string())
             .or_insert_with(safe_temp_dir_string);
