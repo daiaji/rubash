@@ -18,7 +18,7 @@ use crate::lexer::{
     expand_aliases_in_source, tokenize, tokenize_with_initial_posix,
     AliasLookup, TokenKind,
 };
-use crate::parser::{parse, CommandNode};
+use crate::parser::CommandNode;
 
 /// bashhist.c: does this script turn history on? Detects the long-form
 /// option (set -o history / -o histexpand) and the short flag cluster

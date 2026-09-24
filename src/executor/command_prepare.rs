@@ -219,8 +219,14 @@ impl Executor {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
-                self.exit_code = 1;
-                return Err(ExecuteError::ExitCode(1));
+                // subst.c expand_wdesc_fatal → exp_jump_to_top_level
+                // (FORCE_EOF): fatal expansion errors end the whole
+                // noninteractive script (subshell/pipeline boundaries
+                // contain it). shell.c:1471 run_one_command maps FORCE_EOF
+                // to 127 under `-c`; script mode exits EXECUTION_FAILURE=1.
+                let code = self.expansion_fatal_status();
+                self.exit_code = code;
+                return Err(ExecuteError::ExitCode(code));
             }
             self.exit_code = status;
             if status == 1 {

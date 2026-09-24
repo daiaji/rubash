@@ -1468,6 +1468,25 @@ impl Executor {
                 .map(Some);
         }
 
+        // GNU execute_cmd.c:4617 expand_words runs BEFORE the element's own
+        // do_redirections (execute_builtin_or_function execute_cmd.c:5606),
+        // so a word-expansion diagnostic (`${x?word}`, bad substitution)
+        // writes to the element's ambient fd 2 — the real stderr for a
+        // top-level pipeline — never through the command's own `2>&1`.
+        // Stage helpers expand words via expand_command_word which would
+        // silently substitute the `${x?word}` error word, so run the same
+        // expansion-error check the top-level command path runs first.
+        if let Some((name, message, status)) = self.parameter_expansion_error(command) {
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_default_stderr(line.as_bytes())?;
+            let code = if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
+                self.expansion_fatal_status()
+            } else {
+                status
+            };
+            return Ok(Some((String::new(), String::new(), code)));
+        }
+
         let expanded = self.brace_expanded_pipeline_stage(command);
         let command = &expanded;
         let command = self.split_pipeline_stage_command_word(command);

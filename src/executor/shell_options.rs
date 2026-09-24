@@ -168,8 +168,25 @@ impl Executor {
             return Ok(false);
         };
         match endpoint {
-            FdWriteEndpoint::Stdout => write_stdout_bytes(output)?,
-            FdWriteEndpoint::Stderr => write_stderr_bytes(output)?,
+            // Same dup2 open-file-description semantics as write_fd_endpoint:
+            // a write to an fd bound to Stdout/Stderr follows the live
+            // capture (pipe/command substitution), not the raw process stdio.
+            FdWriteEndpoint::Stdout => {
+                if stdout_capture_active() {
+                    stdout_capture_write(output)?;
+                } else if let Some(capture) = &mut self.stdout_capture {
+                    capture.write_all(output)?;
+                } else {
+                    write_stdout_bytes(output)?;
+                }
+            }
+            FdWriteEndpoint::Stderr => {
+                if let Some(capture) = &mut self.stderr_capture {
+                    capture.write_all(output)?;
+                } else {
+                    write_stderr_bytes(output)?;
+                }
+            }
             FdWriteEndpoint::CoprocStdin { fd, .. } => {
                 crate::fd::write_all(fd.handle, output)?;
             }
@@ -227,17 +244,10 @@ impl Executor {
         &mut self,
         output: &[u8],
     ) -> Result<(), ExecuteError> {
-        // Thread-local capture (pipeline stages for builtins that write to
-        // the process stdout) wins over the Executor field capture.
-        if stdout_capture_active() {
-            stdout_capture_write(output)?;
-            return Ok(());
-        }
-        if let Some(capture) = &mut self.stdout_capture {
-            capture.write_all(output)?;
-            return Ok(());
-        }
-
+        // fd 1's bound endpoint decides the destination (dup2 snapshot
+        // semantics): the Stdout arm inside write_fd_endpoint resolves to
+        // the active capture or raw stdio, and a `1>&2` binding correctly
+        // follows fd 2 instead.
         self.write_fd_endpoint(1, output)?;
         Ok(())
     }
@@ -246,10 +256,8 @@ impl Executor {
         &mut self,
         output: &[u8],
     ) -> Result<(), ExecuteError> {
-        if let Some(capture) = &mut self.stderr_capture {
-            capture.write_all(output)?;
-            return Ok(());
-        }
+        // Same: fd 2 may be bound to Stdout by `2>&1`, so the capture
+        // buffers are consulted inside the endpoint arms, not first.
         self.write_fd_endpoint(2, output)?;
         Ok(())
     }
@@ -268,8 +276,25 @@ impl Executor {
             return Ok(());
         };
         match endpoint {
-            FdWriteEndpoint::Stdout => write_stdout_bytes(output)?,
-            FdWriteEndpoint::Stderr => write_stderr_bytes(output)?,
+            // GNU dup2 (`2>&1`) copies the open file description: a write to
+            // an fd bound to Stdout must land wherever fd 1 currently goes —
+            // the active stdout capture/pipe — not the raw process stdout.
+            FdWriteEndpoint::Stdout => {
+                if stdout_capture_active() {
+                    stdout_capture_write(output)?;
+                } else if let Some(capture) = &mut self.stdout_capture {
+                    capture.write_all(output)?;
+                } else {
+                    write_stdout_bytes(output)?;
+                }
+            }
+            FdWriteEndpoint::Stderr => {
+                if let Some(capture) = &mut self.stderr_capture {
+                    capture.write_all(output)?;
+                } else {
+                    write_stderr_bytes(output)?;
+                }
+            }
             FdWriteEndpoint::CoprocStdin { fd, .. } => {
                 crate::fd::write_all(fd.handle, output).map_err(|_| {
                     io::Error::new(io::ErrorKind::BrokenPipe, "coprocess input is closed")
