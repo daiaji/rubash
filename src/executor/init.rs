@@ -29,6 +29,21 @@ impl Executor {
             env_vars.entry("PATH".to_string()).or_insert(path_val);
         }
 
+        // Pin the host's POSIX toolset directory before scripts can
+        // overwrite PATH: `PATH=/bin:/usr/bin` (invocation.tests) and
+        // `command -p` (command.def _CS_PATH) both need the logical bin
+        // namespace to keep resolving. env_var writes sync into the process
+        // environment, so a runtime probe of std::env PATH is polluted.
+        #[cfg(windows)]
+        if !env_vars.contains_key("__RUBASH_POSIX_TOOLS_DIR") {
+            if let Some(dir) = crate::executor::path::windows_posix_tools_dir(&env_vars) {
+                env_vars.insert(
+                    "__RUBASH_POSIX_TOOLS_DIR".to_string(),
+                    dir.to_string_lossy().to_string(),
+                );
+            }
+        }
+
         // Seed the trap table a shell inherits from its environment: traps
         // ignored at startup become hard-ignores (trap.c), and WSL's init
         // leaves SIGRTMIN ignored for every child, which the GNU 5.3.0

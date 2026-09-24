@@ -320,19 +320,8 @@ pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
         // POSIX bin directory — the standard utilities live wherever the
         // host keeps its toolset (Git usr/bin, WinuxCmd links), discovered
         // from the real PATH as the first directory holding a full set.
-        let path_value = _env_vars
-            .get("PATH")
-            .cloned()
-            .or_else(|| std::env::var("PATH").ok())
-            .unwrap_or_default();
-        for dir in std::env::split_paths(&path_value) {
-            if ["sh.exe", "cat.exe", "rm.exe"]
-                .iter()
-                .all(|name| dir.join(name).is_file())
-            {
-                dirs.push(dir);
-                break;
-            }
+        if let Some(dir) = windows_posix_tools_dir(_env_vars) {
+            dirs.push(dir);
         }
         return dirs
             .into_iter()
@@ -1163,6 +1152,38 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
         }
     }
 
+    // Logical POSIX bin dirs name the system toolset namespace. With no
+    // configured shell root, `PATH=/bin:/usr/bin` (invocation.tests) or
+    // `/bin/ls` must still reach the host's POSIX utilities — map them to
+    // the toolset directory discovered from the real PATH, the same
+    // provider standard_path uses for `command -p`.
+    if cfg!(windows) && shell_root.is_none() {
+        if let Some(dir) = windows_posix_tools_dir(env_vars) {
+            const POSIX_BIN_DIRS: &[&str] =
+                &["/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin", "/usr/local/sbin"];
+            for base in POSIX_BIN_DIRS {
+                if normalized == *base {
+                    return dir;
+                }
+                if let Some(rest) = normalized
+                    .strip_prefix(base)
+                    .filter(|rest| rest.starts_with('/'))
+                {
+                    let candidate =
+                        dir.join(rest.trim_start_matches('/').replace('/', "\\"));
+                    // The toolset holds `X.exe`; the logical name is bare.
+                    // Probe extensions so `/bin/sh` resolves to the real
+                    // file — GNU open(2) then reports ENOTDIR for `cd`,
+                    // not ENOENT (errors.tests:225).
+                    if let Some(found) = executable_candidate(&candidate, env_vars) {
+                        return found;
+                    }
+                    return candidate;
+                }
+            }
+        }
+    }
+
     if let Some(root) = shell_root {
         if let Some(mapped) = map_logical_path(&normalized, &root) {
             return mapped;
@@ -1305,6 +1326,35 @@ fn configured_shell_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> 
 
 pub(crate) fn shell_root_configured(env_vars: &HashMap<String, String>) -> bool {
     configured_shell_root(env_vars).is_some()
+}
+
+/// The host directory holding the POSIX standard utilities — the first
+/// real-PATH entry containing a full toolset (sh/cat/rm). Used for
+/// `command -p`'s guaranteed-utility PATH (command.def) and for mapping
+/// the logical `/bin`/`/usr/bin` namespace when no shell root is
+/// configured.
+#[cfg(windows)]
+pub(crate) fn windows_posix_tools_dir(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+    let tools_dir = |path_value: &str| {
+        std::env::split_paths(path_value).find(|dir| {
+            ["sh.exe", "cat.exe", "rm.exe"]
+                .iter()
+                .all(|name| dir.join(name).is_file())
+        })
+    };
+    // The toolset location is a host property: a script that overwrites
+    // PATH (`PATH=/bin:/usr/bin`, invocation.tests) must not lose it, so
+    // Executor::new pins the directory found on the startup PATH into
+    // __RUBASH_POSIX_TOOLS_DIR. Probing the live process PATH is useless —
+    // env_var writes sync into it before the lookup runs.
+    if let Some(pinned) = env_vars
+        .get("__RUBASH_POSIX_TOOLS_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir())
+    {
+        return Some(pinned);
+    }
+    env_vars.get("PATH").and_then(|path| tools_dir(path))
 }
 
 fn map_windows_home_path(normalized: &str, env_vars: &HashMap<String, String>) -> Option<PathBuf> {
